@@ -16,4 +16,9 @@
     <ProjectReference Include="..\AIPlatform.Infrastructure\AIPlatform.Infrastructure.csproj" />
   </ItemGroup>
 
+  <ItemGroup Condition="'$(StudioDesktopPublish)' == 'true'">
+    <Content Update="appsettings*.json" CopyToPublishDirectory="Never" />
+    <Content Update="appsettings.json;appsettings.Desktop.json" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

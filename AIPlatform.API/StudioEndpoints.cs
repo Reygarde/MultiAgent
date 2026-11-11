@@ -30,7 +30,38 @@ public static class StudioEndpoints
             var mission = missions.Get(id);
             return mission is null ? TypedResults.NotFound() : TypedResults.Ok(MissionResponse.From(mission));
         }).WithName("GetMission").WithSummary("Poll a mission's state")
-            .WithDescription("Completed, GeneratedUnverified, Failed and Cancelled are terminal states.");
+            .WithDescription("Poll real execution states including AwaitingApproval, Verified, BuildFailed and TestsFailed.");
+
+        app.MapGet("/api/missions/{id:guid}/execution-plan",
+            async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
+                Guid id, IMissionService missions, IExecutionPlanService plans, CancellationToken token) =>
+        {
+            var mission = missions.Get(id);
+            if (mission is null)
+                return TypedResults.NotFound();
+            if (mission.Status != MissionStatus.AwaitingApproval)
+                return TypedResults.Conflict();
+            return TypedResults.Ok(ExecutionPlanResponse.From(await plans.GetAsync(id, token)));
+        }).WithName("GetMissionExecutionPlan").WithSummary("Review this mission's bounded execution plan")
+            .WithDescription("Includes the workspace/configuration fingerprint, offline image, limits and allowed operations.");
+
+        app.MapPost("/api/missions/{id:guid}/approval",
+            async Task<Results<Accepted, NotFound, Conflict>> (
+                Guid id, DecideMissionApprovalRequest request, IMissionService missions,
+                IExecutionPlanService plans, CancellationToken token) =>
+        {
+            var mission = missions.Get(id);
+            if (mission is null)
+                return TypedResults.NotFound();
+            if (mission.Status != MissionStatus.AwaitingApproval)
+                return TypedResults.Conflict();
+            var plan = await plans.GetAsync(id, token);
+            if (!string.Equals(request.Fingerprint, plan.Fingerprint, StringComparison.Ordinal))
+                return TypedResults.Conflict();
+            return missions.DecideApproval(id, request.Approved, plan.Fingerprint)
+                ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
+        }).WithName("DecideMissionApproval").WithSummary("Authorize or refuse the reviewed offline workflow")
+            .WithDescription("A stale plan returns 409. Approval covers only this workspace, bounded corrections, build and tests.");
 
         app.MapPost("/api/missions/{id:guid}/cancel", Results<Accepted, NotFound, Conflict> (
             Guid id, IMissionService missions, CancellationToken token) =>
@@ -108,7 +139,7 @@ public static class StudioEndpoints
         app.MapGet("/api/sandbox", async (ISandboxRunner sandbox, CancellationToken token) =>
         {
             var availability = await sandbox.GetAvailabilityAsync(token);
-            return TypedResults.Ok(new SandboxResponse(availability.Available, availability.Reason));
+            return TypedResults.Ok(new SandboxResponse(availability.Available, availability.Reason, availability.EngineAvailable));
         }).WithName("GetSandbox").WithSummary("Check offline container isolation")
             .WithDescription("Does not pull an image, install Docker or execute generated code.");
     }

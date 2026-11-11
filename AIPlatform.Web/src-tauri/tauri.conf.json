@@ -1,0 +1,43 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "AIPlatform Studio",
+  "version": "0.4.0",
+  "identifier": "com.aiplatform.studio",
+  "build": {
+    "beforeDevCommand": "npm run desktop:prepare && npm run dev",
+    "beforeBuildCommand": "npm run desktop:prepare && npm run build",
+    "devUrl": "http://127.0.0.1:5173",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{
+      "label": "main",
+      "create": false,
+      "title": "AIPlatform Studio",
+      "width": 1340,
+      "height": 900,
+      "minWidth": 800,
+      "minHeight": 600
+    }],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src ipc: http://ipc.localhost http://127.0.0.1:*; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:* ws://127.0.0.1:5173; object-src 'none'; base-uri 'none'; frame-src 'none'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/aiplatform-api"],
+    "resources": { "resources/backend/": "backend/" },
+    "icon": ["icons/icon.ico"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": {
+        "installMode": "currentUser",
+        "startMenuFolder": "AIPlatform Studio",
+        "displayLanguageSelector": false,
+        "languages": ["French"]
+      }
+    }
+  }
+}

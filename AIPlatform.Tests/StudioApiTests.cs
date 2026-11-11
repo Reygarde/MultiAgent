@@ -124,6 +124,56 @@ public sealed class StudioApiTests
     }
 
     [Fact]
+    public async Task ReviewsPlanRejectsStaleConsentAndResumesWithoutBlockingOtherMissions()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture, sandbox: new FakeSandbox(true));
+        using var client = factory.CreateClient();
+        var initial = await (await client.PostAsJsonAsync("/api/missions",
+            new { task = "Create library", kind = "Project" })).Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        Assert.Equal(MissionStatus.AwaitingApproval, (await WaitForTerminal(client, initial!.Id)).Status);
+        var plan = await client.GetFromJsonAsync<ExecutionPlanResponse>($"/api/missions/{initial.Id}/execution-plan");
+        Assert.Equal(3, plan!.MaxCorrectionAttempts);
+        Assert.Contains(plan.Operations, operation => operation.Contains("no network", StringComparison.OrdinalIgnoreCase));
+        using var stale = await client.PostAsJsonAsync($"/api/missions/{initial.Id}/approval",
+            new { approved = true, fingerprint = "stale" });
+        Assert.Equal(HttpStatusCode.Conflict, stale.StatusCode);
+        var chat = await (await client.PostAsJsonAsync("/api/missions",
+            new { task = "A chat while authorization is pending", agentId = "GeneralAgent" }))
+            .Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        Assert.Equal(MissionStatus.Completed, (await WaitForTerminal(client, chat!.Id)).Status);
+        using var approval = await client.PostAsJsonAsync($"/api/missions/{initial.Id}/approval",
+            new { approved = true, plan.Fingerprint });
+        Assert.Equal(HttpStatusCode.Accepted, approval.StatusCode);
+        var result = await WaitForTerminal(client, initial.Id);
+        Assert.Equal(MissionStatus.Verified, result.Status);
+        Assert.Equal(2, result.Verification.Count);
+        Assert.All(result.Verification, item => Assert.True(item.DurationMilliseconds >= 0));
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/missions/{initial.Id}/approval",
+            new { approved = true, plan.Fingerprint })).StatusCode);
+    }
+
+    [Fact]
+    public async Task RefusingExecutionRetainsFilesWithExplicitSkippedResults()
+    {
+        using var fixture = new StudioFixture();
+        var sandbox = new FakeSandbox(true);
+        using var factory = Factory(fixture, sandbox: sandbox);
+        using var client = factory.CreateClient();
+        var initial = await (await client.PostAsJsonAsync("/api/missions",
+            new { task = "Create library", kind = "Project" })).Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        await WaitForTerminal(client, initial!.Id);
+        var plan = await client.GetFromJsonAsync<ExecutionPlanResponse>($"/api/missions/{initial.Id}/execution-plan");
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync($"/api/missions/{initial.Id}/approval",
+            new { approved = false, plan!.Fingerprint })).StatusCode);
+        var result = await WaitForTerminal(client, initial.Id);
+        Assert.Equal(MissionStatus.GeneratedUnverified, result.Status);
+        Assert.True(result.HasWorkspace);
+        Assert.All(result.Verification, item => Assert.Equal("Skipped", item.Status));
+        Assert.Empty(sandbox.Calls);
+    }
+
+    [Fact]
     public async Task UnknownIdentifiersReturn404AndExternalOriginsAreForbidden()
     {
         using var fixture = new StudioFixture();
@@ -132,9 +182,11 @@ public sealed class StudioApiTests
         var id = Guid.NewGuid();
         foreach (var path in new[] { $"/api/missions/{id}", $"/api/missions/{id}/events",
                      $"/api/missions/{id}/verification", $"/api/workspaces/{id}/files",
-                     $"/api/workspaces/{id}/file?path=README.md" })
+                     $"/api/workspaces/{id}/file?path=README.md", $"/api/missions/{id}/execution-plan" })
             Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(path)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync($"/api/missions/{id}/cancel", null)).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync($"/api/missions/{id}/approval",
+            new { approved = true, fingerprint = "missing" })).StatusCode);
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/missions");
         request.Headers.Add("Origin", "https://untrusted.example");
         request.Content = JsonContent.Create(new { task = "hello" });
@@ -151,11 +203,12 @@ public sealed class StudioApiTests
         var paths = document.RootElement.GetProperty("paths");
         foreach (var path in new[] { "/api/missions", "/api/missions/{id}", "/api/missions/{id}/events",
                      "/api/missions/{id}/cancel", "/api/workspaces", "/api/workspaces/{id}/file",
-                     "/api/models/local", "/api/sandbox" })
+                     "/api/models/local", "/api/sandbox", "/api/missions/{id}/approval", "/api/missions/{id}/execution-plan" })
             Assert.True(paths.TryGetProperty(path, out _), path);
     }
 
-    private static WebApplicationFactory<Program> Factory(StudioFixture fixture, ILLMProvider? provider = null) =>
+    private static WebApplicationFactory<Program> Factory(
+        StudioFixture fixture, ILLMProvider? provider = null, ISandboxRunner? sandbox = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment("Development");
@@ -169,7 +222,7 @@ public sealed class StudioApiTests
                 services.RemoveAll<IProjectGenerator>();
                 services.AddSingleton<IProjectGenerator>(new FakeProjectGenerator());
                 services.RemoveAll<ISandboxRunner>();
-                services.AddSingleton<ISandboxRunner>(new FakeSandbox());
+                services.AddSingleton(sandbox ?? new FakeSandbox());
             });
         });
 

@@ -1,5 +1,9 @@
 @AIPlatform.API_HostAddress = http://localhost:5167
 
+### Disponibilite du processus API (profil Development ; session protegee via Tauri en Desktop)
+GET {{AIPlatform.API_HostAddress}}/api/health
+Accept: application/json
+
 ### Agents configures
 GET {{AIPlatform.API_HostAddress}}/api/agents
 Accept: application/json
@@ -85,3 +89,30 @@ GET {{AIPlatform.API_HostAddress}}/api/models/local
 
 ### Disponibilite de l'isolation (aucun telechargement ni execution)
 GET {{AIPlatform.API_HostAddress}}/api/sandbox
+
+### Plan reel, uniquement lorsque la mission est AwaitingApproval
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/execution-plan
+
+### Copier l'empreinte du plan apres revue des fichiers et operations
+@planFingerprint = replace-with-reviewed-plan-fingerprint
+
+### Autoriser ce plan (202 ; 409 si obsolete ou deja traite)
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/approval
+Content-Type: application/json
+
+{
+  "approved": true,
+  "fingerprint": "{{planFingerprint}}"
+}
+
+### Refuser l'execution (alternative a l'autorisation)
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/approval
+Content-Type: application/json
+
+{
+  "approved": false,
+  "fingerprint": "{{planFingerprint}}"
+}
+
+### Mission inexistante : 404
+GET {{AIPlatform.API_HostAddress}}/api/missions/00000000-0000-0000-0000-000000000000/execution-plan

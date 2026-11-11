@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using AIPlatform.API;
+using AIPlatform.API.Services;
 using AIPlatform.Core;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -24,6 +25,9 @@ public sealed class ApiTests
         Assert.Single(agents, agent => agent.IsRouter);
         Assert.Equal(2, models!.Length);
         Assert.Contains(models, model => model.AssignedAgents.Contains("DeveloperAgent"));
+        var health = await client.GetFromJsonAsync<BackendHealthResponse>("/api/health");
+        Assert.True(health!.Ready);
+        Assert.Equal(Environment.ProcessId, health.ProcessId);
         using var document = JsonDocument.Parse(await client.GetStringAsync("/openapi/v1.json"));
         var paths = document.RootElement.GetProperty("paths");
         Assert.True(paths.TryGetProperty("/api/agents", out _));

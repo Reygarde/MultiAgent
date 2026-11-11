@@ -15,14 +15,17 @@ public sealed class ContainerProcess : IContainerProcess
     public async Task<ContainerProcessResult> RunAsync(
         IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         using var process = new Process
         {
             StartInfo = new()
             {
-                FileName = "docker",
+                FileName = ResolveDockerExecutable(),
                 UseShellExecute = false,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
                 CreateNoWindow = true
             }
         };
@@ -68,5 +71,12 @@ public sealed class ContainerProcess : IContainerProcess
                 }
             }
         }
+    }
+
+    private static string ResolveDockerExecutable()
+    {
+        var desktop = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "Docker", "Docker", "resources", "bin", "docker.exe");
+        return OperatingSystem.IsWindows() && File.Exists(desktop) ? desktop : "docker";
     }
 }

@@ -6,6 +6,10 @@ TestResults/
 **/StudioData/
 **/node_modules/
 **/dist/
+**/src-tauri/target/
+**/src-tauri/binaries/
+**/src-tauri/resources/backend/
+**/src-tauri/gen/
 **/playwright-report/
 **/test-results/
 *.tsbuildinfo

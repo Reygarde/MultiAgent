@@ -23,17 +23,32 @@ public sealed record MissionResponse(
 }
 
 /// <summary>Timestamped real execution event with monotonically increasing sequence.</summary>
-public sealed record MissionEventResponse(int Sequence, DateTimeOffset Timestamp, string Step, StepStatus Status, string Message)
+public sealed record MissionEventResponse(int Sequence, DateTimeOffset Timestamp, string Step, StepStatus Status,
+    string Message, double? DurationMilliseconds)
 {
     public static MissionEventResponse From(MissionEvent item) =>
-        new(item.Sequence, item.Timestamp, item.Step, item.Status, item.Message);
+        new(item.Sequence, item.Timestamp, item.Step, item.Status, item.Message, item.DurationMilliseconds);
 }
 
 /// <summary>Actual container verification result or explicit unavailability; never inferred from generated text.</summary>
-public sealed record VerificationResponse(string Stage, string Status, int? ExitCode, string Log, int? TotalTests)
+public sealed record VerificationResponse(string Stage, string Status, int? ExitCode, string Log, int? TotalTests,
+    double? DurationMilliseconds, int Attempt, int? WarningCount, int? ErrorCount, int? FailedTests)
 {
     public static VerificationResponse From(VerificationResult item) =>
-        new(item.Stage, item.Status, item.ExitCode, item.Log, item.TotalTests);
+        new(item.Stage, item.Status, item.ExitCode, item.Log, item.TotalTests, item.DurationMilliseconds, item.Attempt,
+            item.WarningCount, item.ErrorCount, item.FailedTests);
+}
+
+/// <summary>Decision bound to the reviewed workspace and execution configuration fingerprint.</summary>
+public sealed record DecideMissionApprovalRequest(bool Approved, string Fingerprint);
+
+/// <summary>Bounded offline build/test operations awaiting human approval; no arbitrary commands are accepted.</summary>
+public sealed record ExecutionPlanResponse(
+    string Fingerprint, string Image, int MemoryMegabytes, int CpuCount, int TimeoutSeconds,
+    int MaxCorrectionAttempts, IReadOnlyList<string> Operations)
+{
+    public static ExecutionPlanResponse From(ExecutionPlan plan) => new(plan.Fingerprint, plan.Image,
+        plan.MemoryMegabytes, plan.CpuCount, plan.TimeoutSeconds, plan.MaxCorrectionAttempts, plan.Operations);
 }
 
 /// <summary>Workspace file metadata; no absolute host path is exposed.</summary>
@@ -49,4 +64,4 @@ public sealed record LocalModelResponse(string Name, bool Installed, bool Loaded
 public sealed record LocalModelsResponse(bool Available, string? Error, IReadOnlyList<LocalModelResponse> Models);
 
 /// <summary>Availability of offline Docker isolation; execution still requires mission approval.</summary>
-public sealed record SandboxResponse(bool Available, string Reason);
+public sealed record SandboxResponse(bool Available, string Reason, bool EngineAvailable = false);

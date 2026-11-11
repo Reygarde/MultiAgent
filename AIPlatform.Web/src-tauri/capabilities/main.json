@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "main",
+  "description": "Only inspect or restart the fixed owned backend. No shell, filesystem or arbitrary network commands.",
+  "windows": ["main"],
+  "permissions": ["allow-backend-status", "allow-restart-backend"]
+}

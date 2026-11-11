@@ -37,7 +37,7 @@ public sealed class MissionStore : IMissionService, IDisposable
                 ?? throw new InvalidDataException($"Invalid saved mission: {Path.GetFileName(path)}.");
             if (Path.GetFileNameWithoutExtension(path) != snapshot.Id.ToString("N"))
                 throw new InvalidDataException("A saved mission identifier does not match its filename.");
-            if (!snapshot.IsTerminal)
+            if (!snapshot.IsTerminal && snapshot.Status != MissionStatus.AwaitingApproval)
             {
                 snapshot = snapshot with
                 {
@@ -49,6 +49,8 @@ public sealed class MissionStore : IMissionService, IDisposable
                 Save(snapshot);
             }
             missions.Add(snapshot.Id, snapshot);
+            if (snapshot.Status == MissionStatus.AwaitingApproval)
+                cancellations.Add(snapshot.Id, new());
         }
     }
 
@@ -102,17 +104,48 @@ public sealed class MissionStore : IMissionService, IDisposable
                 return false;
             // Cancel under the same lock used to commit completion: neither can win after the other.
             cancellations[id].Cancel();
-            if (current.Status == MissionStatus.Queued)
+            if (current.Status is MissionStatus.Queued or MissionStatus.AwaitingApproval)
+            {
+                foreach (var active in current.Events.GroupBy(item => item.Step).Select(group => group.Last())
+                             .Where(item => item.Status == StepStatus.Running))
+                    AddEvent(id, active.Step, StepStatus.Cancelled, "Cancelled before execution or resumption.");
+                Update(id, mission => mission with { Status = MissionStatus.Cancelled });
+                AddEvent(id, "Mission", StepStatus.Cancelled, "Mission cancelled.");
+            }
+            return true;
+        }
+    }
+
+    public bool DecideApproval(Guid id, bool approved, string fingerprint)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.Status != MissionStatus.AwaitingApproval ||
+                cancellations[id].IsCancellationRequested)
+                return false;
+            Update(id, mission => mission with
+            {
+                SandboxApproved = approved,
+                ApprovalFingerprint = approved ? fingerprint : null,
+                Status = approved ? MissionStatus.Queued : MissionStatus.GeneratedUnverified
+            });
+            AddEvent(id, "Authorization", approved ? StepStatus.Succeeded : StepStatus.Skipped,
+                approved ? "User approved this workspace and bounded execution plan." :
+                    "User refused execution. Generated files retained; build and tests not executed.");
+            if (approved && !queue.Writer.TryWrite(id))
+                throw new InvalidOperationException("The mission worker queue is closed.");
+            if (!approved)
+            {
                 Update(id, mission => mission with
                 {
-                    Status = MissionStatus.Cancelled,
-                    Events =
+                    Verification =
                     [
-                        .. mission.Events,
-                        new(mission.Events.Count + 1, DateTimeOffset.UtcNow, "Queue", StepStatus.Cancelled, "Cancelled before execution."),
-                        new(mission.Events.Count + 2, DateTimeOffset.UtcNow, "Mission", StepStatus.Cancelled, "Mission cancelled.")
+                        .. mission.Verification, new("Build", "Skipped", null, "Human approval refused; not executed."),
+                        new("Tests", "Skipped", null, "Human approval refused; not executed.")
                     ]
                 });
+                AddEvent(id, "Mission", StepStatus.Skipped, "GeneratedUnverified: execution refused by the user.");
+            }
             return true;
         }
     }
@@ -132,7 +165,7 @@ public sealed class MissionStore : IMissionService, IDisposable
         {
             var previous = missions[id];
             var next = update(previous) with { UpdatedAt = DateTimeOffset.UtcNow };
-            if (next.Status is MissionStatus.Completed or MissionStatus.GeneratedUnverified)
+            if (next.Status is MissionStatus.Completed or MissionStatus.GeneratedUnverified or MissionStatus.Verified)
                 cancellations[id].Token.ThrowIfCancellationRequested();
             Save(next);
             missions[id] = next;
@@ -141,10 +174,14 @@ public sealed class MissionStore : IMissionService, IDisposable
     }
 
     public void AddEvent(Guid id, string step, StepStatus status, string message) =>
-        Update(id, mission => mission with
+        Update(id, mission =>
         {
-            Events = mission.Events.Append(new(mission.Events.Count + 1,
-                DateTimeOffset.UtcNow, step, status, message)).ToArray()
+            var now = DateTimeOffset.UtcNow;
+            var previous = mission.Events.LastOrDefault(item => item.Step == step);
+            double? duration = status != StepStatus.Running && previous?.Status == StepStatus.Running
+                ? (now - previous.Timestamp).TotalMilliseconds : null;
+            return mission with { Events = mission.Events.Append(new(mission.Events.Count + 1,
+                now, step, status, message, duration)).ToArray() };
         });
 
     private void Save(MissionSnapshot snapshot)

@@ -19,7 +19,7 @@ const navigation = [
 ] as const
 type Page = typeof navigation[number]['id']
 
-export default function App() {
+export default function App({ restartBackend }: { restartBackend?: () => Promise<void> } = {}) {
   const [page, setPage] = useState<Page>('Workspace')
   const [agents, setAgents] = useState<Agent[]>([])
   const [models, setModels] = useState<Model[]>([])
@@ -33,8 +33,9 @@ export default function App() {
   const [task, setTask] = useState('')
   const [kind, setKind] = useState<MissionKind>('Chat')
   const [agentId, setAgentId] = useState('')
-  const [approved, setApproved] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [confirmRestart, setConfirmRestart] = useState(false)
+  const [restartError, setRestartError] = useState<string | null>(null)
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const selected = missions.find(mission => mission.id === selectedId) ?? missions[0]
   const activeCount = missions.filter(isActive).length
@@ -95,9 +96,9 @@ export default function App() {
     if (!task.trim() || busy) return
     setBusy(true); setError(null)
     try {
-      const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: kind === 'Project' && approved })
+      const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: false })
       setMissions(previous => [mission, ...previous.filter(item => item.id !== mission.id)])
-      setSelectedId(mission.id); setTask(''); setApproved(false)
+      setSelectedId(mission.id); setTask('')
     } catch (error) { setError(errorMessage(error)) }
     finally { setBusy(false) }
   }
@@ -128,7 +129,7 @@ export default function App() {
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
           <p>Exécution locale · aucun cloud</p><div className="local-card-line"><Cpu size={13} /> Une mission IA active maximum</div></div>
-        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · MVP 2</small></span><ShieldCheck size={16} /></div>
+        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · MVP 4</small></span><ShieldCheck size={16} /></div>
       </div>
     </aside>
     <main>
@@ -141,6 +142,27 @@ export default function App() {
         {error && <div className="notice danger" role="alert">{error}<button onClick={() => setError(null)} aria-label="Fermer l’erreur">×</button></div>}
         {pollError && <div className="notice danger" role="alert">{pollError} Les états affichés peuvent être périmés.</div>}
         {telemetryError && <div className="notice warning" role="alert">{telemetryError}</div>}
+        <section className="service-status panel" aria-label="État des services">
+          <span><span className={`status-dot ${pollError ? 'amber' : 'green'}`} />
+            API : {pollError ? 'indisponible' : loading ? 'vérification' : 'prête'}{restartBackend ? ' · session protégée' : ' · développement'}</span>
+          <span><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} />
+            Ollama : {local ? local.available ? 'disponible' : 'indisponible' : 'vérification'}</span>
+          <span><span className={`status-dot ${sandbox?.engineAvailable || sandbox?.available ? 'green' : 'amber'}`} />
+            Docker : {sandbox ? sandbox.engineAvailable || sandbox.available ? 'moteur prêt' : 'indisponible' : 'vérification'}</span>
+          {restartBackend && <button className="button secondary" onClick={() => setConfirmRestart(true)}>Relancer le backend</button>}
+          {local && !local.available && <p>Démarrez Ollama ou installez-le depuis ollama.com/download/windows, puis laissez Studio revérifier sa disponibilité.</p>}
+          {sandbox && !(sandbox.engineAvailable || sandbox.available) && <p>Démarrez Docker Desktop en mode Linux. Installation : docker.com/products/docker-desktop. La génération reste possible sans compilation.</p>}
+          {sandbox?.engineAvailable && !sandbox.available && <p>Docker fonctionne mais la vérification est indisponible : {sandbox.reason}</p>}
+          {confirmRestart && restartBackend && <div className="restart-confirm">
+            <p>Relancer uniquement l’API ? Les missions actives seront annulées et les brouillons non envoyés réinitialisés. Les fichiers sont conservés. Ollama et Docker restent en service.</p>
+            <button className="button primary" onClick={() => {
+              setConfirmRestart(false); setRestartError(null)
+              void restartBackend().catch(error => setRestartError(errorMessage(error)))
+            }}>Confirmer le redémarrage</button>
+            <button className="button secondary" onClick={() => setConfirmRestart(false)}>Conserver la session</button>
+          </div>}
+          {restartError && <div role="alert" className="notice danger">{restartError}</div>}
+        </section>
         {loading && <div className="loading"><LoaderCircle className="spin" size={18} /> Connexion à l’API locale…</div>}
 
         {page === 'Workspace' && <div className="workspace-grid">
@@ -167,14 +189,18 @@ export default function App() {
                   {mission.response ? <Markdown>{mission.response}</Markdown> : mission.error ? <p className="error-inline">{mission.error}</p>
                     : isActive(mission) ? <p className="muted loading"><LoaderCircle size={15} className="spin" /> {mission.events.at(-1)?.message ?? 'En attente…'}</p>
                     : <p className="muted">Aucune réponse générée.</p>}
-                  {mission.status === 'GeneratedUnverified' && <div className="notice warning">Fichiers disponibles. Compilation et tests NON exécutés.</div>}
+                  {mission.status === 'GeneratedUnverified' && <div className="notice warning">
+                    {mission.verification.some(result => (result.attempt ?? 0) > 0 || result.exitCode !== null)
+                      ? 'Fichiers disponibles. Vérification non aboutie : consultez les résultats des étapes exécutées.'
+                      : 'Fichiers disponibles. Compilation et tests NON exécutés.'}
+                  </div>}
                   {mission.hasWorkspace && <button className="text-button" onClick={() => { setSelectedId(mission.id); setPage('Projects') }}>Explorer les fichiers <ArrowRight size={14} /></button>}
                 </div></div>
               </article>)}
             </section>}
             <form className="composer panel" onSubmit={event => { event.preventDefault(); void submit() }}>
               <div className="composer-options"><label>Mode <select aria-label="Mode de mission" value={kind}
-                onChange={event => { setKind(event.target.value as MissionKind); setAgentId(''); setApproved(false) }}>
+                onChange={event => { setKind(event.target.value as MissionKind); setAgentId('') }}>
                 <option value="Chat">Conversation</option><option value="Project">Projet .NET</option>
               </select></label>
                 <label>Agent <select aria-label="Sélection de l’agent" value={agentId} onChange={event => setAgentId(event.target.value)}>
@@ -185,8 +211,7 @@ export default function App() {
                 value={task} onChange={event => setTask(event.target.value)} rows={3} />
               {kind === 'Project' && <div className="project-consent">
                 <p><ShieldCheck size={14} /> Écriture autorisée uniquement dans un workspace dédié.</p>
-                <label><input type="checkbox" checked={approved} onChange={event => setApproved(event.target.checked)}
-                  disabled={!sandbox?.available} /> J’autorise la compilation et les tests de cette mission en conteneur isolé.</label>
+                <p>Après génération, consultez les fichiers et autorisez ou refusez le plan de compilation et de tests.</p>
                 {!sandbox?.available && <span className="warning-text">Isolation indisponible : fichiers uniquement, aucune exécution sur l’hôte.</span>}
               </div>}
               <div className="composer-footer"><span><ShieldCheck size={13} /> Local · aucun code exécuté sur l’hôte</span>
@@ -195,7 +220,7 @@ export default function App() {
                 </button></div>
             </form>
           </div>
-          <aside className="context-column">{selected ? <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} />
+          <aside className="context-column">{selected ? <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} refresh={refresh} />
             : <section className="panel mission-details"><div className="panel-heading"><h2><Workflow size={16} /> Suivi de mission</h2></div>
               <div className="empty compact"><Workflow size={28} /><p>Les étapes apparaîtront ici dès votre première mission.</p><span>Aucune progression simulée.</span></div></section>}
             <section className="panel safety-card"><ShieldCheck size={20} /><h3>Vous gardez le contrôle.</h3>
@@ -235,7 +260,7 @@ export default function App() {
               <span><strong>{mission.task}</strong><small>{mission.selectedAgent ?? 'Routage en attente'} · {new Date(mission.createdAt).toLocaleString('fr-FR')}</small></span>
               <StatusBadge mission={mission} /><ChevronRight size={16} />
             </button>)}
-          </section>{selected && <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} />}
+          </section>{selected && <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} refresh={refresh} />}
         </div>}
         <footer className="page-footer"><span>AIPlatform Studio</span><span>Les modèles peuvent se tromper. Vérifiez le code avant toute utilisation.</span></footer>
       </div>

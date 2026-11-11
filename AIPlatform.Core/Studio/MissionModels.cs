@@ -1,17 +1,19 @@
 namespace AIPlatform.Core.Studio;
 
 public enum MissionKind { Chat, Project }
-public enum MissionStatus { Queued, Running, Completed, GeneratedUnverified, Failed, Cancelled }
+public enum MissionStatus { Queued, Running, Completed, GeneratedUnverified, Failed, Cancelled, AwaitingApproval, BuildFailed, TestsFailed, Verified }
 public enum StepStatus { Running, Succeeded, Failed, Unavailable, Skipped, Cancelled }
 
 public sealed record MissionSubmission(
     string Task, MissionKind Kind = MissionKind.Chat, string? AgentId = null, bool ApproveSandboxExecution = false);
 
 public sealed record MissionEvent(
-    int Sequence, DateTimeOffset Timestamp, string Step, StepStatus Status, string Message);
+    int Sequence, DateTimeOffset Timestamp, string Step, StepStatus Status, string Message, double? DurationMilliseconds = null);
 
 public sealed record VerificationResult(
-    string Stage, string Status, int? ExitCode, string Log, int? TotalTests = null);
+    string Stage, string Status, int? ExitCode, string Log, int? TotalTests = null,
+    double? DurationMilliseconds = null, int Attempt = 0,
+    int? WarningCount = null, int? ErrorCount = null, int? FailedTests = null);
 
 public sealed record MissionSnapshot(
     Guid Id, string Task, MissionKind Kind, string? RequestedAgent,
@@ -19,16 +21,25 @@ public sealed record MissionSnapshot(
     DateTimeOffset UpdatedAt, string? SelectedAgent, string? SelectedModel,
     string? Reason, bool UsedFallback, string? Response, string? Error,
     bool HasWorkspace, int CorrectionAttempts, IReadOnlyList<MissionEvent> Events,
-    IReadOnlyList<VerificationResult> Verification)
+    IReadOnlyList<VerificationResult> Verification, string? ApprovalFingerprint = null)
 {
-    public bool IsTerminal => Status is not (MissionStatus.Queued or MissionStatus.Running);
+    public bool IsTerminal => Status is not (MissionStatus.Queued or MissionStatus.Running or MissionStatus.AwaitingApproval);
 }
 
 public sealed record GeneratedFile(string Path, string Content);
+// For corrections, Files contains replacements only; omitted files are preserved.
 public sealed record ProjectManifest(string Summary, IReadOnlyList<GeneratedFile> Files);
+public sealed record ExecutionPlan(
+    string Fingerprint, string Image, int MemoryMegabytes, int CpuCount, int TimeoutSeconds,
+    int MaxCorrectionAttempts, IReadOnlyList<string> Operations);
+
+public interface IExecutionPlanService
+{
+    Task<ExecutionPlan> GetAsync(Guid id, CancellationToken cancellationToken);
+}
 public sealed record WorkspaceFile(string Path, long Size);
 public sealed record WorkspaceContent(string Path, string Content);
-public sealed record SandboxAvailability(bool Available, string Reason);
+public sealed record SandboxAvailability(bool Available, string Reason, bool EngineAvailable = false);
 public sealed record LocalModelState(string Name, bool Installed, bool Loaded, bool InUse);
 public sealed record LocalModelsSnapshot(bool Available, string? Error, IReadOnlyList<LocalModelState> Models);
 
@@ -38,6 +49,7 @@ public interface IMissionService
     IReadOnlyList<MissionSnapshot> List();
     MissionSnapshot? Get(Guid id);
     bool Cancel(Guid id);
+    bool DecideApproval(Guid id, bool approved, string fingerprint);
 }
 
 public interface IWorkspaceStore
@@ -75,7 +87,7 @@ public sealed record StudioOptions
     public string DataDirectory { get; init; } = "..\\StudioData";
     public string DeveloperAgentId { get; init; } = "DeveloperAgent";
     public int MaxMissions { get; init; } = 200;
-    public int MaxCorrectionAttempts { get; init; } = 2;
+    public int MaxCorrectionAttempts { get; init; } = 3;
     public int MissionTimeoutSeconds { get; init; } = 900;
     public int GenerationMaxOutputTokens { get; init; } = 6000;
     public int GenerationContextSize { get; init; } = 8192;
@@ -86,7 +98,7 @@ public sealed record StudioOptions
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(DataDirectory) || string.IsNullOrWhiteSpace(DeveloperAgentId) ||
-            MaxMissions is < 1 or > 10000 || MaxCorrectionAttempts is < 0 or > 5 ||
+            MaxMissions is < 1 or > 10000 || MaxCorrectionAttempts is < 0 or > 3 ||
             MissionTimeoutSeconds is < 10 or > 7200 || MaxFiles is < 3 or > 100 ||
             MaxFileBytes is < 1024 or > 1048576 || MaxProjectBytes < MaxFileBytes ||
             MaxProjectBytes > 4194304 || GenerationContextSize is < 2048 or > 32768 ||

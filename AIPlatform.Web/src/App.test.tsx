@@ -9,6 +9,7 @@ vi.mock('./api', () => ({
   api: {
     agents: vi.fn(), models: vi.fn(), missions: vi.fn(), localModels: vi.fn(),
     sandbox: vi.fn(), create: vi.fn(), cancel: vi.fn(), files: vi.fn(), file: vi.fn(),
+    executionPlan: vi.fn(), approve: vi.fn(),
   },
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Error',
 }))
@@ -26,6 +27,19 @@ beforeEach(() => {
 })
 
 describe('Studio dashboard', () => {
+  it('distinguishes a running Docker engine from unavailable sandbox preparation and requires restart confirmation', async () => {
+    vi.mocked(api.sandbox).mockResolvedValue({ available: false, engineAvailable: true, reason: 'Image manquante.' })
+    const restart = vi.fn().mockResolvedValue(undefined)
+    render(<App restartBackend={restart} />)
+    const services = screen.getByRole('region', { name: 'État des services' })
+    await waitFor(() => expect(services).toHaveTextContent('Docker : moteur prêt'))
+    expect(services).toHaveTextContent('Image manquante.')
+    await userEvent.click(screen.getByRole('button', { name: 'Relancer le backend' }))
+    expect(restart).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', { name: 'Confirmer le redémarrage' }))
+    expect(restart).toHaveBeenCalledOnce()
+  })
+
   it('loads API agents dynamically and excludes the router from manual selection', async () => {
     render(<App />)
     const select = await screen.findByRole('combobox', { name: 'Sélection de l’agent' })
@@ -43,7 +57,8 @@ describe('Studio dashboard', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Envoyer la mission' })).toBeDisabled())
     await screen.findByText('Ollama connecté')
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
-    expect(screen.getByRole('checkbox')).toBeDisabled()
+    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.getByText(/Après génération, consultez les fichiers/)).toBeVisible()
     const selector = screen.getByRole('combobox', { name: 'Sélection de l’agent' })
     expect(within(selector).queryByRole('option', { name: 'CustomGeneral' })).not.toBeInTheDocument()
     await userEvent.selectOptions(selector, 'CustomCoder')
@@ -92,6 +107,16 @@ describe('Studio dashboard', () => {
     await waitFor(() => expect(api.cancel).toHaveBeenCalledWith(mission.id))
   })
 
+  it('does not erase actual earlier verification attempts when isolation becomes unavailable', async () => {
+    vi.mocked(api.missions).mockResolvedValue([{ ...mission, verification: [
+      { stage: 'Build', status: 'Failed', exitCode: 1, totalTests: null, attempt: 1, log: 'CS1002' },
+      { stage: 'Build', status: 'Unavailable', exitCode: null, totalTests: null, log: 'Docker unavailable' },
+    ] }])
+    render(<App />)
+    expect(await screen.findByText(/Vérification non aboutie/)).toBeVisible()
+    expect(screen.queryByText('Fichiers disponibles. Compilation et tests NON exécutés.')).not.toBeInTheDocument()
+  })
+
   it('opens the workspace belonging to an older conversation message', async () => {
     const older = { ...mission, id: '22222222-2222-2222-2222-222222222222', task: 'Ancien projet' }
     vi.mocked(api.missions).mockResolvedValue([mission, older])
@@ -100,5 +125,37 @@ describe('Studio dashboard', () => {
     const article = olderMessage.closest('article')!
     await userEvent.click(within(article).getByRole('button', { name: 'Explorer les fichiers' }))
     await waitFor(() => expect(api.files).toHaveBeenCalledWith(older.id, expect.any(AbortSignal)))
+  })
+
+  it.each([true, false])('reviews the scoped plan and submits human decision %s', async approved => {
+    vi.mocked(api.missions).mockResolvedValue([{ ...mission, status: 'AwaitingApproval' }])
+    vi.mocked(api.executionPlan).mockResolvedValue({
+      fingerprint: 'reviewed-files-hash', image: 'sha256:pinned', memoryMegabytes: 2048,
+      cpuCount: 2, timeoutSeconds: 120, maxCorrectionAttempts: 3,
+      operations: ['Offline build and tests only'],
+    })
+    vi.mocked(api.approve).mockResolvedValue(undefined)
+    render(<App />)
+    expect(await screen.findByText('Offline build and tests only')).toBeVisible()
+    expect(screen.getByText(/3 corrections maximum/)).toBeVisible()
+    expect(api.approve).not.toHaveBeenCalled()
+    await userEvent.click(screen.getByRole('button', {
+      name: approved ? 'Autoriser compilation et tests' : 'Refuser l’exécution',
+    }))
+    await waitFor(() => expect(api.approve).toHaveBeenCalledWith(mission.id, approved, 'reviewed-files-hash'))
+  })
+
+  it('surfaces stale approval and requires reviewing a fresh plan', async () => {
+    vi.mocked(api.missions).mockResolvedValue([{ ...mission, status: 'AwaitingApproval' }])
+    vi.mocked(api.executionPlan).mockResolvedValue({
+      fingerprint: 'old', image: 'fixed', memoryMegabytes: 2048, cpuCount: 2,
+      timeoutSeconds: 120, maxCorrectionAttempts: 3, operations: ['Offline build'],
+    })
+    vi.mocked(api.approve).mockRejectedValue(new Error('Plan modifié HTTP 409'))
+    render(<App />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Autoriser compilation et tests' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Plan modifié HTTP 409')
+    expect(screen.queryByRole('button', { name: 'Autoriser compilation et tests' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Recharger le plan' })).toBeVisible()
   })
 })

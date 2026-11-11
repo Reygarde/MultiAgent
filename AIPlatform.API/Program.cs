@@ -8,7 +8,28 @@ using AIPlatform.Infrastructure.Studio;
 using AIPlatform.API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
-if (string.IsNullOrEmpty(builder.Configuration["urls"]))
+var desktop = new DesktopSession(builder.Environment.IsEnvironment("Desktop"),
+    Environment.GetEnvironmentVariable("AIPLATFORM_DESKTOP_TOKEN"));
+if (desktop.Enabled)
+{
+    var settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "AIPlatformStudio", "settings.json");
+    builder.Configuration.AddJsonFile(settings, optional: true, reloadOnChange: false);
+    builder.WebHost.UseUrls("http://127.0.0.1:0").PreferHostingUrls(false);
+    builder.WebHost.ConfigureKestrel(server =>
+    {
+        server.Configure(new ConfigurationBuilder().Build());
+        server.Listen(System.Net.IPAddress.Loopback, 0);
+    });
+    builder.Services.Configure<HostOptions>(options => options.ShutdownTimeout = TimeSpan.FromSeconds(15));
+    builder.Services.AddHostedService<DesktopLifetime>();
+    builder.Services.AddCors(options => options.AddPolicy("Desktop", policy => policy
+        .WithOrigins("http://tauri.localhost", "tauri://localhost", "http://127.0.0.1:5173")
+        .AllowAnyMethod().AllowAnyHeader()));
+}
+else if (!builder.Environment.IsDevelopment())
+    throw new InvalidOperationException("Start the published backend through AIPlatform Studio, or use the Development launch profile.");
+else if (string.IsNullOrEmpty(builder.Configuration["urls"]))
     builder.WebHost.UseUrls("http://localhost:5167");
 
 var configuration = builder.Configuration.GetSection("Platform").Get<PlatformConfiguration>()
@@ -18,7 +39,12 @@ if (configuration.MaxConcurrentMissions != 1)
     throw new InvalidOperationException("Studio MVP requires exactly one active mission.");
 var studio = builder.Configuration.GetSection("Studio").Get<StudioOptions>() ?? new();
 studio.Validate();
-studio = studio with { DataDirectory = Path.GetFullPath(studio.DataDirectory, builder.Environment.ContentRootPath) };
+studio = studio with
+{
+    DataDirectory = desktop.Enabled
+        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIPlatformStudio", "StudioData")
+        : Path.GetFullPath(studio.DataDirectory, builder.Environment.ContentRootPath)
+};
 SafePaths.ValidateStorageDirectory(studio.DataDirectory);
 if (!registry.Candidates.Any(agent => agent.Id == studio.DeveloperAgentId))
     throw new InvalidOperationException("The Studio developer agent must be a registered execution agent.");
@@ -31,6 +57,7 @@ if (registry.Models.Any(model => !string.Equals(model.Provider, "Ollama", String
     throw new InvalidOperationException("Only the Ollama provider is registered in this MVP.");
 
 builder.Services.AddSingleton(configuration);
+builder.Services.AddSingleton(desktop);
 builder.Services.AddSingleton<IAgentRegistry>(registry);
 builder.Services.AddSingleton(ollama);
 builder.Services.AddHttpClient("Ollama", client => client.Timeout = Timeout.InfiniteTimeSpan)
@@ -53,6 +80,7 @@ builder.Services.AddSingleton<IWorkspaceStore, WorkspaceStore>();
 builder.Services.AddSingleton<IProjectGenerator, ProjectGenerator>();
 builder.Services.AddSingleton<IContainerProcess, ContainerProcess>();
 builder.Services.AddSingleton<ISandboxRunner, DockerSandboxRunner>();
+builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
 builder.Services.AddSingleton<MissionProcessor>();
 builder.Services.AddHostedService<MissionWorker>();
 builder.Services.AddSingleton<ILocalModelStatus>(services => new LocalModelStatus(
@@ -67,6 +95,11 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 var app = builder.Build();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
+if (desktop.Enabled)
+{
+    app.UseCors("Desktop");
+    app.Use(desktop.InvokeAsync);
+}
 app.Use(async (context, next) =>
 {
     var address = context.Connection.RemoteIpAddress;
@@ -76,7 +109,7 @@ app.Use(async (context, next) =>
         await TypedResults.Problem(statusCode: 403, title: "Studio MVP accepts loopback connections only.").ExecuteAsync(context);
         return;
     }
-    if (context.Request.Method is not ("GET" or "HEAD" or "OPTIONS") &&
+    if (!desktop.Enabled && context.Request.Method is not ("GET" or "HEAD" or "OPTIONS") &&
         context.Request.Headers.TryGetValue("Origin", out var origin) &&
         (!Uri.TryCreate(origin, UriKind.Absolute, out var uri) || !uri.IsLoopback ||
          uri.Scheme is not ("http" or "https")))
@@ -91,6 +124,22 @@ if (app.Environment.IsDevelopment())
 app.MapAgents();
 app.MapModels();
 app.MapStudio();
-app.Run();
+app.MapGet("/api/health", (CancellationToken token) =>
+{
+    token.ThrowIfCancellationRequested();
+    return TypedResults.Ok(new BackendHealthResponse(true, Environment.ProcessId));
+}).WithName("GetBackendHealth").WithSummary("Check this API process is ready")
+    .WithDescription("In Desktop mode every request requires the per-launch bearer token.");
+if (desktop.Enabled)
+{
+    await app.StartAsync();
+    var address = app.Services.GetRequiredService<Microsoft.AspNetCore.Hosting.Server.IServer>().Features
+        .Get<Microsoft.AspNetCore.Hosting.Server.Features.IServerAddressesFeature>()!.Addresses.Single();
+    Console.WriteLine("AIPLATFORM_READY " + System.Text.Json.JsonSerializer.Serialize(new { url = address, processId = Environment.ProcessId }));
+    await Console.Out.FlushAsync();
+    await app.WaitForShutdownAsync();
+}
+else
+    app.Run();
 
 public partial class Program;

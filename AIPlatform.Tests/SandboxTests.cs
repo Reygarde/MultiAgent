@@ -89,12 +89,32 @@ public sealed class SandboxTests
         var id = Guid.NewGuid();
         fixture.Workspaces.Create(id);
         var process = new ProcessStub((arguments, _) => Task.FromResult(new ContainerProcessResult(0,
-            arguments[0] == "run" ? """<TestRun><ResultSummary><Counters total="3" passed="3" /></ResultSummary></TestRun>""" : "removed")));
+            arguments[0] == "run" ? "\nAIPLATFORM_TRX_BEGIN\n" +
+                "\uFEFF" + """<?xml version="1.0" encoding="utf-8"?><TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult outcome="Passed" /><UnitTestResult outcome="Passed" /><UnitTestResult outcome="Passed" /></Results><ResultSummary outcome="Completed"><Counters total="3" executed="3" passed="3" failed="0" /></ResultSummary></TestRun>""" +
+                "\nAIPLATFORM_TRX_END\n" : "removed")));
         var runner = new DockerSandboxRunner(new() { Enabled = true }, fixture.Workspaces, process);
         var result = await runner.RunAsync(id, "Tests", CancellationToken.None);
         Assert.Equal("Succeeded", result.Status);
         Assert.Equal(3, result.TotalTests);
         Assert.Equal("rm", process.Calls.Last()[0]);
+    }
+
+    [Theory]
+    [InlineData(0, 0, "")]
+    [InlineData(1, 0, "")]
+    [InlineData(1, 1, "<UnitTestResult outcome=\"Failed\" />")]
+    public async Task EmptyInconsistentOrFailingReportCannotPassDespiteZeroExitCode(int total, int failed, string results)
+    {
+        using var fixture = new StudioFixture();
+        var id = Guid.NewGuid();
+        fixture.Workspaces.Create(id);
+        var report = "\nAIPLATFORM_TRX_BEGIN\n" +
+            $"""<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results>{results}</Results><ResultSummary outcome="Completed"><Counters total="{total}" executed="{total}" passed="{total - failed}" failed="{failed}" /></ResultSummary></TestRun>""" +
+            "\nAIPLATFORM_TRX_END\n";
+        var process = new ProcessStub((arguments, _) => Task.FromResult(new ContainerProcessResult(0,
+            arguments[0] == "run" ? report : "removed")));
+        var runner = new DockerSandboxRunner(new() { Enabled = true }, fixture.Workspaces, process);
+        Assert.Equal("Failed", (await runner.RunAsync(id, "Tests", CancellationToken.None)).Status);
     }
 
     [Fact]

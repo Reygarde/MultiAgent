@@ -1,10 +1,8 @@
-import type { Agent, CreateMission, FileContent, LocalModels, Mission, Model, Sandbox, WorkspaceFile } from './types'
+import type { Agent, CreateMission, ExecutionPlan, FileContent, LocalModels, Mission, Model, Sandbox, WorkspaceFile } from './types'
+import { fetchApi } from './desktop/transport'
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`/api${path}`, {
-    ...init,
-    headers: { ...(init?.body ? { 'Content-Type': 'application/json' } : {}), ...init?.headers },
-  })
+  const response = await fetchApi(path, init)
   if (!response.ok) {
     let detail = `Erreur HTTP ${response.status}`
     try {
@@ -26,8 +24,17 @@ export const api = {
   localModels: (signal?: AbortSignal) => request<LocalModels>('/models/local', { signal }),
   sandbox: (signal?: AbortSignal) => request<Sandbox>('/sandbox', { signal }),
   create: (input: CreateMission) => request<Mission>('/missions', { method: 'POST', body: JSON.stringify(input) }),
+  executionPlan: (id: string, signal?: AbortSignal) =>
+    request<ExecutionPlan>(`/missions/${encodeURIComponent(id)}/execution-plan`, { signal }),
+  approve: async (id: string, approved: boolean, fingerprint: string) => {
+    const response = await fetchApi(`/missions/${encodeURIComponent(id)}/approval`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ approved, fingerprint }),
+    })
+    if (!response.ok) throw new Error(`Décision refusée (HTTP ${response.status}). Rechargez le plan et l’état de la mission.`)
+  },
   cancel: async (id: string) => {
-    const response = await fetch(`/api/missions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+    const response = await fetchApi(`/missions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
     if (!response.ok) throw new Error(`Annulation refusée (HTTP ${response.status}). Rafraîchissez l’état de la mission.`)
   },
   files: (id: string, signal?: AbortSignal) => request<WorkspaceFile[]>(`/workspaces/${encodeURIComponent(id)}/files`, { signal }),

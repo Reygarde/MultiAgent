@@ -19,6 +19,7 @@ export interface Model {
 
 export type MissionKind = 'Chat' | 'Project'
 export type MissionStatus = 'Queued' | 'Running' | 'Completed' | 'GeneratedUnverified' | 'Failed' | 'Cancelled'
+  | 'AwaitingApproval' | 'BuildFailed' | 'TestsFailed' | 'Verified'
 export type StepStatus = 'Running' | 'Succeeded' | 'Failed' | 'Unavailable' | 'Skipped' | 'Cancelled'
 
 export interface MissionEvent {
@@ -27,6 +28,7 @@ export interface MissionEvent {
   step: string
   status: StepStatus
   message: string
+  durationMilliseconds?: number | null
 }
 
 export interface Verification {
@@ -35,6 +37,11 @@ export interface Verification {
   exitCode: number | null
   log: string
   totalTests: number | null
+  durationMilliseconds?: number | null
+  attempt?: number
+  warningCount?: number | null
+  errorCount?: number | null
+  failedTests?: number | null
 }
 
 export interface Mission {
@@ -64,7 +71,16 @@ export interface LocalModels {
   models: { name: string; installed: boolean; loaded: boolean; inUse: boolean }[]
 }
 
-export interface Sandbox { available: boolean; reason: string }
+export interface Sandbox { available: boolean; reason: string; engineAvailable?: boolean }
+export interface ExecutionPlan {
+  fingerprint: string
+  image: string
+  memoryMegabytes: number
+  cpuCount: number
+  timeoutSeconds: number
+  maxCorrectionAttempts: number
+  operations: string[]
+}
 export interface WorkspaceFile { path: string; size: number }
 export interface FileContent { path: string; content: string }
 export interface CreateMission {
@@ -74,7 +90,8 @@ export interface CreateMission {
   approveSandboxExecution: boolean
 }
 
-export const isActive = (mission: Mission) => mission.status === 'Queued' || mission.status === 'Running'
+export const isActive = (mission: Mission) =>
+  mission.status === 'Queued' || mission.status === 'Running' || mission.status === 'AwaitingApproval'
 
 export const statusLabels: Record<MissionStatus, string> = {
   Queued: 'En attente',
@@ -83,12 +100,17 @@ export const statusLabels: Record<MissionStatus, string> = {
   GeneratedUnverified: 'Généré · non vérifié',
   Failed: 'Échec',
   Cancelled: 'Annulée',
+  AwaitingApproval: 'Autorisation requise',
+  BuildFailed: 'Compilation échouée',
+  TestsFailed: 'Tests échoués',
+  Verified: 'Vérifié · compilation et tests réussis',
 }
 
 export const stepLabels: Record<string, string> = {
   Queue: 'File d’attente', Analysis: 'Analyse', Routing: 'Routage',
   Generation: 'Génération', Writing: 'Écriture des fichiers', Build: 'Compilation',
   Tests: 'Tests', Corrections: 'Corrections', Mission: 'Mission',
+  Authorization: 'Autorisation', ErrorAnalysis: 'Analyse des erreurs',
 }
 
 export const stepStatusLabels: Record<StepStatus, string> = {

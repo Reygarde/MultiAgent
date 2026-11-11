@@ -46,7 +46,8 @@ internal sealed class StudioFixture : IDisposable
             ? """{"agentId":"DeveloperAgent","reason":"Development"}""" : """{"response":"Answer"}"""));
         var resolver = new LlmProviderResolver([provider]);
         return new(Missions, Registry, new LlmAgentRouter(Registry, resolver), resolver,
-            generator, Workspaces, sandbox, options ?? Options);
+            generator, Workspaces, sandbox, options ?? Options,
+            new ExecutionPlanService(Workspaces, new(), options ?? Options));
     }
 
     public void Dispose()

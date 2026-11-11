@@ -17,7 +17,7 @@ test('real API and Ollama: chat mission is routed and completed', async ({ page 
   expect(result.usedFallback).toBe(false)
 })
 
-test('real project generation writes files but never runs code without Docker approval', async ({ page }, testInfo) => {
+test('real project generation waits for approval or remains explicitly unavailable', async ({ page }, testInfo) => {
   await page.goto('/')
   await page.getByRole('combobox', { name: 'Mode de mission' }).selectOption('Project')
   await page.getByRole('textbox', { name: 'Votre mission' }).fill('Crée une API REST .NET 10 avec CRUD utilisateurs et tests unitaires. Reste concis : un modèle User, un service testable en mémoire, des endpoints minimal API et deux tests xUnit.');
@@ -30,16 +30,39 @@ test('real project generation writes files but never runs code without Docker ap
   await expect.poll(async () => {
     result = await (await page.request.get(`/api/missions/${id}`)).json()
     return result.status === 'Queued' || result.status === 'Running' ? 'active' : result.status
-  }, { timeout: 360000, intervals: [2000] }).toBe('GeneratedUnverified')
+  }, { timeout: 360000, intervals: [2000] }).toMatch(/^(AwaitingApproval|GeneratedUnverified)$/)
   result = await (await page.request.get(`/api/missions/${id}`)).json()
   expect(result.selectedAgent).toBe('DeveloperAgent')
   expect(result.selectedModel).toBe('qwen2.5-coder:7b')
   expect(result.usedFallback).toBe(false)
-  expect(result.verification.length).toBe(2)
   expect(result.verification.every(item => item.exitCode === null)).toBe(true)
+  if (result.status === 'AwaitingApproval') {
+    await expect(page.getByRole('button', { name: 'Refuser l’exécution' })).toBeVisible({ timeout: 10000 })
+    await page.getByRole('button', { name: 'Refuser l’exécution' }).click()
+    await expect.poll(async () => (await (await page.request.get(`/api/missions/${id}`)).json()).status)
+      .toBe('GeneratedUnverified')
+  }
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await expect(page.getByRole('button', { name: 'src/App/Program.cs', exact: true })).toBeVisible({ timeout: 10000 })
   await expect(page.locator('.file-preview code')).toContainText('WebApplication', { timeout: 10000 })
   await expect(page.getByText(/Build · (Unavailable|Skipped) · sortie non exécuté/)).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('studio-projects.png'), fullPage: true })
+})
+
+test('approved Calculator shows actual Docker verification and generated files', async ({ page }) => {
+  const id = process.env.AIPLATFORM_VERIFIED_MISSION_ID
+  test.skip(!id, 'Provide a previously human-approved Calculator mission; this test never grants approval.')
+  await page.goto('/')
+  const result = await (await page.request.get(`/api/missions/${id}`)).json()
+  expect(result.status).toBe('Verified')
+  expect(result.selectedModel).toBe('qwen2.5-coder:7b')
+  expect(result.verification.some((item: { stage: string; exitCode: number }) => item.stage === 'Build' && item.exitCode === 0)).toBe(true)
+  expect(result.verification.some((item: { stage: string; exitCode: number; totalTests: number }) =>
+    item.stage === 'Tests' && item.exitCode === 0 && item.totalTests >= 2)).toBe(true)
+  await page.locator(`[data-mission-id="${id}"] .user-message`).click()
+  await expect(page.locator('.mission-details .badge').first()).toHaveText('Vérifié · compilation et tests réussis')
+  await expect(page.getByRole('button', { name: 'Autoriser compilation et tests' })).toHaveCount(0)
+  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await expect(page.locator('.file-preview code')).toContainText('Calculator')
+  await expect(page.getByText('Tests · Succeeded · sortie 0')).toBeVisible()
 })

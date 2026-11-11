@@ -1,7 +1,7 @@
 {
   "name": "aiplatform-studio",
   "private": true,
-  "version": "0.2.0",
+  "version": "0.4.0",
   "type": "module",
   "engines": { "node": ">=20.14.0" },
   "scripts": {
@@ -11,9 +11,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "test:live": "playwright test --config playwright.live.config.ts"
+    "test:live": "playwright test --config playwright.live.config.ts",
+    "tauri": "tauri",
+    "desktop:prepare": "node scripts/prepare-backend.mjs",
+    "desktop:test-backend": "node --test scripts/test-backend.mjs",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build --target x86_64-pc-windows-msvc --bundles nsis"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
@@ -21,6 +27,7 @@
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0",
     "@playwright/test": "^1.56.1",
     "@testing-library/dom": "^10.4.1",
     "@testing-library/jest-dom": "^6.9.1",
