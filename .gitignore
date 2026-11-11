@@ -1,0 +1,25 @@
+**/bin/
+**/obj/
+.vs/
+*.csproj.user
+TestResults/
+**/StudioData/
+**/node_modules/
+**/dist/
+**/playwright-report/
+**/test-results/
+*.tsbuildinfo
+# Secrets et configuration locale
+.env
+.env.*
+!.env.example
+**/appsettings.*.local.json
+**/appsettings.Development.json
+
+# IDE
+.vscode/
+.idea/
+
+# Fichiers temporaires
+*.log
+coverage/

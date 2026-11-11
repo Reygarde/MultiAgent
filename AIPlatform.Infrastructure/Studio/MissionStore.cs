@@ -1,0 +1,183 @@
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Threading.Channels;
+using AIPlatform.Core;
+using AIPlatform.Core.Studio;
+
+namespace AIPlatform.Infrastructure.Studio;
+
+public sealed class MissionStore : IMissionService, IDisposable
+{
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        Converters = { new JsonStringEnumConverter() }
+    };
+    private readonly object sync = new();
+    private readonly Dictionary<Guid, MissionSnapshot> missions = [];
+    private readonly Dictionary<Guid, CancellationTokenSource> cancellations = [];
+    private readonly string directory;
+    private readonly PlatformConfiguration platform;
+    private readonly StudioOptions options;
+    private readonly IAgentRegistry registry;
+    private readonly Channel<Guid> queue = Channel.CreateUnbounded<Guid>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+
+    public MissionStore(StudioOptions options, PlatformConfiguration platform, IAgentRegistry registry)
+    {
+        this.options = options;
+        this.platform = platform;
+        this.registry = registry;
+        directory = Path.Combine(SafePaths.ValidateStorageDirectory(options.DataDirectory), "missions");
+        SafePaths.RejectLinks(directory);
+        Directory.CreateDirectory(directory);
+        foreach (var path in Directory.EnumerateFiles(directory, "*.json"))
+        {
+            SafePaths.RejectLinks(path);
+            var snapshot = JsonSerializer.Deserialize<MissionSnapshot>(File.ReadAllText(path), JsonOptions)
+                ?? throw new InvalidDataException($"Invalid saved mission: {Path.GetFileName(path)}.");
+            if (Path.GetFileNameWithoutExtension(path) != snapshot.Id.ToString("N"))
+                throw new InvalidDataException("A saved mission identifier does not match its filename.");
+            if (!snapshot.IsTerminal)
+            {
+                snapshot = snapshot with
+                {
+                    Status = MissionStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow,
+                    Error = "Mission interrupted by a server restart. Submit a new mission to retry.",
+                    Events = snapshot.Events.Append(new(snapshot.Events.Count + 1, DateTimeOffset.UtcNow,
+                        "Mission", StepStatus.Cancelled, "Interrupted by server restart; not automatically re-executed.")).ToArray()
+                };
+                Save(snapshot);
+            }
+            missions.Add(snapshot.Id, snapshot);
+        }
+    }
+
+    public MissionSnapshot Submit(MissionSubmission submission)
+    {
+        if (string.IsNullOrWhiteSpace(submission.Task) || submission.Task.Length > platform.MaxTaskLength ||
+            !Enum.IsDefined(submission.Kind))
+            throw new StudioValidationException($"Provide a task of 1 to {platform.MaxTaskLength} characters and a valid kind.");
+        if (submission.AgentId is not null && !registry.Candidates.Any(agent => agent.Id == submission.AgentId))
+            throw new StudioValidationException("The requested execution agent is not registered.");
+        if (submission.Kind == MissionKind.Project && submission.AgentId is not null &&
+            submission.AgentId != options.DeveloperAgentId)
+            throw new StudioValidationException("Project generation requires the configured developer agent.");
+
+        lock (sync)
+        {
+            if (missions.Count >= options.MaxMissions)
+                throw new StudioCapacityException("The persisted mission limit has been reached. Archive data while the server is stopped.");
+            var now = DateTimeOffset.UtcNow;
+            var snapshot = new MissionSnapshot(
+                Guid.NewGuid(), submission.Task.Trim(), submission.Kind, submission.AgentId,
+                submission.ApproveSandboxExecution, MissionStatus.Queued, now, now,
+                null, null, null, false, null, null, false, 0,
+                [new(1, now, "Queue", StepStatus.Running, "Waiting for the single mission worker.")], []);
+            Save(snapshot);
+            missions.Add(snapshot.Id, snapshot);
+            cancellations.Add(snapshot.Id, new());
+            if (!queue.Writer.TryWrite(snapshot.Id))
+                throw new InvalidOperationException("The mission worker queue is closed.");
+            return snapshot;
+        }
+    }
+
+    public IReadOnlyList<MissionSnapshot> List()
+    {
+        lock (sync)
+            return missions.Values.OrderByDescending(mission => mission.CreatedAt).ToArray();
+    }
+
+    public MissionSnapshot? Get(Guid id)
+    {
+        lock (sync)
+            return missions.GetValueOrDefault(id);
+    }
+
+    public bool Cancel(Guid id)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.IsTerminal)
+                return false;
+            // Cancel under the same lock used to commit completion: neither can win after the other.
+            cancellations[id].Cancel();
+            if (current.Status == MissionStatus.Queued)
+                Update(id, mission => mission with
+                {
+                    Status = MissionStatus.Cancelled,
+                    Events =
+                    [
+                        .. mission.Events,
+                        new(mission.Events.Count + 1, DateTimeOffset.UtcNow, "Queue", StepStatus.Cancelled, "Cancelled before execution."),
+                        new(mission.Events.Count + 2, DateTimeOffset.UtcNow, "Mission", StepStatus.Cancelled, "Mission cancelled.")
+                    ]
+                });
+            return true;
+        }
+    }
+
+    public IAsyncEnumerable<Guid> ReadQueue(CancellationToken cancellationToken) =>
+        queue.Reader.ReadAllAsync(cancellationToken);
+
+    public CancellationToken Cancellation(Guid id)
+    {
+        lock (sync)
+            return cancellations[id].Token;
+    }
+
+    public MissionSnapshot Update(Guid id, Func<MissionSnapshot, MissionSnapshot> update)
+    {
+        lock (sync)
+        {
+            var previous = missions[id];
+            var next = update(previous) with { UpdatedAt = DateTimeOffset.UtcNow };
+            if (next.Status is MissionStatus.Completed or MissionStatus.GeneratedUnverified)
+                cancellations[id].Token.ThrowIfCancellationRequested();
+            Save(next);
+            missions[id] = next;
+            return next;
+        }
+    }
+
+    public void AddEvent(Guid id, string step, StepStatus status, string message) =>
+        Update(id, mission => mission with
+        {
+            Events = mission.Events.Append(new(mission.Events.Count + 1,
+                DateTimeOffset.UtcNow, step, status, message)).ToArray()
+        });
+
+    private void Save(MissionSnapshot snapshot)
+    {
+        var path = Path.Combine(directory, snapshot.Id.ToString("N") + ".json");
+        var temporary = path + ".tmp";
+        SafePaths.RejectLinks(path);
+        SafePaths.RejectLinks(temporary);
+        File.WriteAllText(temporary, JsonSerializer.Serialize(snapshot, JsonOptions));
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                SafePaths.RejectLinks(path);
+                SafePaths.RejectLinks(temporary);
+                if (File.Exists(path))
+                    File.Replace(temporary, path, null);
+                else
+                    File.Move(temporary, path);
+                break;
+            }
+            catch (Exception exception) when (attempt < 4 &&
+                       exception is IOException or UnauthorizedAccessException)
+            {
+                // Windows scanners can briefly deny rename/delete sharing on freshly written metadata.
+                Thread.Sleep(10 * (1 << attempt));
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        foreach (var cancellation in cancellations.Values)
+            cancellation.Dispose();
+    }
+}

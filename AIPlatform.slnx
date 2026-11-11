@@ -1,0 +1,6 @@
+<Solution>
+  <Project Path="AIPlatform.API/AIPlatform.API.csproj" />
+  <Project Path="AIPlatform.Core/AIPlatform.Core.csproj" />
+  <Project Path="AIPlatform.Infrastructure/AIPlatform.Infrastructure.csproj" />
+  <Project Path="AIPlatform.Tests/AIPlatform.Tests.csproj" />
+</Solution>

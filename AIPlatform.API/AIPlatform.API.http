@@ -1,0 +1,87 @@
+@AIPlatform.API_HostAddress = http://localhost:5167
+
+### Agents configures
+GET {{AIPlatform.API_HostAddress}}/api/agents
+Accept: application/json
+
+### Modeles configures et affectations
+GET {{AIPlatform.API_HostAddress}}/api/models
+
+### Mission de developpement (necessite Ollama)
+POST {{AIPlatform.API_HostAddress}}/api/agents/run
+Content-Type: application/json
+
+{
+  "task": "Cree une API REST en C# pour gerer des utilisateurs"
+}
+
+### Mission generaliste (necessite Ollama)
+POST {{AIPlatform.API_HostAddress}}/api/agents/run
+Content-Type: application/json
+
+{
+  "task": "Explique simplement pourquoi le ciel est bleu."
+}
+
+### Validation : HTTP 400 sans appel a Ollama
+POST {{AIPlatform.API_HostAddress}}/api/agents/run
+Content-Type: application/json
+
+{
+  "task": "   "
+}
+
+### Studio : creer une mission asynchrone (202 Accepted + Location)
+POST {{AIPlatform.API_HostAddress}}/api/missions
+Content-Type: application/json
+
+{
+  "task": "Explique simplement les systemes multi-agents.",
+  "kind": "Chat",
+  "agentId": null,
+  "approveSandboxExecution": false
+}
+
+### Remplacer par l'identifiant retourne par POST /api/missions
+@missionId = 00000000-0000-0000-0000-000000000000
+
+### Historique persiste
+GET {{AIPlatform.API_HostAddress}}/api/missions
+
+### Etat de mission
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}
+
+### Evenements reels depuis une sequence
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/events?after=0
+
+### Annuler (202 si acceptee, 409 si deja terminee)
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/cancel
+
+### Logs et resultats de verification
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/verification
+
+### Creer les fichiers d'un projet .NET sans autoriser son execution
+POST {{AIPlatform.API_HostAddress}}/api/missions
+Content-Type: application/json
+
+{
+  "task": "Cree une API REST .NET 10 CRUD utilisateurs avec tests unitaires xUnit.",
+  "kind": "Project",
+  "agentId": null,
+  "approveSandboxExecution": false
+}
+
+### Liste des workspaces
+GET {{AIPlatform.API_HostAddress}}/api/workspaces
+
+### Fichiers d'un workspace (identifiant = mission)
+GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/files
+
+### Apercu texte d'un fichier valide
+GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/file?path=src%2FApp%2FProgram.cs
+
+### Telemetrie reelle d'Ollama pour les modeles configures
+GET {{AIPlatform.API_HostAddress}}/api/models/local
+
+### Disponibilite de l'isolation (aucun telechargement ni execution)
+GET {{AIPlatform.API_HostAddress}}/api/sandbox
