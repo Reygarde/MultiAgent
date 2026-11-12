@@ -116,3 +116,27 @@ Content-Type: application/json
 
 ### Mission inexistante : 404
 GET {{AIPlatform.API_HostAddress}}/api/missions/00000000-0000-0000-0000-000000000000/execution-plan
+
+### Workflow collaboratif (404 pour les anciennes missions)
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/workflow
+
+### Reprise explicite : accords precedents annules
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/resume
+
+### Renommer sans modifier les sources
+PUT {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}
+Content-Type: application/json
+
+{ "name": "Calculator", "description": "Bibliotheque arithmetique .NET 10" }
+
+### Suppression definitive des sources d'un projet inactif uniquement
+DELETE {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}
+
+### Configuration locale editable (contient les instructions systeme)
+GET {{AIPlatform.API_HostAddress}}/api/agents/configuration
+
+### Copier le document GET complet, le modifier et le soumettre ; l'exemple vide est volontairement refuse (400)
+PUT {{AIPlatform.API_HostAddress}}/api/agents/configuration
+Content-Type: application/json
+
+{ "agents": [], "models": [] }

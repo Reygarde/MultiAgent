@@ -20,6 +20,8 @@ export function MissionDetails({ mission, cancel, busy, refresh }: {
   mission: Mission; cancel: (id: string) => void; busy: boolean; refresh: () => Promise<unknown>
 }) {
   const latest = new Map(mission.events.map(event => [event.step, event]))
+  const [resumeError, setResumeError] = useState<string | null>(null)
+  const [resuming, setResuming] = useState(false)
   return <section className="panel mission-details">
     <div className="panel-heading"><h2><Clock3 size={16} /> Exécution réelle</h2><StatusBadge mission={mission} /></div>
     <p className="mission-id">{mission.id}</p>
@@ -31,6 +33,25 @@ export function MissionDetails({ mission, cancel, busy, refresh }: {
     {mission.usedFallback && <div className="notice warning">Routage de secours déterministe utilisé.</div>}
     <p className="muted">Corrections effectuées : {mission.correctionAttempts}</p>
     {mission.status === 'AwaitingApproval' && <Approval key={mission.id} id={mission.id} refresh={refresh} />}
+    {mission.workflow && <section aria-label="Workflow collaboratif">
+      <h3>Workflow · version {mission.workflow.version}</h3>
+      <p className="mission-id">{mission.workflow.workflowId}</p>
+      {mission.workflow.steps.map(step => <details className="technical-logs" key={step.id}>
+        <summary>{stepLabels[step.kind] ?? step.kind} · {step.agentId} · {step.status}
+          {step.durationMilliseconds != null && ` · ${(step.durationMilliseconds / 1000).toFixed(1)} s`}</summary>
+        <p>Identifiant : {step.id} · Tentatives : {step.attempts}<br />Prérequis : {step.dependsOn.join(', ') || 'aucun'}</p>
+        <p>Modèle : {step.modelName ?? 'C# déterministe (ou ancienne étape)'}</p>
+        <p>Contexte transmis : {step.input ?? 'Pas encore exécuté'}</p>
+        {step.output && <pre>{step.output}</pre>}
+        {step.error && <div role="alert" className="notice danger">{step.error}</div>}
+      </details>)}
+      {!isActive(mission) && !mission.deleted && !['Verified', 'Completed'].includes(mission.status) &&
+        <button className="button secondary full" disabled={resuming} onClick={() => {
+          setResuming(true); setResumeError(null)
+          void api.resume(mission.id).then(refresh).catch(error => setResumeError(errorMessage(error))).finally(() => setResuming(false))
+        }}>Reprendre · nouvelle autorisation requise</button>}
+      {resumeError && <p role="alert" className="notice danger">{resumeError}</p>}
+    </section>}
     <ol className="steps">{[...latest.values()].map(event => <li key={event.step} className={`step-${event.status}`}>
       <span className="step-icon"><StepIcon status={event.status} /></span>
       <div><strong>{stepLabels[event.step] ?? event.step}</strong><span>{stepStatusLabels[event.status]}</span></div>

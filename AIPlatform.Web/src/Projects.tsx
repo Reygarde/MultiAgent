@@ -4,9 +4,10 @@ import { api, errorMessage } from './api'
 import type { FileContent, Mission, WorkspaceFile } from './types'
 import { CodeBlock } from './Markdown'
 import { StatusBadge } from './MissionDetails'
+import { isActive } from './types'
 
-export function Projects({ missions, selectedId, onSelect }: {
-  missions: Mission[]; selectedId: string | null; onSelect: (id: string) => void
+export function Projects({ missions, selectedId, onSelect, refresh }: {
+  missions: Mission[]; selectedId: string | null; onSelect: (id: string) => void; refresh: () => Promise<unknown>
 }) {
   const projects = missions.filter(mission => mission.hasWorkspace)
   const selected = projects.find(project => project.id === selectedId) ?? projects[0]
@@ -15,6 +16,22 @@ export function Projects({ missions, selectedId, onSelect }: {
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [path, setPath] = useState<string | null>(null)
+  const [editing, setEditing] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [name, setName] = useState('')
+  const [description, setDescription] = useState('')
+  const [busy, setBusy] = useState(false)
+  useEffect(() => { setEditing(false); setConfirmDelete(false) }, [selected?.id])
+  async function changeProject(deleting: boolean) {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try {
+      if (deleting) await api.deleteProject(selected.id)
+      else await api.renameProject(selected.id, name, description)
+      setEditing(false); setConfirmDelete(false); await refresh()
+    } catch (error) { setError(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
   useEffect(() => {
     setFiles([]); setContent(null); setPath(null); setError(null)
     if (!selected) return
@@ -41,12 +58,36 @@ export function Projects({ missions, selectedId, onSelect }: {
     <aside className="panel project-list"><h2>Workspaces <span className="count">{projects.length}</span></h2>
       {projects.map(project => <button key={project.id} className={`project-entry ${selected?.id === project.id ? 'selected' : ''}`}
         onClick={() => onSelect(project.id)}>
-        <FolderOpen size={17} /><span><strong>{project.task}</strong><small>{new Date(project.createdAt).toLocaleDateString('fr-FR')}</small><StatusBadge mission={project} /></span>
+        <FolderOpen size={17} /><span><strong>{project.projectName || `Projet ${project.id.slice(0, 8)}`}</strong><small>{new Date(project.createdAt).toLocaleDateString('fr-FR')}</small><StatusBadge mission={project} /></span>
       </button>)}
     </aside>
     <section className="panel explorer">
       <div className="panel-heading"><h2><FileCode2 size={17} /> Fichiers du projet</h2><span className="muted">{files.length} fichiers</span></div>
       {error && <div className="notice danger" role="alert">{error}</div>}
+      {selected && <div className="project-verification">
+        <h3>{selected.projectName || `Projet ${selected.id.slice(0, 8)}`}</h3>
+        <p>{selected.projectDescription || 'Projet .NET généré dans un workspace isolé.'}</p>
+        <p className="mission-id">Mission associée : {selected.id}</p>
+        <button className="button secondary" onClick={() => {
+          setName(selected.projectName || `Projet ${selected.id.slice(0, 8)}`); setDescription(selected.projectDescription || ''); setEditing(true)
+        }}>Renommer</button>
+        <button className="button secondary" disabled={isActive(selected)} onClick={() => setConfirmDelete(true)}>Supprimer le projet</button>
+        {editing && <form className="settings-grid" onSubmit={event => { event.preventDefault(); void changeProject(false) }}>
+          <label>Nom du projet<input value={name} onChange={event => setName(event.target.value)} maxLength={80} required /></label>
+          <label>Description<textarea value={description} onChange={event => setDescription(event.target.value)} maxLength={1000} /></label>
+          <button className="button primary" disabled={busy}>Enregistrer le nom</button>
+          <button className="button secondary" type="button" onClick={() => setEditing(false)}>Annuler</button>
+        </form>}
+        {confirmDelete && <div className="notice warning"><p>Supprimer définitivement les sources et versions de ce projet uniquement ?
+          La mission et ses journaux seront conservés.</p>
+          <button className="button secondary" disabled={busy} onClick={() => void changeProject(true)}>Confirmer la suppression</button>
+          <button className="button secondary" onClick={() => setConfirmDelete(false)}>Conserver le projet</button></div>}
+        {!!selected.workflow?.revisions.length && <details className="technical-logs"><summary>Historique des versions</summary>
+          {selected.workflow.revisions.map(revision => <section key={revision.version}>
+            <h4>Version {revision.version} · {new Date(revision.createdAt).toLocaleString('fr-FR')}</h4>
+            <p>{revision.reason}</p><p>{revision.files.join(', ')}</p><code>{revision.fingerprint}</code>
+          </section>)}</details>}
+      </div>}
       <div className="file-browser">
         <nav className="file-tree" aria-label="Fichiers générés">{files.map(file => <button key={file.path}
           className={path === file.path ? 'selected' : ''} onClick={() => { setError(null); setPath(file.path) }}>

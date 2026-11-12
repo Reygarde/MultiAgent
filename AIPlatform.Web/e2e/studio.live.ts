@@ -62,6 +62,14 @@ test('approved Calculator shows actual Docker verification and generated files',
   await page.locator(`[data-mission-id="${id}"] .user-message`).click()
   await expect(page.locator('.mission-details .badge').first()).toHaveText('Vérifié · compilation et tests réussis')
   await expect(page.getByRole('button', { name: 'Autoriser compilation et tests' })).toHaveCount(0)
+  if (result.workflow) {
+    const workflow = page.getByRole('region', { name: 'Workflow collaboratif' })
+    await expect(workflow).toContainText('PlannerAgent')
+    await expect(workflow).toContainText('ReviewAgent')
+    await expect(workflow).toContainText('TestAgent')
+    await workflow.locator('summary').filter({ hasText: 'Planification' }).click()
+    await expect(workflow.getByText('Modèle : qwen3:4b')).toBeVisible()
+  }
   await page.getByRole('button', { name: 'Projects', exact: true }).click()
   await expect(page.locator('.file-preview code')).toContainText('Calculator')
   await expect(page.getByText('Tests · Succeeded · sortie 0')).toBeVisible()

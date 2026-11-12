@@ -7,6 +7,43 @@ public static class StudioEndpoints
 {
     public static void MapStudio(this WebApplication app)
     {
+        app.MapGet("/api/missions/{id:guid}/workflow", Results<Ok<WorkflowResponse>, NotFound> (
+            Guid id, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return missions.Get(id)?.Workflow is { } flow
+                ? TypedResults.Ok(WorkflowResponse.From(flow)) : TypedResults.NotFound();
+        }).WithName("GetMissionWorkflow").WithSummary("Read persisted workflow steps and shared results")
+            .WithDescription("Legacy missions have no workflow and return 404. Excludes raw prompts and source contents.");
+
+        app.MapPost("/api/missions/{id:guid}/resume", Results<Accepted, NotFound, Conflict> (
+            Guid id, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            return missions.Resume(id) ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
+        }).WithName("ResumeMission").WithSummary("Explicitly resume an interrupted collaborative mission")
+            .WithDescription("Retains prior results, discards prior approvals and rereviews existing files. Verified, deleted and legacy missions cannot resume.");
+
+        app.MapPut("/api/workspaces/{id:guid}", Results<Ok<MissionResponse>, NotFound> (
+            Guid id, UpdateProjectRequest request, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return missions.RenameProject(id, request.Name, request.Description)
+                ? TypedResults.Ok(MissionResponse.From(missions.Get(id)!)) : TypedResults.NotFound();
+        }).WithName("UpdateProject").WithSummary("Rename a generated project")
+            .WithDescription("Name at most 80 characters; description at most 1000. Does not change source or approval fingerprints.")
+            .ProducesProblem(400);
+
+        app.MapDelete("/api/workspaces/{id:guid}", Results<NoContent, NotFound, Conflict> (
+            Guid id, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            return missions.DeleteProject(id) ? TypedResults.NoContent() : TypedResults.Conflict();
+        }).WithName("DeleteProject").WithSummary("Delete a terminal mission's isolated project sources")
+            .WithDescription("Never deletes an active or approval-waiting workspace. Retains mission audit metadata, logs and workflow.");
+
         app.MapPost("/api/missions", (CreateMissionRequest request, IMissionService missions, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();

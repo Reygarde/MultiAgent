@@ -20,7 +20,7 @@ public sealed class ExecutionPlanService(
             "Read-only mount of this mission workspace; copy sources to an ephemeral container directory.",
             "Offline dotnet build Generated.slnx; no network, ports, secrets or Docker socket.",
             "Offline dotnet test tests/App.Tests/App.Tests.csproj with the three pinned test packages.",
-            $"At most {studio.MaxCorrectionAttempts} targeted LLM corrections, each revalidated, followed by new containers.",
+            $"At most {studio.MaxCorrectionAttempts} targeted LLM corrections. Modified versions require new human approval in collaborative workflows.",
             "Non-root UID 10001, read-only root, no capabilities, no-new-privileges, 128 processes maximum.",
             "Force-remove each named container on completion, cancellation or timeout. No execution on Windows."
         };

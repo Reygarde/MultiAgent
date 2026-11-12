@@ -5,6 +5,30 @@ export interface Agent {
   modelId: string
   isRouter: boolean
   canGenerateProjects: boolean
+  name?: string
+  role?: string
+  enabled?: boolean
+  allowedTools?: string[]
+  taskTypes?: string[]
+}
+
+export interface AgentSettings {
+  id: string; name: string; role: string; enabled: boolean; description: string
+  modelId: string; systemPrompt: string; capabilities: string[]; fallbackKeywords: string[]
+  allowedTools: string[]; taskTypes: string[]; timeoutSeconds: number
+}
+export interface AgentConfiguration { agents: AgentSettings[]; models: Omit<Model, 'assignedAgents'>[] }
+export interface Workflow {
+  workflowId: string; missionId: string; version: number
+  steps: {
+    id: string; kind: string; agentId: string; dependsOn: string[]; status: string
+    attempts: number; durationMilliseconds: number | null; modelName?: string | null
+    input: string | null; output: string | null; error: string | null
+  }[]
+  plan: { name: string; description: string; decisions: string[]; files: { path: string; purpose: string; dependsOn: string[] }[] } | null
+  review: { summary: string; findings: { path: string; severity: string; message: string }[] } | null
+  revisions: { version: number; createdAt: string; reason: string; fingerprint: string; files: string[] }[]
+  finalReport: string | null
 }
 
 export interface Model {
@@ -63,6 +87,10 @@ export interface Mission {
   correctionAttempts: number
   events: MissionEvent[]
   verification: Verification[]
+  workflow?: Workflow | null
+  projectName?: string | null
+  projectDescription?: string | null
+  deleted?: boolean
 }
 
 export interface LocalModels {
@@ -111,6 +139,8 @@ export const stepLabels: Record<string, string> = {
   Generation: 'Génération', Writing: 'Écriture des fichiers', Build: 'Compilation',
   Tests: 'Tests', Corrections: 'Corrections', Mission: 'Mission',
   Authorization: 'Autorisation', ErrorAnalysis: 'Analyse des erreurs',
+  Plan: 'Planification', Generate: 'Génération incrémentale', Correct: 'Correction ciblée',
+  Review: 'Revue', Approval: 'Autorisation', Report: 'Rapport final',
 }
 
 export const stepStatusLabels: Record<StepStatus, string> = {

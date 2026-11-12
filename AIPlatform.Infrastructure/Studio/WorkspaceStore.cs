@@ -25,6 +25,26 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         return path;
     }
 
+    public void Delete(Guid id)
+    {
+        var path = GetDirectory(id);
+        var files = List(id);
+        foreach (var file in files)
+        {
+            var fullPath = Path.Combine(path, file.Path.Replace('/', Path.DirectorySeparatorChar));
+            SafePaths.RejectLinks(fullPath);
+            File.Delete(fullPath);
+        }
+        RemoveEmpty(path);
+        static void RemoveEmpty(string directory)
+        {
+            SafePaths.RejectLinks(directory);
+            foreach (var child in Directory.EnumerateDirectories(directory))
+                RemoveEmpty(child);
+            Directory.Delete(directory, recursive: false);
+        }
+    }
+
     public void ValidateFiles(IReadOnlyList<GeneratedFile> files)
     {
         if (files.Count is < 3 || files.Count > options.MaxFiles)

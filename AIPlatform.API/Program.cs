@@ -34,7 +34,6 @@ else if (string.IsNullOrEmpty(builder.Configuration["urls"]))
 
 var configuration = builder.Configuration.GetSection("Platform").Get<PlatformConfiguration>()
     ?? throw new InvalidOperationException("The Platform configuration is required.");
-var registry = new AgentRegistry(configuration);
 if (configuration.MaxConcurrentMissions != 1)
     throw new InvalidOperationException("Studio MVP requires exactly one active mission.");
 var studio = builder.Configuration.GetSection("Studio").Get<StudioOptions>() ?? new();
@@ -46,7 +45,8 @@ studio = studio with
         : Path.GetFullPath(studio.DataDirectory, builder.Environment.ContentRootPath)
 };
 SafePaths.ValidateStorageDirectory(studio.DataDirectory);
-if (!registry.Candidates.Any(agent => agent.Id == studio.DeveloperAgentId))
+var registry = new ConfigurableRegistry(configuration, studio);
+if (!studio.CollaborativeWorkflows && !registry.Agents.Any(agent => agent.Id == studio.DeveloperAgentId))
     throw new InvalidOperationException("The Studio developer agent must be a registered execution agent.");
 var sandboxOptions = builder.Configuration.GetSection("Sandbox").Get<SandboxOptions>() ?? new();
 sandboxOptions.Validate();
@@ -59,6 +59,7 @@ if (registry.Models.Any(model => !string.Equals(model.Provider, "Ollama", String
 builder.Services.AddSingleton(configuration);
 builder.Services.AddSingleton(desktop);
 builder.Services.AddSingleton<IAgentRegistry>(registry);
+builder.Services.AddSingleton<IAgentConfigurationService>(registry);
 builder.Services.AddSingleton(ollama);
 builder.Services.AddHttpClient("Ollama", client => client.Timeout = Timeout.InfiniteTimeSpan)
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
@@ -82,6 +83,8 @@ builder.Services.AddSingleton<IContainerProcess, ContainerProcess>();
 builder.Services.AddSingleton<ISandboxRunner, DockerSandboxRunner>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
 builder.Services.AddSingleton<MissionProcessor>();
+builder.Services.AddSingleton<IWorkflowAgents, WorkflowAgents>();
+builder.Services.AddSingleton<CollaborativeProcessor>();
 builder.Services.AddHostedService<MissionWorker>();
 builder.Services.AddSingleton<ILocalModelStatus>(services => new LocalModelStatus(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"),

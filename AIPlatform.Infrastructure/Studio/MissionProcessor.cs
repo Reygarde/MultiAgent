@@ -8,11 +8,17 @@ public sealed class MissionProcessor(
     MissionStore store, IAgentRegistry registry, IAgentRouter router,
     ILLMProviderResolver providers, IProjectGenerator generator,
     IWorkspaceStore workspaces, ISandboxRunner sandbox, StudioOptions options,
-    IExecutionPlanService plans)
+    IExecutionPlanService plans, CollaborativeProcessor? collaborative = null)
 {
     public async Task ProcessAsync(Guid id, CancellationToken cancellationToken)
     {
         var mission = store.Get(id) ?? throw new InvalidOperationException("Mission not found.");
+        if (mission.Workflow is not null)
+        {
+            await (collaborative ?? throw new InvalidOperationException("Collaborative processor missing."))
+                .ProcessAsync(id, cancellationToken);
+            return;
+        }
         if (mission.IsTerminal || mission.Status == MissionStatus.AwaitingApproval)
             return;
         store.Update(id, current => current with { Status = MissionStatus.Running });
@@ -24,7 +30,7 @@ public sealed class MissionProcessor(
             var currentPlan = await plans.GetAsync(id, cancellationToken);
             if (currentPlan.Fingerprint != mission.ApprovalFingerprint)
                 throw new StudioValidationException("Files or execution settings changed after approval. Submit a new mission.");
-            agent = registry.Candidates.Single(candidate => candidate.Id == mission.SelectedAgent);
+            agent = registry.Agents.Single(candidate => candidate.Enabled && candidate.Id == mission.SelectedAgent);
         }
         else
         {
@@ -38,7 +44,7 @@ public sealed class MissionProcessor(
                     "Agent explicitly selected by the user.", false)
                 : await router.RouteAsync(mission.Task, cancellationToken);
             if (mission.Kind == MissionKind.Project && decision.Agent.Id != options.DeveloperAgentId)
-                decision = new(registry.Candidates.Single(candidate => candidate.Id == options.DeveloperAgentId),
+                decision = new(registry.Agents.Single(candidate => candidate.Enabled && candidate.Id == options.DeveloperAgentId),
                     decision.Reason + " Project mode is restricted to the configured developer agent.", decision.UsedFallback);
             agent = decision.Agent;
             var selectedModel = registry.GetModel(agent.ModelId);

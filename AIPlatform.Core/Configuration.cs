@@ -13,6 +13,12 @@ public sealed record PlatformConfiguration
 public sealed record AgentDefinition
 {
     public string Id { get; init; } = "";
+    public string Name { get; init; } = "";
+    public string Role { get; init; } = "Chat";
+    public bool Enabled { get; init; } = true;
+    public IReadOnlyList<string> AllowedTools { get; init; } = [];
+    public IReadOnlyList<string> TaskTypes { get; init; } = ["Chat"];
+    public int TimeoutSeconds { get; init; } = 180;
     public string Description { get; init; } = "";
     public string ModelId { get; init; } = "";
     public string SystemPrompt { get; init; } = "";

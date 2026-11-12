@@ -7,6 +7,7 @@ import { api, errorMessage } from './api'
 import { Markdown } from './Markdown'
 import { MissionDetails, StatusBadge } from './MissionDetails'
 import { Projects } from './Projects'
+import { ConfigurationEditor } from './ConfigurationEditor'
 import type { Agent, LocalModels, Mission, MissionKind, Model, Sandbox } from './types'
 import { isActive } from './types'
 
@@ -46,6 +47,10 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
     setPollError(null)
     return result
   }, [])
+  async function refreshCatalog() {
+    const [nextAgents, nextModels] = await Promise.all([api.agents(), api.models()])
+    setAgents(nextAgents); setModels(nextModels)
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -111,7 +116,8 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
   }
 
   const pageInfo = navigation.find(item => item.id === page)!
-  const eligible = agents.filter(agent => !agent.isRouter && (kind === 'Chat' || agent.canGenerateProjects))
+  const eligible = agents.filter(agent => agent.enabled !== false && !agent.isRouter &&
+    (kind === 'Chat' ? !agent.taskTypes || agent.taskTypes.includes('Chat') : agent.canGenerateProjects))
 
   return <div className="studio">
     <aside className="sidebar">
@@ -129,7 +135,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
           <p>Exécution locale · aucun cloud</p><div className="local-card-line"><Cpu size={13} /> Une mission IA active maximum</div></div>
-        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · MVP 4</small></span><ShieldCheck size={16} /></div>
+        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · MVP 5</small></span><ShieldCheck size={16} /></div>
       </div>
     </aside>
     <main>
@@ -186,6 +192,11 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
                 <div className="agent-message"><span className="avatar agent"><Bot size={17} /></span><div className="answer">
                   <div className="answer-header"><strong>{mission.selectedAgent ?? 'Studio'}</strong><StatusBadge mission={mission} /></div>
                   {mission.selectedModel && <p className="model-caption">{mission.selectedModel}</p>}
+                  {mission.workflow?.plan && <details className="technical-logs"><summary>Plan · {mission.workflow.plan.name}</summary>
+                    <p>{mission.workflow.plan.description}</p><ul>{mission.workflow.plan.decisions.map((decision, index) => <li key={index}>{decision}</li>)}</ul>
+                    <p>Agents : {[...new Set(mission.workflow.steps.map(step => step.agentId))].join(' → ')}</p>
+                    {mission.workflow.review && <p>Revue : {mission.workflow.review.summary}</p>}
+                  </details>}
                   {mission.response ? <Markdown>{mission.response}</Markdown> : mission.error ? <p className="error-inline">{mission.error}</p>
                     : isActive(mission) ? <p className="muted loading"><LoaderCircle size={15} className="spin" /> {mission.events.at(-1)?.message ?? 'En attente…'}</p>
                     : <p className="muted">Aucune réponse générée.</p>}
@@ -230,14 +241,16 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
           </aside>
         </div>}
 
-        {page === 'Agents' && <div className="cards-grid">{agents.map(agent => <article className="panel agent-card" key={agent.id}>
+        {page === 'Agents' && <><ConfigurationEditor mode="agents" saved={refreshCatalog} /><div className="cards-grid">{agents.map(agent => <article className="panel agent-card" key={agent.id}>
           <div className="card-top"><span className="card-icon"><Bot size={24} /></span><span className="badge quiet">
             {agent.isRouter ? 'Routeur' : agent.canGenerateProjects ? 'Développeur · outils' : 'Exécutant'}</span></div>
-          <h2>{agent.id}</h2><p>{agent.description}</p><div className="tags">{agent.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
+          <h2>{agent.name || agent.id}</h2><p>{agent.role ?? 'Chat'} · {agent.enabled === false ? 'Inactif' : 'Actif'}</p>
+          <p>{agent.description}</p><div className="tags">{agent.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
+          <p className="muted">Outils : {agent.allowedTools?.join(', ') || 'aucun'}</p>
           <div className="card-bottom"><Cpu size={14} /><span>{models.find(model => model.id === agent.modelId)?.name ?? agent.modelId}</span></div>
-        </article>)}</div>}
+        </article>)}</div></>}
 
-        {page === 'Models' && <>{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
+        {page === 'Models' && <><ConfigurationEditor mode="models" saved={refreshCatalog} />{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
           <div className="cards-grid">{models.map(model => {
             const state = local?.available ? local.models.find(item => item.name === model.name) : undefined
             return <article className="panel model-card" key={model.id}><div className="card-top"><span className="card-icon"><Cpu size={24} /></span><span className="badge quiet">{model.provider}</span></div>
@@ -247,11 +260,11 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
                 <span className={`badge ${state?.inUse ? 'success' : 'quiet'}`}>Utilisé : {state ? state.inUse ? 'oui' : 'non' : 'inconnu'}</span></div>
               <dl className="model-specs"><div><dt>Contexte conversation</dt><dd>{model.contextSize.toLocaleString('fr-FR')}</dd></div>
                 <div><dt>Sortie max. conversation</dt><dd>{model.maxOutputTokens}</dd></div><div><dt>Température</dt><dd>{model.temperature}</dd></div></dl>
-              <p className="muted small">La génération de projets utilise un budget distinct configuré côté serveur.</p>
+              <p className="muted small">Ces budgets sont utilisés par les étapes collaboratives. Test et orchestration sont déterministes, sans appel LLM.</p>
             </article>
           })}</div></>}
 
-        {page === 'Projects' && <Projects missions={missions} selectedId={selectedId} onSelect={setSelectedId} />}
+        {page === 'Projects' && <Projects missions={missions} selectedId={selectedId} onSelect={setSelectedId} refresh={refresh} />}
         {page === 'Missions' && <div className="missions-layout">
           <section className="panel mission-list"><div className="panel-heading"><h2><Workflow size={17} /> Toutes les missions</h2><span className="count">{missions.length}</span></div>
             {!missions.length && <div className="empty compact"><Workflow size={28} /><p>Aucune mission pour le moment.</p></div>}

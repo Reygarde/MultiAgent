@@ -21,7 +21,7 @@ public sealed class ApiTests
         using var client = factory.CreateClient();
         var agents = await client.GetFromJsonAsync<AgentResponse[]>("/api/agents");
         var models = await client.GetFromJsonAsync<ModelResponse[]>("/api/models");
-        Assert.Equal(3, agents!.Length);
+        Assert.Equal(7, agents!.Length);
         Assert.Single(agents, agent => agent.IsRouter);
         Assert.Equal(2, models!.Length);
         Assert.Contains(models, model => model.AssignedAgents.Contains("DeveloperAgent"));

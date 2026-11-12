@@ -1,4 +1,4 @@
-import type { Agent, CreateMission, ExecutionPlan, FileContent, LocalModels, Mission, Model, Sandbox, WorkspaceFile } from './types'
+import type { Agent, AgentConfiguration, CreateMission, ExecutionPlan, FileContent, LocalModels, Mission, Model, Sandbox, WorkspaceFile } from './types'
 import { fetchApi } from './desktop/transport'
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -18,6 +18,19 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  configuration: () => request<AgentConfiguration>('/agents/configuration'),
+  saveConfiguration: (configuration: AgentConfiguration) => request<AgentConfiguration>('/agents/configuration',
+    { method: 'PUT', body: JSON.stringify(configuration) }),
+  resume: async (id: string) => {
+    const response = await fetchApi(`/missions/${encodeURIComponent(id)}/resume`, { method: 'POST' })
+    if (!response.ok) throw new Error(`Reprise refusée (HTTP ${response.status}).`)
+  },
+  renameProject: (id: string, name: string, description: string) => request<Mission>(`/workspaces/${encodeURIComponent(id)}`,
+    { method: 'PUT', body: JSON.stringify({ name, description }) }),
+  deleteProject: async (id: string) => {
+    const response = await fetchApi(`/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression refusée (HTTP ${response.status}). Le projet doit être inactif.`)
+  },
   agents: (signal?: AbortSignal) => request<Agent[]>('/agents', { signal }),
   models: (signal?: AbortSignal) => request<Model[]>('/models', { signal }),
   missions: (signal?: AbortSignal) => request<Mission[]>('/missions', { signal }),

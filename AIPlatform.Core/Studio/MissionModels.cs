@@ -21,7 +21,9 @@ public sealed record MissionSnapshot(
     DateTimeOffset UpdatedAt, string? SelectedAgent, string? SelectedModel,
     string? Reason, bool UsedFallback, string? Response, string? Error,
     bool HasWorkspace, int CorrectionAttempts, IReadOnlyList<MissionEvent> Events,
-    IReadOnlyList<VerificationResult> Verification, string? ApprovalFingerprint = null)
+    IReadOnlyList<VerificationResult> Verification, string? ApprovalFingerprint = null,
+    MissionWorkflow? Workflow = null, string? ProjectName = null, string? ProjectDescription = null,
+    bool Deleted = false)
 {
     public bool IsTerminal => Status is not (MissionStatus.Queued or MissionStatus.Running or MissionStatus.AwaitingApproval);
 }
@@ -50,11 +52,15 @@ public interface IMissionService
     MissionSnapshot? Get(Guid id);
     bool Cancel(Guid id);
     bool DecideApproval(Guid id, bool approved, string fingerprint);
+    bool Resume(Guid id);
+    bool RenameProject(Guid id, string name, string description);
+    bool DeleteProject(Guid id);
 }
 
 public interface IWorkspaceStore
 {
     void Create(Guid id);
+    void Delete(Guid id);
     Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken cancellationToken);
     IReadOnlyList<WorkspaceFile> List(Guid id);
     Task<WorkspaceContent> ReadAsync(Guid id, string path, CancellationToken cancellationToken);
@@ -94,6 +100,7 @@ public sealed record StudioOptions
     public int MaxFiles { get; init; } = 30;
     public int MaxFileBytes { get; init; } = 65536;
     public int MaxProjectBytes { get; init; } = 262144;
+    public bool CollaborativeWorkflows { get; init; }
 
     public void Validate()
     {

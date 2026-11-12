@@ -1,4 +1,4 @@
-# AIPlatform Studio - MVP 4
+# AIPlatform Studio - MVP 5
 
 Plateforme multi-agents locale .NET 10 + React/TypeScript. Ollama selectionne un
 agent autorise et son modele configure. Studio permet de suivre des missions
@@ -12,6 +12,178 @@ la sandbox ET accord humain pour la mission, la compilation et les tests ne sont
 pas executes. Le statut final est alors `GeneratedUnverified`, jamais un succes
 de compilation.
 
+## Collaboration locale (MVP 5)
+
+Les nouvelles missions `Project` utilisent par defaut un workflow collaboratif
+sequentiel (`Studio:CollaborativeWorkflows=true`). Les conversations et les anciens
+endpoints restent disponibles. Les anciennes missions sans champ `workflow` sont
+lues sans migration destructive et conservent leur historique.
+
+### Architecture et exemple
+
+```text
+OrchestratorAgent (C#, dependances et transitions)
+  PlannerAgent (qwen3:4b, plan JSON valide)
+    DeveloperAgent (qwen2.5-coder:7b, un fichier par appel)
+      ReviewAgent (qwen2.5-coder:7b, constats JSON, lecture seule)
+        Autorisation humaine de la version des fichiers
+          TestAgent (C#, Docker build puis tests hors ligne)
+            Rapport final
+
+Echec de revue/build/tests -> analyse persistante -> correction ciblee
+  -> nouvelle revue -> NOUVELLE autorisation -> nouveaux conteneurs
+```
+
+Le moteur ne delegue jamais ses transitions, permissions ou commandes a un LLM.
+Le DAG des etapes et celui des fichiers refusent les cycles, identifiants dupliques
+et dependances inconnues. Une etape exige des prerequis termines avec succes.
+Une seule mission et un seul appel Ollama sont actifs a la fois. Planification
+utilise le generaliste ; generation et revue restent sur le codeur pour limiter
+les changements de modele. Les agents deterministes n'appellent aucun modele.
+
+Les composants existants restent utilises : `MissionStore`, worker et verrou
+d'execution uniques, fournisseur Ollama, `WorkspaceStore`, validation des projets,
+`ExecutionPlanService`, `DockerSandboxRunner`, transport Desktop authentifie.
+`CollaborativeProcessor` gere les transitions ; `WorkflowAgents` valide les sorties
+et construit les contextes limites par role. Aucun shell ni outil fichiers natif
+n'est accessible aux modeles.
+
+### Memoire, reprises et versions
+
+Chaque snapshot JSON de mission contient, en plus de la demande d'origine :
+
+- WorkflowId/MissionId, configuration figee des agents/modeles et etapes ;
+- plan valide, decisions d'architecture et dependances de fichiers ;
+- brouillon incremental, constats de revue et versions sources avec empreintes ;
+- diagnostics reels, historique des corrections, logs et resultats de tests ;
+- entree observable, sortie, erreur, duree et compteur de chaque etape.
+
+Les snapshots utilisent le remplacement atomique deja present. Les appels LLM
+recoivent uniquement les donnees utiles : demande pour le plan, plan/fichier/
+prerequis pour le developpeur, plan/sources pour la revue. Les sorties restent des
+donnees non fiables dans les messages utilisateur, jamais des instructions systeme.
+Les instructions sont configurables uniquement par l'administration locale.
+L'API de workflow ne publie ni les prompts internes ni les brouillons sources.
+Les fichiers restent consultables par les endpoints controles du workspace.
+
+Au redemarrage, une mission interrompue devient `Cancelled` avec un motif explicite.
+La reprise est manuelle ; aucune commande sensible n'est relancee automatiquement.
+Une mission deja en attente d'autorisation reste en attente. La reprise abandonne
+l'ancien accord, recharge et revalide les sources existantes, puis impose une
+nouvelle revue/autorisation. Les missions verifiees, supprimees ou anciennes sans
+workflow ne peuvent pas etre reprises ; une nouvelle mission reste possible.
+
+Chaque modification collaborative invalide l'accord precedent. L'empreinte est
+recontrolee avant build ET tests. L'option historique `approveSandboxExecution`
+ne court-circuite pas l'accord post-generation d'un nouveau workflow. Les trois
+corrections automatiques maximum partagent un compteur persistant, y compris apres
+reprise ; les sources des tests sont immuables pendant ces corrections (les csproj
+peuvent etre corriges). Les fichiers non planifies, suppressions et modifications
+hors workspace sont refuses. Une correction de test source exige une intervention
+humaine ou une nouvelle mission, pas un affaiblissement automatique des assertions.
+
+### Agents et modeles configurables
+
+Dans **Agents**, utiliser **Configurer les agents** pour creer/modifier identifiant,
+nom, role, description, capacites, modele, instructions, types de missions, outils,
+delai et etat actif. Dans **Models**, les noms Ollama et budgets contexte/sortie/
+temperature sont editables ; l'ajout d'un modele signifie seulement configurer un
+modele deja installe, jamais le telecharger.
+
+L'enregistrement requiert l'absence de missions actives ou en attente d'accord.
+Les regles sont imposees par le serveur :
+
+| Role | Outils maximum |
+|---|---|
+| Chat / Router | Aucun outil systeme |
+| Planner | Plan |
+| Developer | GenerateFiles |
+| Review | ReadSources |
+| Test | DockerBuild, DockerTests |
+| Orchestrator | Workflow |
+
+Un seul agent actif par role collaboratif est pris en charge. Des agents Chat
+specialises supplementaires sont possibles ; les futurs roles Discord/Twitch,
+frontend ou base de donnees ne fournissent pas encore de nouveaux outils.
+Desactiver un role indispensable ou retirer ses permissions bloque explicitement
+la creation du workflow. Routeur et agent de secours doivent rester utilisables.
+La configuration est conservee dans `StudioData/agents.json` ; les snapshots
+existants conservent la leur. Les parametres initiaux restent dans appsettings.
+Le modele est selectionne depuis cette configuration, jamais depuis une sortie LLM.
+
+### Interface et nouveaux endpoints
+
+Workspace affiche le plan, les intervenants et les resultats observables, pas les
+raisonnements bruts. Missions permet d'ouvrir chaque etape pour lire contexte
+transmis, agent, modele, dependances, duree, tentatives et erreurs. Projects utilise
+un nom court editable, description, date, mission associee et historique de versions.
+La suppression exige confirmation, refuse les projets actifs et conserve l'audit
+de mission tout en supprimant sources et contenus des anciennes versions.
+
+| Methode | Endpoint | Resultat |
+|---|---|---|
+| GET | `/api/agents/configuration` | Configuration locale complete |
+| PUT | `/api/agents/configuration` | Validation/enregistrement atomique, 400 invalide, 409 mission active |
+| GET | `/api/missions/{id}/workflow` | Etapes et memoire observable, 404 si absent/ancien |
+| POST | `/api/missions/{id}/resume` | 202 reprise explicite, 409 non reprenable |
+| PUT | `/api/workspaces/{id}` | Nom (1-80 caracteres), description (0-1000) |
+| DELETE | `/api/workspaces/{id}` | 204 suppression des sources inactives, 409 sinon |
+
+Les endpoints existants, notamment fichiers, logs, annulation et autorisation,
+restent inchanges. Exemples executables dans `AIPlatform.API/AIPlatform.API.http`.
+En Desktop, toutes ces routes restent protegees par le jeton de session Tauri.
+
+### Limites honnetes
+
+Le plan est limite a 4-12 fichiers, dans les deux projets .NET 10 controles deja
+supportes. Il ne rend pas compilables tous les types d'applications. Les seuls
+packages disponibles restent les trois packages de tests de l'image hors ligne.
+Un contexte trop grand est refuse explicitement plutot que tronquer silencieusement
+une source ou promettre un grand projet. Les budgets du modele et delais d'agent
+sont appliques aux appels ; le delai de traitement actif du worker et les limites Docker restent
+actifs. Une revue LLM n'est pas une preuve de correction ni un audit de securite.
+`Verified` exige un build sorti a zero et des tests effectivement executes,
+non vides, sans echec, dans les conteneurs.
+
+### Validation executee pour MVP 5
+
+- Solution .NET : build reussi, **0 avertissement, 0 erreur**.
+- Tests backend : **169 reussis** (dont 21 nouveaux cas collaboratifs/API) ;
+  les 5 integrations historiques Docker/Ollama opt-in sont explicitement ignorees
+  dans cette execution par defaut, pas comptees comme validees.
+- Frontend : build TypeScript/Vite reussi, **24 tests React reussis** ;
+  **6 tests navigateur** desktop/tablette avec API simulee reussis.
+- Rust : **1 test** de validation de disponibilite locale/PID reussi.
+- Sidecar publie autonome : smoke test reel reussi, incluant port occupe,
+  authentification, origines CORS, detection Ollama/Docker, rotation du jeton,
+  arret par commande et fermeture du canal proprietaire.
+- **Workflow reel Ollama + Docker** : mission Calculator
+  `3ae0ea59-59c2-4f13-8810-eb9e2efb83e6`, planifiee par qwen3:4b, quatre
+  fichiers produits incrementalement et relus par qwen2.5-coder:7b.
+  Apres accord humain sur l'empreinte exacte, build Docker sorti a 0
+  (0 avertissement/erreur), **2 tests executes et reussis**, statut `Verified`,
+  aucune correction necessaire. Sources en lecture seule, image locale figee,
+  pas de reseau, aucun conteneur AIPlatform restant apres execution.
+- Redemarrage du backend sur ces memes donnees : statut, etapes et resultats
+  conserves. **1 test navigateur reel en lecture seule** confirme ensuite
+  workflow, modeles par etape, statut verifie, fichiers et resultats Docker.
+  Aucune autorisation n'est accordee par ce test navigateur.
+- Windows : installateur **0.5.0 x64, environ 33,3 Mio**, installation et lancement
+  natif controles. Interface MVP 5, sept agents, formulaire de configuration,
+  connexion React/API protegee et anciens projets preserves observes.
+  L'ancien Calculator Desktop a ete retrouve `Verified` (validation anterieure
+  de l'utilisateur, distincte du nouveau test collaboratif).
+  API installee observee sur une seule adresse `127.0.0.1` avec port dynamique.
+  Fermeture : aucun processus Studio/backend restant ; Ollama/Docker restent actifs.
+
+Les cycles de correction (limite de trois, diagnostics conserves, tests non
+supprimes et nouvel accord apres modification), annulations, erreurs JSON,
+permissions et reprises d'interruption sont verifies avec des doublures.
+**Une nouvelle correction collaborative avec un vrai LLM apres echec Docker
+n'a pas ete provoquee lors de cette validation** : le Calculator reel a reussi
+au premier essai. Ne pas confondre ces tests avec les integrations reelles
+historiques du MVP 3 decrites plus bas.
+
 ## Application Windows
 
 Studio dispose maintenant d'une enveloppe **Tauri 2 / WebView2**. Le backend reste
@@ -21,7 +193,7 @@ compagnon. React est compile et embarque : aucun serveur Vite en production.
 ### Installer et lancer sans terminal
 
 1. Utiliser l'installateur Windows x64 produit dans
-   `AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.4.0_x64-setup.exe`.
+   `AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.5.0_x64-setup.exe`.
 2. L'installation est reservee a l'utilisateur courant, sans elevation demandee.
    Elle cree le raccourci **AIPlatform Studio** du menu Demarrer et propose un
    raccourci Bureau. L'icone est incluse.
