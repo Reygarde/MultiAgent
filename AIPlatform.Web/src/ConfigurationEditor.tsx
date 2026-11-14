@@ -4,6 +4,7 @@ import type { AgentConfiguration, AgentSettings } from './types'
 
 const tools: Record<string, string[]> = {
   Chat: [], Router: [], Planner: ['Plan'], Developer: ['GenerateFiles'],
+  Backend: ['GenerateFiles'], Frontend: ['GenerateFiles'],
   Review: ['ReadSources'], Test: ['DockerBuild', 'DockerTests'], Orchestrator: ['Workflow'],
 }
 

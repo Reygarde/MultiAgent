@@ -84,6 +84,7 @@ internal sealed class FakeSandbox(bool available = false) : ISandboxRunner
     public Task<VerificationResult> RunAsync(Guid workspaceId, string stage, CancellationToken cancellationToken)
     {
         Calls.Add(stage);
-        return Task.FromResult(Result?.Invoke(stage) ?? new(stage, "Succeeded", 0, "Container output", stage == "Tests" ? 1 : null));
+        return Task.FromResult(Result?.Invoke(stage) ?? new(stage, "Succeeded", 0, "Container output",
+            stage == "Tests" ? 1 : null, FailedTests: stage == "Tests" ? 0 : null));
     }
 }

@@ -207,7 +207,7 @@ public sealed class MissionProcessor(
             var result = await sandbox.RunAsync(id, stage, cancellationToken);
             result = result with { Attempt = verificationAttempt, DurationMilliseconds = watch.Elapsed.TotalMilliseconds };
             if (result.Status == "Succeeded" && (result.ExitCode != 0 ||
-                (stage == "Tests" && (result.TotalTests is null or <= 0 || result.FailedTests > 0))))
+                (stage == "Tests" && (result.TotalTests is null or <= 0 || result.FailedTests != 0))))
                 result = result with { Status = "Failed", Log = result.Log + "\nSuccessful verification was not confirmed by the exit code and required test counters." };
             store.Update(id, current => current with { Verification = [.. current.Verification, result] });
             store.AddEvent(id, stage, result.Status == "Succeeded" ? StepStatus.Succeeded : StepStatus.Failed,

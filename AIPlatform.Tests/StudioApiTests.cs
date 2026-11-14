@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using AIPlatform.API;
@@ -52,6 +53,49 @@ public sealed class StudioApiTests
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
         using var alreadyFinished = await client.PostAsync($"/api/missions/{initial.Id}/cancel", null);
         Assert.Equal(HttpStatusCode.Conflict, alreadyFinished.StatusCode);
+    }
+
+    [Fact]
+    public async Task ExportsExistingProjectAndRejectsPossibleCredentials()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture);
+        using var client = factory.CreateClient();
+        var created = await (await client.PostAsJsonAsync("/api/missions",
+            new { task = "Create .NET API", kind = "Project" })).Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        await WaitForTerminal(client, created!.Id);
+        using var response = await client.GetAsync($"/api/workspaces/{created.Id}/export");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal("application/zip", response.Content.Headers.ContentType!.MediaType);
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        using var archive = new ZipArchive(await response.Content.ReadAsStreamAsync(), ZipArchiveMode.Read);
+        Assert.NotNull(archive.GetEntry("src/App/Program.cs"));
+
+        var source = Path.Combine(fixture.Workspaces.GetDirectory(created.Id), "src", "App", "Extra.cs");
+        await File.WriteAllTextAsync(source, """class C { string password = "dummy"; }""");
+        using var blocked = await client.GetAsync($"/api/workspaces/{created.Id}/export");
+        Assert.Equal(HttpStatusCode.BadRequest, blocked.StatusCode);
+        Assert.DoesNotContain("dummy", await blocked.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task AnalyzesGeneratedWorkspaceWithoutExecutingIt()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture);
+        using var client = factory.CreateClient();
+        var created = await (await client.PostAsJsonAsync("/api/missions",
+            new { task = "Create .NET API", kind = "Project" })).Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        await WaitForTerminal(client, created!.Id);
+        var result = await client.GetFromJsonAsync<ProjectAnalysisResponse>($"/api/workspaces/{created.Id}/analysis");
+        Assert.NotNull(result);
+        Assert.Null(result.GitRepositoryDetected);
+        Assert.Contains("C#", result.Languages);
+        Assert.Contains("ASP.NET Core", result.Frameworks);
+        Assert.Contains("net10.0", result.Frameworks);
+        Assert.Contains("tests/App.Tests/App.Tests.csproj", result.TestProjects);
+        Assert.Contains(result.Dependencies, item => item.Name == "xunit" && item.Version == "2.9.3");
+        Assert.Empty(result.Scripts);
     }
 
     [Theory]
@@ -182,7 +226,8 @@ public sealed class StudioApiTests
         var id = Guid.NewGuid();
         foreach (var path in new[] { $"/api/missions/{id}", $"/api/missions/{id}/events",
                      $"/api/missions/{id}/verification", $"/api/workspaces/{id}/files",
-                     $"/api/workspaces/{id}/file?path=README.md", $"/api/missions/{id}/execution-plan" })
+                     $"/api/workspaces/{id}/file?path=README.md", $"/api/workspaces/{id}/export",
+                     $"/api/workspaces/{id}/analysis", $"/api/missions/{id}/execution-plan" })
             Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(path)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsync($"/api/missions/{id}/cancel", null)).StatusCode);
         Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync($"/api/missions/{id}/approval",
@@ -203,7 +248,8 @@ public sealed class StudioApiTests
         var paths = document.RootElement.GetProperty("paths");
         foreach (var path in new[] { "/api/missions", "/api/missions/{id}", "/api/missions/{id}/events",
                      "/api/missions/{id}/cancel", "/api/workspaces", "/api/workspaces/{id}/file",
-                     "/api/models/local", "/api/sandbox", "/api/missions/{id}/approval", "/api/missions/{id}/execution-plan" })
+                     "/api/models/local", "/api/sandbox", "/api/missions/{id}/approval", "/api/missions/{id}/execution-plan",
+                     "/api/workspaces/{id}/export", "/api/workspaces/{id}/analysis" })
             Assert.True(paths.TryGetProperty(path, out _), path);
     }
 

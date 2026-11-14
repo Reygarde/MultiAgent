@@ -78,10 +78,27 @@ builder.Services.AddSingleton(sandboxOptions);
 builder.Services.AddSingleton<MissionStore>();
 builder.Services.AddSingleton<IMissionService>(services => services.GetRequiredService<MissionStore>());
 builder.Services.AddSingleton<IWorkspaceStore, WorkspaceStore>();
+builder.Services.AddSingleton<IProjectExport, ProjectExport>();
+builder.Services.AddSingleton<IProjectAnalyzer, ProjectAnalyzer>();
+builder.Services.AddSingleton<IWorkspaceAnalysis, WorkspaceAnalysis>();
 builder.Services.AddSingleton<IProjectGenerator, ProjectGenerator>();
 builder.Services.AddSingleton<IContainerProcess, ContainerProcess>();
 builder.Services.AddSingleton<ISandboxRunner, DockerSandboxRunner>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
+builder.Services.AddSingleton<IManualRevisionService, ManualRevisionService>();
+builder.Services.AddSingleton<PreviewSourceVerifier>();
+builder.Services.AddSingleton<PreviewAuthorizationStore>();
+builder.Services.AddSingleton<DockerPreviewHttpTransport>();
+builder.Services.AddSingleton<PreviewProxy>();
+builder.Services.AddSingleton(new PreviewBrowserOptions(
+    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"),
+    builder.Environment.IsDevelopment()
+        ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "AIPlatform.Web", "scripts", "preview-browser.mjs"))
+        : Path.Combine(AppContext.BaseDirectory, "preview-browser", "preview-browser.mjs")));
+builder.Services.AddSingleton<IControlledPreviewBrowser, ControlledPreviewBrowser>();
+builder.Services.AddSingleton<IPreviewRuntime, DockerPreviewAdapter>();
+builder.Services.AddSingleton<PreviewSessionManager>();
+builder.Services.AddHostedService<PreviewMaintenance>();
 builder.Services.AddSingleton<MissionProcessor>();
 builder.Services.AddSingleton<IWorkflowAgents, WorkflowAgents>();
 builder.Services.AddSingleton<CollaborativeProcessor>();
@@ -127,6 +144,7 @@ if (app.Environment.IsDevelopment())
 app.MapAgents();
 app.MapModels();
 app.MapStudio();
+app.MapPreview();
 app.MapGet("/api/health", (CancellationToken token) =>
 {
     token.ThrowIfCancellationRequested();

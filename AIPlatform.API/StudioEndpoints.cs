@@ -16,6 +16,35 @@ public static class StudioEndpoints
         }).WithName("GetMissionWorkflow").WithSummary("Read persisted workflow steps and shared results")
             .WithDescription("Legacy missions have no workflow and return 404. Excludes raw prompts and source contents.");
 
+        app.MapGet("/api/missions/{id:guid}/revisions/{version:int}",
+            Results<Ok<RevisionComparisonResponse>, NotFound> (
+                Guid id, int version, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var mission = missions.Get(id);
+            if (mission is null || mission.Deleted || mission.Workflow is not { } flow)
+                return TypedResults.NotFound();
+            var revisions = flow.Revisions ?? [];
+            var proposals = WorkflowResponse.GetProposals(flow);
+            var history = revisions.Select(item => (item.Version, item.Files, Proposed: false, Review: (ReviewReport?)null))
+                .Concat(proposals.Where(item => revisions.All(revision => revision.Version != item.Version))
+                    .Select(item => (item.Version, item.Files, Proposed: true, item.Review)))
+                .OrderBy(item => item.Version).ToArray();
+            var index = Array.FindIndex(history, item => item.Version == version);
+            if (index < 0) return TypedResults.NotFound();
+            var current = history[index];
+            var prior = history.Take(index).Where(item => current.Proposed || !item.Proposed).ToArray();
+            var before = (prior.Length > 0 ? prior[^1].Files : []).ToDictionary(file => file.Path, file => file.Content, StringComparer.Ordinal);
+            var after = current.Files.ToDictionary(file => file.Path, file => file.Content, StringComparer.Ordinal);
+            var changes = before.Keys.Union(after.Keys, StringComparer.Ordinal).Order(StringComparer.Ordinal)
+                .Where(path => before.GetValueOrDefault(path) != after.GetValueOrDefault(path))
+                .Select(path => new RevisionFileChangeResponse(path, before.GetValueOrDefault(path), after.GetValueOrDefault(path)))
+                .ToArray();
+            return TypedResults.Ok(new RevisionComparisonResponse(version, prior.Length > 0 ? prior[^1].Version : null,
+                changes, current.Proposed, current.Review));
+        }).WithName("GetRevisionComparison").WithSummary("Compare revisions and correction proposals")
+            .WithDescription("Returns changed files and their before/after content, including unapplied proposals; deleted projects return 404.");
+
         app.MapPost("/api/missions/{id:guid}/resume", Results<Accepted, NotFound, Conflict> (
             Guid id, IMissionService missions, CancellationToken token) =>
         {
@@ -24,6 +53,68 @@ public static class StudioEndpoints
             return missions.Resume(id) ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
         }).WithName("ResumeMission").WithSummary("Explicitly resume an interrupted collaborative mission")
             .WithDescription("Retains prior results, discards prior approvals and rereviews existing files. Verified, deleted and legacy missions cannot resume.");
+
+        app.MapPost("/api/missions/{id:guid}/revalidate",
+            async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
+                Guid id, IMissionService missions, IWorkspaceStore workspaces, IExecutionPlanService plans,
+                ISandboxRunner sandbox, CancellationToken token) =>
+        {
+            var mission = missions.Get(id);
+            if (mission is null) return TypedResults.NotFound();
+            if (mission.Status is not (MissionStatus.GeneratedUnverified or MissionStatus.AwaitingApproval) ||
+                mission.TemplateId != "fullstack-react-dotnet" || mission.Workflow?.Revisions?.LastOrDefault() is not { } revision)
+                return TypedResults.Conflict();
+            if (!(await sandbox.GetAvailabilityAsync(id, token)).Available)
+                return TypedResults.Conflict();
+            var plan = await plans.GetAsync(id, token, mission.Workflow.Version + 1);
+            var files = workspaces.List(id).Where(file => file.Path != "Generated.slnx").ToArray();
+            if (files.Length != revision.Files.Count ||
+                files.Any(file => revision.Files.All(expected => expected.Path != file.Path)))
+                return TypedResults.Conflict();
+            foreach (var file in files)
+                if ((await workspaces.ReadAsync(id, file.Path, token)).Content !=
+                    revision.Files.Single(expected => expected.Path == file.Path).Content)
+                    return TypedResults.Conflict();
+            if (plan.Fingerprint != (await plans.GetAsync(id, token, mission.Workflow.Version + 1)).Fingerprint)
+                return TypedResults.Conflict();
+            return missions.PrepareRevalidation(id, mission.UpdatedAt, plan)
+                ? TypedResults.Ok(ExecutionPlanResponse.From(plan)) : TypedResults.Conflict();
+        }).WithName("PrepareMissionRevalidation").WithSummary("Prepare a new full-stack validation plan without executing it")
+            .WithDescription("Requires identical reviewed sources and an available offline image. Preserves prior evidence and corrections, discards approval, and waits for new human consent.");
+
+        app.MapPost("/api/missions/{id:guid}/manual-backend-revision",
+            async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
+                Guid id, ManualBackendRevisionRequest request, IMissionService missions,
+                IManualRevisionService revisions, CancellationToken token) =>
+        {
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            if (request.Files is null || string.IsNullOrWhiteSpace(request.Fingerprint) ||
+                request.Files.Any(file => file is null || string.IsNullOrWhiteSpace(file.Path) ||
+                    string.IsNullOrWhiteSpace(file.Content)))
+                throw new StudioValidationException("A current fingerprint and backend replacements are required.");
+            var plan = await revisions.ApplyAsync(id, request.Fingerprint, ManualRevisionRole.Backend,
+                request.Files.Select(file => new GeneratedFile(file.Path, file.Content)).ToArray(), token);
+            return plan is null ? TypedResults.Conflict() : TypedResults.Ok(ExecutionPlanResponse.From(plan));
+        }).WithName("ApplyManualBackendRevision")
+            .WithSummary("Apply an explicitly reviewed full-stack backend revision")
+            .WithDescription("Accepts only editable backend files and a current fingerprint. Never executes code, calls an agent or approves Docker.");
+
+        app.MapPost("/api/missions/{id:guid}/manual-frontend-revision",
+            async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
+                Guid id, ManualFrontendRevisionRequest request, IMissionService missions,
+                IManualRevisionService revisions, CancellationToken token) =>
+        {
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            if (request.Files is null || string.IsNullOrWhiteSpace(request.Fingerprint) ||
+                request.Files.Any(file => file is null || string.IsNullOrWhiteSpace(file.Path) ||
+                    string.IsNullOrWhiteSpace(file.Content)))
+                throw new StudioValidationException("A current fingerprint and frontend replacements are required.");
+            var plan = await revisions.ApplyAsync(id, request.Fingerprint, ManualRevisionRole.Frontend,
+                request.Files.Select(file => new GeneratedFile(file.Path, file.Content)).ToArray(), token);
+            return plan is null ? TypedResults.Conflict() : TypedResults.Ok(ExecutionPlanResponse.From(plan));
+        }).WithName("ApplyManualFrontendRevision")
+            .WithSummary("Apply an explicitly reviewed full-stack frontend revision")
+            .WithDescription("Accepts only editable frontend files and a current fingerprint. Never executes code, calls an agent or approves Docker.");
 
         app.MapPut("/api/workspaces/{id:guid}", Results<Ok<MissionResponse>, NotFound> (
             Guid id, UpdateProjectRequest request, IMissionService missions, CancellationToken token) =>
@@ -47,7 +138,8 @@ public static class StudioEndpoints
         app.MapPost("/api/missions", (CreateMissionRequest request, IMissionService missions, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();
-            var mission = missions.Submit(new(request.Task ?? "", request.Kind, request.AgentId, request.ApproveSandboxExecution));
+            var mission = missions.Submit(new(request.Task ?? "", request.Kind, request.AgentId,
+                request.ApproveSandboxExecution, request.TemplateId));
             return TypedResults.Accepted($"/api/missions/{mission.Id}", MissionResponse.From(mission));
         }).WithName("CreateMission").WithSummary("Queue a Studio mission")
             .WithDescription("Returns immediately with a mission identifier and Location for polling.")
@@ -78,7 +170,13 @@ public static class StudioEndpoints
                 return TypedResults.NotFound();
             if (mission.Status != MissionStatus.AwaitingApproval)
                 return TypedResults.Conflict();
-            return TypedResults.Ok(ExecutionPlanResponse.From(await plans.GetAsync(id, token)));
+            var plan = await plans.GetAsync(id, token);
+            if (mission.TemplateId == "fullstack-react-dotnet" &&
+                (mission.Workflow?.Revisions?.LastOrDefault() is not { ExecutionPlan: { } saved } ||
+                 saved.Fingerprint != plan.Fingerprint || saved.Canonical?.WorkflowVersion != mission.Workflow.Version ||
+                 saved.Canonical.ComputeFingerprint() != plan.Fingerprint))
+                return TypedResults.Conflict();
+            return TypedResults.Ok(ExecutionPlanResponse.From(plan));
         }).WithName("GetMissionExecutionPlan").WithSummary("Review this mission's bounded execution plan")
             .WithDescription("Includes the workspace/configuration fingerprint, offline image, limits and allowed operations.");
 
@@ -94,6 +192,15 @@ public static class StudioEndpoints
                 return TypedResults.Conflict();
             var plan = await plans.GetAsync(id, token);
             if (!string.Equals(request.Fingerprint, plan.Fingerprint, StringComparison.Ordinal))
+                return TypedResults.Conflict();
+            if (request.Approved && mission.Workflow is { } flow &&
+                (flow.Revisions?.LastOrDefault() is not { } revision ||
+                 revision.Version != flow.Version || revision.Fingerprint != plan.Fingerprint))
+                return TypedResults.Conflict();
+            if (request.Approved && mission.TemplateId == "fullstack-react-dotnet" &&
+                (mission.Workflow?.Revisions?.LastOrDefault()?.ExecutionPlan is not { Canonical: { } canonical } saved ||
+                 saved.Fingerprint != plan.Fingerprint || canonical.WorkflowVersion != mission.Workflow.Version ||
+                 canonical.ComputeFingerprint() != plan.Fingerprint))
                 return TypedResults.Conflict();
             return missions.DecideApproval(id, request.Approved, plan.Fingerprint)
                 ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
@@ -146,6 +253,40 @@ public static class StudioEndpoints
             return TypedResults.Ok(workspaces.List(id).Select(item => new WorkspaceFileResponse(item.Path, item.Size)).ToArray());
         }).WithName("ListWorkspaceFiles").WithSummary("List generated source files")
             .WithDescription("Rejects symlinks and never exposes files outside the mission workspace.");
+
+        app.MapGet("/api/workspaces/{id:guid}/analysis",
+            async Task<Results<Ok<ProjectAnalysisResponse>, NotFound, Conflict>> (
+                Guid id, IWorkspaceAnalysis workspaceAnalysis, CancellationToken token) =>
+        {
+            var result = await workspaceAnalysis.AnalyzeAsync(id, token);
+            return result.Status switch
+            {
+                WorkspaceAnalysisStatus.NotFound => TypedResults.NotFound(),
+                WorkspaceAnalysisStatus.Conflict => TypedResults.Conflict(),
+                WorkspaceAnalysisStatus.Available when result.Analysis is not null =>
+                    TypedResults.Ok(ProjectAnalysisResponse.From(result.Analysis)),
+                _ => throw new InvalidOperationException("Invalid workspace analysis result.")
+            };
+        }).WithName("AnalyzeWorkspace").WithSummary("Analyze an existing isolated workspace statically")
+            .WithDescription("Does not execute scripts, inspect external directories, call Ollama, or persist the report.")
+            .ProducesProblem(400);
+
+        app.MapGet("/api/workspaces/{id:guid}/export",
+            async Task<Results<FileContentHttpResult, NotFound, Conflict>> (
+                Guid id, IMissionService missions, IProjectExport exports, HttpContext context, CancellationToken token) =>
+        {
+            var mission = missions.Get(id);
+            if (mission is null || !mission.HasWorkspace || mission.Deleted) return TypedResults.NotFound();
+            if (mission.Status is MissionStatus.Queued or MissionStatus.Running) return TypedResults.Conflict();
+            var archive = await exports.CreateAsync(id, token);
+            var current = missions.Get(id);
+            if (current is null || current.Deleted || current.UpdatedAt != mission.UpdatedAt)
+                return TypedResults.Conflict();
+            context.Response.Headers.CacheControl = "no-store";
+            return TypedResults.File(archive, "application/zip", $"aiplatform-{id:N}.zip");
+        }).WithName("ExportWorkspace").WithSummary("Download eligible project sources as a ZIP")
+            .WithDescription("Excludes non-source files and blocks suspected credentials; inspect the archive before sharing.")
+            .ProducesProblem(400);
 
         app.MapGet("/api/workspaces/{id:guid}/file", async Task<Results<Ok<WorkspaceContentResponse>, NotFound>> (
             Guid id, string path, IMissionService missions, IWorkspaceStore workspaces, CancellationToken token) =>

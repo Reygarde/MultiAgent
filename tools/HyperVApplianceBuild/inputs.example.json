@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "distribution": "trixie",
+  "architecture": "amd64",
+  "sourceDateEpoch": 1794614400,
+  "kernelRelease": "6.12.117+deb13-amd64",
+  "keyring": "trust/debian-archive-keyring.gpg",
+  "grubSecureBootCertificate": "trust/debian-grub.pem",
+  "kernelSecureBootCertificate": "trust/debian-kernel.pem",
+  "microsoftUefiCertificate": "trust/microsoft-uefi.pem",
+  "files": [
+    {
+      "path": "trust/debian-archive-keyring.gpg",
+      "sha256": null,
+      "origin": "Debian archive keyring; independently approve fingerprint and package",
+      "version": null
+    },
+    {
+      "path": "trust/debian-grub.pem",
+      "sha256": null,
+      "origin": "Debian GRUB signing certificate; independently verified",
+      "version": null
+    },
+    {
+      "path": "trust/debian-kernel.pem",
+      "sha256": null,
+      "origin": "Debian kernel signing certificate; independently verified",
+      "version": null
+    },
+    {
+      "path": "trust/microsoft-uefi.pem",
+      "sha256": null,
+      "origin": "Microsoft UEFI certificate matching the selected signed shim",
+      "version": null
+    }
+  ],
+  "packages": [],
+  "builderTools": [],
+  "overlay": [],
+  "prototypeComponents": [
+    { "role": "guest-agent", "path": null, "version": null },
+    { "role": "weston-module", "path": null, "version": null },
+    { "role": "host-broker", "path": null, "version": null },
+    { "role": "host-viewer", "path": null, "version": null },
+    { "role": "host-supervisor", "path": null, "version": null }
+  ]
+}

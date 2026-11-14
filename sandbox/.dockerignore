@@ -1,3 +1,14 @@
 *
 !Dockerfile
 !SandboxPackages.csproj
+!Discord.Dockerfile
+!DiscordSandboxPackages.csproj
+!DiscordNuGet.Config
+!FullStack.Dockerfile
+!FullStackSandboxPackages.csproj
+!FullStackNuGet.Config
+!FullStackRestore.sh
+!fullstack-feed/
+!fullstack-feed/*.nupkg
+!fullstack-feed/SHA512SUMS
+!packages.lock.json

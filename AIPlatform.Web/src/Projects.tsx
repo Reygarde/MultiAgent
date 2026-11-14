@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { FileCode2, FolderOpen, LoaderCircle } from 'lucide-react'
 import { api, errorMessage } from './api'
-import type { FileContent, Mission, WorkspaceFile } from './types'
+import type { FileContent, Mission, ProjectAnalysis, WorkspaceFile } from './types'
 import { CodeBlock } from './Markdown'
 import { StatusBadge } from './MissionDetails'
 import { isActive } from './types'
@@ -30,6 +30,19 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
       else await api.renameProject(selected.id, name, description)
       setEditing(false); setConfirmDelete(false); await refresh()
     } catch (error) { setError(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
+  async function downloadProject() {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try {
+      const blob = await api.exportProject(selected.id)
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url; link.download = `aiplatform-${selected.id}.zip`
+      link.click()
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    } catch (failure) { setError(errorMessage(failure)) }
     finally { setBusy(false) }
   }
   useEffect(() => {
@@ -72,6 +85,10 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
           setName(selected.projectName || `Projet ${selected.id.slice(0, 8)}`); setDescription(selected.projectDescription || ''); setEditing(true)
         }}>Renommer</button>
         <button className="button secondary" disabled={isActive(selected)} onClick={() => setConfirmDelete(true)}>Supprimer le projet</button>
+        <button className="button secondary" disabled={busy || selected.status === 'Running' || selected.status === 'Queued'}
+          onClick={() => void downloadProject()}>Exporter en ZIP</button>
+        <p className="muted small">Inspectez l’archive avant partage : la détection des secrets n’est pas exhaustive.</p>
+        <AnalysisPanel key={`${selected.id}-${selected.updatedAt}`} mission={selected} />
         {editing && <form className="settings-grid" onSubmit={event => { event.preventDefault(); void changeProject(false) }}>
           <label>Nom du projet<input value={name} onChange={event => setName(event.target.value)} maxLength={80} required /></label>
           <label>Description<textarea value={description} onChange={event => setDescription(event.target.value)} maxLength={1000} /></label>
@@ -105,4 +122,42 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
       </div>
     </section>
   </div>
+}
+
+function AnalysisPanel({ mission }: { mission: Mission }) {
+  const [analysis, setAnalysis] = useState<ProjectAnalysis | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+  const controller = useRef<AbortController | null>(null)
+  useEffect(() => () => controller.current?.abort(), [])
+  async function analyze() {
+    const request = new AbortController()
+    controller.current = request
+    setLoading(true); setError(null); setAnalysis(null)
+    try { setAnalysis(await api.analysis(mission.id, request.signal)) }
+    catch (failure) { if (!request.signal.aborted) setError(errorMessage(failure)) }
+    finally { if (!request.signal.aborted) setLoading(false) }
+  }
+  return <section className="technical-logs">
+    <h3>Analyse statique</h3>
+    <p className="muted small">Workspace isolé uniquement ; fichiers sensibles et artefacts exclus.
+      Aucun script ni appel Ollama. Rapport non persisté.</p>
+    <button className="button secondary" disabled={loading || mission.status === 'Running' || mission.status === 'Queued'}
+      onClick={() => void analyze()}>{loading ? 'Analyse…' : 'Analyser le projet'}</button>
+    {error && <p role="alert" className="error-inline">{error}</p>}
+    {analysis && <div>
+      <p>Langages : {analysis.languages.join(', ') || 'non détectés'}</p>
+      <p>Frameworks : {analysis.frameworks.join(', ') || 'non détectés'}</p>
+      <p>Git : {analysis.gitRepositoryDetected === null ? 'non vérifié' : analysis.gitRepositoryDetected ? 'détecté' : 'non détecté'}</p>
+      <p>Solutions : {analysis.solutions.join(', ') || 'aucune détectée'}</p>
+      <p>Projets : {analysis.projects.join(', ') || 'aucun détecté'}</p>
+      <p>Tests : {analysis.testProjects.join(', ') || 'aucun projet détecté'}</p>
+      <p>Points d’entrée : {analysis.entryPoints.join(', ') || 'aucun détecté'}</p>
+      <p>Docker : {analysis.dockerFiles.join(', ') || 'aucun fichier détecté'}</p>
+      <p>Scripts déclarés (non exécutés) : {analysis.scripts.map(script => `${script.manifest}: ${script.name}`).join(', ') || 'aucun'}</p>
+      <p>Dépendances déclarées : {analysis.dependencies.map(dependency =>
+        `${dependency.name} (${dependency.ecosystem}, ${dependency.version ?? 'version non résolue'})`).join(', ') || 'aucune'}</p>
+      {analysis.issues.map((issue, index) => <p role="alert" key={`${issue.path}-${index}`}>{issue.path} : {issue.message}</p>)}
+    </div>}
+  </section>
 }

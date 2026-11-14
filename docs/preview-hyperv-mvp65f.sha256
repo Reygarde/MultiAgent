@@ -1,0 +1,8 @@
+# Preparation plan only; this is NOT a VM execution approval or an image signature.
+# The plan digest hashes compact recursively key-sorted ASCII JSON, UTF-8, no BOM/newline.
+# It is NOT the raw pretty-printed plan.json checksum.
+canonicalization=65f-ascii-json-v1
+canonical-plan-bytes=9493
+canonical-plan-sha256=407197b7acb14159e138bc78d81a8e24a485911802e10241e3b0a4bc5634ed05
+runbook-file-sha256=90a6c9402275db30103e4ab350c8928b47dc1a2ebe9538ea6a9dd73cd955602d
+static-page-file-sha256=9c0e1de23e465609561a1b52a9befde1bdc7aca9fcc9a832c594145d60735c37

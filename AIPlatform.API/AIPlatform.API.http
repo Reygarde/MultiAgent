@@ -49,6 +49,44 @@ Content-Type: application/json
 ### Remplacer par l'identifiant retourne par POST /api/missions
 @missionId = 00000000-0000-0000-0000-000000000000
 
+### Preview (Desktop uniquement) : remplacer le jeton et les identifiants
+@desktopToken = REPLACE_WITH_SESSION_TOKEN
+@previewId = 00000000-0000-0000-0000-000000000000
+@previewFingerprint = REPLACE_WITH_REVIEWED_FINGERPRINT
+
+### Prepare un plan ; le runtime actuel retourne 503 et ne demarre rien
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/previews
+Authorization: Bearer {{desktopToken}}
+
+### Examiner le plan
+GET {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}/plan
+Authorization: Bearer {{desktopToken}}
+
+### Autoriser explicitement ce plan, apres examen
+POST {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}/approval
+Authorization: Bearer {{desktopToken}}
+Content-Type: application/json
+
+{
+  "fingerprint": "{{previewFingerprint}}"
+}
+
+### Demarrer seulement apres autorisation
+POST {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}/start
+Authorization: Bearer {{desktopToken}}
+
+### Etat et evenements de cycle de vie
+GET {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}
+Authorization: Bearer {{desktopToken}}
+
+###
+GET {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}/logs
+Authorization: Bearer {{desktopToken}}
+
+### Arreter
+POST {{AIPlatform.API_HostAddress}}/api/previews/{{previewId}}/stop
+Authorization: Bearer {{desktopToken}}
+
 ### Historique persiste
 GET {{AIPlatform.API_HostAddress}}/api/missions
 
@@ -75,11 +113,28 @@ Content-Type: application/json
   "approveSandboxExecution": false
 }
 
+### Creer un bot Discord sans autoriser la compilation ou les tests
+POST {{AIPlatform.API_HostAddress}}/api/missions
+Content-Type: application/json
+
+{
+  "task": "Cree un bot Discord avec /ping, /help et /info.",
+  "kind": "Project",
+  "templateId": "discord-bot-dotnet",
+  "approveSandboxExecution": false
+}
+
 ### Liste des workspaces
 GET {{AIPlatform.API_HostAddress}}/api/workspaces
 
 ### Fichiers d'un workspace (identifiant = mission)
 GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/files
+
+### Analyse statique du workspace isole
+GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/analysis
+
+### Export ZIP du projet inactif (refuse les secrets detectes)
+GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/export
 
 ### Apercu texte d'un fichier valide
 GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/file?path=src%2FApp%2FProgram.cs
@@ -92,6 +147,33 @@ GET {{AIPlatform.API_HostAddress}}/api/sandbox
 
 ### Plan reel, uniquement lorsque la mission est AwaitingApproval
 GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/execution-plan
+
+### Full-stack GeneratedUnverified : nouveau plan sans LLM, generation ou execution Docker
+# Sources identiques a la derniere revision relue et image hors ligne disponible requises.
+# Passe a AwaitingApproval sans consommer de correction ; n'autorise pas Docker.
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/revalidate
+
+### Appliquer une correction backend full-stack explicitement examinee ; pas d'autorisation Docker
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/manual-backend-revision
+Content-Type: application/json
+
+{
+  "fingerprint": "{{planFingerprint}}",
+  "files": [
+    { "path": "backend/Api/TaskService.cs", "content": "REMPLACER PAR LE FICHIER COMPLET EXAMINE" }
+  ]
+}
+
+### Appliquer une correction frontend full-stack explicitement examinee ; pas d'autorisation Docker
+POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/manual-frontend-revision
+Content-Type: application/json
+
+{
+  "fingerprint": "{{planFingerprint}}",
+  "files": [
+    { "path": "frontend/src/api.ts", "content": "REMPLACER PAR LE FICHIER COMPLET EXAMINE" }
+  ]
+}
 
 ### Copier l'empreinte du plan apres revue des fichiers et operations
 @planFingerprint = replace-with-reviewed-plan-fingerprint
@@ -119,6 +201,9 @@ GET {{AIPlatform.API_HostAddress}}/api/missions/00000000-0000-0000-0000-00000000
 
 ### Workflow collaboratif (404 pour les anciennes missions)
 GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/workflow
+
+### Comparer la version 2 a la version precedente (404 si inexistante)
+GET {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/revisions/2
 
 ### Reprise explicite : accords precedents annules
 POST {{AIPlatform.API_HostAddress}}/api/missions/{{missionId}}/resume

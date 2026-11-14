@@ -118,6 +118,61 @@ public sealed class SandboxTests
     }
 
     [Fact]
+    public async Task FullStackCannotExecuteWithoutCanonicalApproval()
+    {
+        using var fixture = new WorkflowFixture(fullStack: true);
+        var mission = fixture.Store.Submit(new("No unapproved execution", MissionKind.Project,
+            TemplateId: FullStackTemplate.Id));
+        await fixture.Processor.ProcessAsync(mission.Id, default);
+        var process = new ProcessStub((arguments, _) => Task.FromResult(new ContainerProcessResult(0,
+            arguments[0] == "image" ? "sha256:" + new string('a', 64) : "unexpected")));
+        var options = new SandboxOptions { Enabled = true };
+        var plans = new ExecutionPlanService(fixture.Workspaces, options, fixture.Options, fixture.Store, process);
+        var runner = new DockerSandboxRunner(options, fixture.Workspaces, process, fixture.Store, plans);
+        await Assert.ThrowsAsync<StudioValidationException>(() => runner.RunAsync(mission.Id, "BackendBuild", default));
+        Assert.DoesNotContain(process.Calls, call => call[0] == "run");
+    }
+
+    [Fact]
+    public async Task FullStackBackendTestsReadTrxRatherThanVitestResults()
+    {
+        using var fixture = new WorkflowFixture(fullStack: true);
+        var mission = fixture.Store.Submit(new("Full-stack report regression", MissionKind.Project,
+            TemplateId: FullStackTemplate.Id));
+        fixture.Workspaces.Create(mission.Id);
+        await fixture.Workspaces.WriteAsync(mission.Id, FullStackTemplate.Files, default, FullStackTemplate.Id);
+        var report = "\nAIPLATFORM_TRX_BEGIN\n" +
+            """<TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult outcome="Passed" /></Results><ResultSummary outcome="Completed"><Counters total="1" executed="1" passed="1" failed="0" /></ResultSummary></TestRun>""" +
+            "\nAIPLATFORM_TRX_END\n";
+        var process = new ProcessStub((arguments, _) => Task.FromResult(new ContainerProcessResult(0,
+            arguments[0] == "image" ? "sha256:" + new string('a', 64) :
+            arguments[0] == "run" ? report : "removed")));
+        var options = new SandboxOptions { Enabled = true };
+        var plans = new ExecutionPlanService(fixture.Workspaces, options, fixture.Options, fixture.Store, process);
+        var plan = await plans.GetAsync(mission.Id, default);
+        fixture.Store.Update(mission.Id, snapshot => snapshot with
+        {
+            HasWorkspace = true, Status = MissionStatus.AwaitingApproval,
+            Workflow = snapshot.Workflow! with
+            {
+                Revisions = [new(1, DateTimeOffset.UtcNow, "Report regression.", plan.Fingerprint, FullStackTemplate.Files, plan)]
+            }
+        });
+        Assert.True(fixture.Store.DecideApproval(mission.Id, true, plan.Fingerprint));
+        var runner = new DockerSandboxRunner(options, fixture.Workspaces, process, fixture.Store, plans);
+
+        var result = await runner.RunAsync(mission.Id, "BackendTests", default);
+
+        Assert.Equal("Succeeded", result.Status);
+        Assert.Equal(1, result.TotalTests);
+        Assert.Equal(0, result.FailedTests);
+        var command = process.Calls.Single(call => call[0] == "run");
+        Assert.Contains("sha256:" + new string('a', 64), command);
+        Assert.Contains(command, argument => argument.Contains("sha256sum -c --status", StringComparison.Ordinal));
+        Assert.Contains(command, argument => argument.Contains("find . -type l -print -quit", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task CleanupFailureDisablesFutureContainerExecutions()
     {
         using var fixture = new StudioFixture();

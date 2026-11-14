@@ -3,6 +3,10 @@ import type { Agent, Mission, Model } from '../types'
 export const agents: Agent[] = [
   { id: 'Dispatch', description: 'Route les tâches', capabilities: ['routing'], modelId: 'local', isRouter: true, canGenerateProjects: false },
   { id: 'CustomCoder', description: 'Développe des projets', capabilities: ['C#'], modelId: 'local', isRouter: false, canGenerateProjects: true },
+  { id: 'BackendAgent', description: 'API et persistance', capabilities: ['ASP.NET Core'], modelId: 'local',
+    isRouter: false, canGenerateProjects: true, role: 'Backend', taskTypes: ['Project'] },
+  { id: 'FrontendAgent', description: 'Interface React', capabilities: ['React'], modelId: 'local',
+    isRouter: false, canGenerateProjects: true, role: 'Frontend', taskTypes: ['Project'] },
   { id: 'CustomGeneral', description: 'Explique des concepts', capabilities: ['explication'], modelId: 'local', isRouter: false, canGenerateProjects: false },
 ]
 export const models: Model[] = [

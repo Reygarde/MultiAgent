@@ -1,4 +1,4 @@
-# AIPlatform Studio - MVP 5
+# AIPlatform Studio - 0.6.5
 
 Plateforme multi-agents locale .NET 10 + React/TypeScript. Ollama selectionne un
 agent autorise et son modele configure. Studio permet de suivre des missions
@@ -11,6 +11,802 @@ Sans Docker Linux disponible, image hors ligne preparee, activation explicite de
 la sandbox ET accord humain pour la mission, la compilation et les tests ne sont
 pas executes. Le statut final est alors `GeneratedUnverified`, jamais un succes
 de compilation.
+
+## Avancement MVP 6 (incomplet)
+
+### Live Preview (en cours, indisponible)
+
+Le verificateur de sources Preview compare une revision full-stack Verified,
+son plan canonique et les fichiers du workspace, sans les executer. Il ne
+prepare pas de session et ne constitue pas une autorisation Preview.
+Le statut Verified et l'autorisation Docker de validation ne permettent pas
+de demarrer une application.
+
+Un modele de plan canonique, un registre d'autorisations en memoire et un
+coordinateur relient le verificateur de sources a un adaptateur de Preview.
+Le coordinateur revalide le plan avant de consommer une autorisation, capture
+les octets verifies dans un instantane immutable et attend deux controles de
+disponibilite avant `Ready`. Son parcours et son nettoyage sont testes avec
+un adaptateur simule uniquement. Les autorisations ne survivent pas a un
+redemarrage ; le coordinateur refuse le demarrage tant que la recuperation
+des ressources orphelines n'a pas ete confirmee par l'adaptateur.
+
+L'API Desktop authentifiee expose la preparation, le plan, l'autorisation, le
+demarrage, l'etat, les evenements de cycle de vie et l'arret. La maintenance
+demande la recuperation des ressources au demarrage et verifie l'expiration
+chaque seconde. Une seule session peut etre active a la fois. Les evenements
+sont limites a 64 messages predefinis ; ils ne contiennent pas les journaux
+de l'application generee.
+
+`DockerPreviewAdapter` est maintenant enregistre comme `IPreviewRuntime`.
+Son moteur interne resout l'image Linux amd64 par ID immuable, copie un
+instantane verifie dans un staging controle puis en verifie encore les hash
+dans le conteneur avant compilation. Il cree et demarre un conteneur non root,
+racine read-only, sans capacites, no-new-privileges, avec limites CPU/RAM/PID,
+sources montees read-only et tmpfs `/work` et `/tmp`. Les deux services ecoulent
+leur trafic uniquement sur le loopback du conteneur (`--network=none`) ;
+SQLite reste dans `/tmp/preview.db`. Aucun port hote, reseau Docker dedie ou
+volume persistant n'est cree. Des controles HTTP via `docker exec` et un
+controle d'etat du conteneur precedent la reussite du demarrage interne.
+L'arret confirme l'absence du conteneur avant suppression du staging ; la
+recuperation cible les labels propres au magasin Studio et refuse les noms
+inattendus. Un echec de nettoyage verrouille les demarrages internes jusqu'a
+recuperation confirmee.
+
+`PreviewProxy` et `DockerPreviewHttpTransport` sont enregistres en DI.
+Le proxy Kestrel ouvre une origine HTTP temporaire sur `127.0.0.1`, uniquement
+apres les controles de disponibilite du conteneur. Chaque requete exige un
+jeton aleatoire propre a la session dans `X-Preview-Token`. Aucun cookie,
+jeton Studio, Host fourni ou en-tete d'authentification n'est transmis.
+Les origines et Host entrants sont verifies ; les en-tetes de forwarding et
+WebSocket sont refuses. Les routes sont limitees au frontend (`/` et assets
+approuves) et au CRUD `/api/tasks`. Aucune URL de destination n'est acceptee.
+Le relais utilise un programme Node fixe via `docker exec`, avec un payload
+JSON encode en base64 comme argument, sans shell derive de la requete.
+Les seules destinations sont les ports 5080/5081 du loopback du conteneur.
+Les reponses 3xx sont toutes refusees, ainsi que les types MIME inattendus.
+Limites : corps entrant 16 KiB, reponse 1 MiB, delai 10 secondes et un relais
+actif par session. Les WebSockets, SSE et streaming ne sont pas pris en charge.
+Ces parametres et l'exposition loopback ephemere sont lies au plan canonique.
+L'arret ferme et annule le proxy avant de retirer le conteneur ; l'expiration
+refuse les requetes et la maintenance de session demande l'arret.
+
+### Navigateur dedie MVP 6.5-C : implementation concrete, activation bloquee
+
+[ControlledPreviewBrowser](AIPlatform.Infrastructure/Studio/ControlledPreviewBrowser.cs)
+implemente `IControlledPreviewBrowser` et est enregistre en DI. Il lance un
+processus Node distinct avec un helper fixe, une entree JSON sur stdin,
+un message de readiness borne, un environnement sans les variables Studio,
+un profil temporaire par session et une fermeture gracieuse puis forcee si
+necessaire. Les erreurs du helper sont signalees sans recopier les sorties brutes.
+Les profils orphelins ne sont jamais declares nettoyes ni supprimes a l'aveugle ;
+leur presence bloque la recuperation. Aucun processus tiers n'est tue.
+
+Le helper [preview-browser.mjs](AIPlatform.Web/scripts/preview-browser.mjs)
+utilise Edge installe et Playwright, sans WebView ni API Tauri. L'interception
+HTTP ne laisse passer que l'origine Preview approuvee. Le sandbox Chromium
+est explicitement active, sans le `--no-sandbox` par defaut de Playwright.
+Le helper relaie ces
+requetes lui-meme, avec le jeton en memoire : le renderer ne connait ni le
+jeton ni les cookies Studio. Les cookies, Authorization et Set-Cookie sont
+supprimes. Les requetes non interceptees rencontrent un proxy de refus ;
+les WebSockets sont refuses, les service workers bloques, les popups fermes,
+les redirections refusees et les telechargements denies par CDP.
+Les corps sont limites a 16 KiB, les reponses a 1 MiB, le relais a 10 secondes ;
+une file bornee de huit requetes serialise les appels vers le proxy.
+
+L'adaptateur ouvre le navigateur apres le proxy et les health checks, seulement
+dans le parcours de demarrage autorise. Un echec ferme le proxy et supprime le
+conteneur, meme si le nettoyage du navigateur echoue. La maintenance detecte
+une sortie du helper et ferme la session au prochain passage (environ une seconde).
+L'expiration ferme aussi le navigateur ; un profil restant est un echec explicite,
+jamais un arret propre. Les parametres du navigateur sont lies au plan canonique.
+
+**Blocage de securite effectivement observe :** les tests Edge headless avec
+de faux services locaux ont observe des paquets UDP WebRTC vers un faux serveur
+STUN, malgre `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`.
+Le test attend toujours zero paquet et reste volontairement en echec.
+Les autres assertions ont verifie le refus HTTP vers Studio factice, localhost,
+127.0.0.2, ::1, prive/link-local/externe, les navigations file/custom et les
+redirections, fetch/XHR, images/CSS, iframe/worker/popup, les limites et timeouts.
+Les faux services HTTP n'ont recu aucune requete interdite. Les tests de deux
+sessions et d'expiration/profil reussissent. Cela ne certifie pas tous les
+protocol handlers, workers blob, sorties DNS, acces disque ou contournements
+du moteur : une interception HTTP n'est pas une enceinte reseau Windows.
+Les essais concernent des pages factices, pas un projet genere.
+
+`IsolationVerified` reste explicitement false, preparation **HTTP 503** et
+`StartAsync` verrouille. Node/Playwright/helper ne sont pas inclus dans le
+packaging Windows actuel ; aucune nouvelle application n'a ete installee.
+Les capabilities Tauri restent reservees a `main`, sans delegation au navigateur
+dedie. Le fonctionnement apres crash dur et le packaging restent non certifies.
+
+Avant toute activation, il faut une isolation imposee par Windows, independante
+du JavaScript et des flags Edge : par exemple un processus dedie sous AppContainer
+et confinement WFP propre a cette instance, ou un environnement virtualise dedie
+sans reseau Windows partage. Cette alternative doit etre prototypee et verifiee
+sans modifier les politiques des navigateurs personnels. Il faut ensuite
+reexecuter les tests de contournement, verifier le packaging et presenter un
+nouveau plan complet pour une autorisation Preview explicite a usage unique.
+Une autorisation de validation v9 n'est jamais reutilisable pour la Preview.
+Les tests doubles ne prouvent pas l'isolation ni le nettoyage Docker reels.
+Aucune Preview reelle n'a ete executee ; MVP 6.5 et 6.5-C ne sont pas declares termines.
+
+Tests reproductibles sans Docker ni Ollama :
+`npm run preview:test-browser` dans `AIPlatform.Web` (l'echec WebRTC est bloquant)
+et les tests backend Preview avec `dotnet test`.
+
+### Prototype Windows MVP 6.5-D (non integre)
+
+Le prototype Windows MVP 6.5-D est disponible dans
+[tools/WindowsConfinementPrototype](tools/WindowsConfinementPrototype/README.md),
+sans raccordement au runtime de production. Les sondes natives AppContainer
+ont mesure zero connexion/paquet interdit, mais Edge confine plante avant
+l'execution de la page et WFP refuse la transaction d'ecriture sans privileges
+supplementaires. Les temoins non confines restent fonctionnels, le nettoyage
+normal et Kill-on-job-close sont verifies ; la recuperation du profil apres
+crash du controleur principal ne l'est pas. Recommandation : enceinte
+virtualisee dediee a valider separement. HTTP 503 reste actif, sans Docker reel,
+Ollama ni execution d'un projet genere.
+
+### Architecture Preview virtualisee MVP 6.5-E (non executee)
+
+Le [comparatif et plan MVP 6.5-E](docs/preview-virtualisee-mvp65e.md)
+recommande une appliance Linux Hyper-V jetable sans carte reseau, avec
+navigateur/application dans l'invite et broker pixels/entrees sur HvSocket.
+WSL2 n'est pas retenu comme enceinte dediee. Le document definit les frontieres
+de confiance, le protocole borne, les tests de paquets, le nettoyage et la
+migration versionnee du runtime. Aucune VM ni image systeme n'a ete lancee :
+autorisation d'execution distincte, droits Windows/transport qualifies et
+ressources disponibles restent requis. HTTP 503 est conserve.
+
+### Preparation Hyper-V MVP 6.5-F (sans execution)
+
+Le [dossier 6.5-F](docs/preview-hyperv-mvp65f.md) fixe la provenance Debian
+13.7.0, les sommes publiees, la configuration Gen2 et les deux services HvSocket
+proposes, avec commandes non executees, tests et recovery.
+Le [plan de preparation](docs/preview-hyperv-mvp65f.plan.json) est empreinte mais
+**non executable** : appliance/broker/supervision et isolation des autres canaux
+non verifies, droits Hyper-V refuses et RAM mesuree sous 4,5 Gio.
+Aucune VM, inscription de service ou autorisation Preview creee ; HTTP 503 conserve.
+
+### Prerequis Hyper-V MVP 6.5-G (sans modification systeme)
+
+Le [dossier 6.5-G](docs/preview-hyperv-mvp65g.md) confirme Windows 23H2 hors
+support, les lectures TPM/Secure Boot refusees et environ 1,13 Gio de RAM libre.
+Il distingue l'appartenance Administrateurs deja configuree du jeton courant
+non privilegie, prepare sauvegardes/mise a niveau et decrit les accords minimaux.
+Les [scripts de construction offline](tools/HyperVApplianceBuild/build-offline.sh)
+et leur [modele de lock incomplet](tools/HyperVApplianceBuild/inputs.example.json)
+sont separes de la production : aucune appliance construite ni VM lancee.
+Les signatures, composants propres et essais reels restent requis ; HTTP 503 conserve.
+
+### Correctif de chronologie 0.6.5 (non installe)
+
+La chronologie collaborative n'agrege plus les derniers evenements par nom
+d'etape. Une reprise pouvait laisser `Queue/Running` sans cloture ; une attente
+`Approval/Running` etait resolue par `Authorization/Succeeded`, une autre cle.
+Ce regroupement melangeait aussi les anciennes versions avec la version actuelle.
+
+L'affichage utilise maintenant les identifiants et resultats reels des etapes
+du workflow, avec des groupes distincts pour la version actuelle et l'historique.
+L'API expose une version derivee, sans modifier les snapshots persistants :
+les suffixes `resume-review` et `report` sont des positions dans le graphe,
+pas des numeros de version. Une association inconnue reste explicitement inconnue.
+Seule une etape de la version actuelle, compatible avec le statut actif de la
+mission, affiche une activite en cours. Une mission Verified n'en affiche aucune.
+Les anciennes attentes sans resultat enregistre sont neutres, pas declarees
+reussies ; les autorisations terminees, annulees ou ignorees gardent leur resultat.
+Le journal conserve tous les evenements et distingue un debut historique d'une
+operation actuellement active. Les missions Calculator sans workflow conservent
+leur chronologie avec la meme protection contre les activites historiques.
+
+Aucune migration, reecriture JSON, nouvelle autorisation ou execution
+Ollama/Docker n'est necessaire. Windows reste en 0.6.4 jusqu'a une installation
+explicitement autorisee du correctif 0.6.5 ; StudioData reste inchange.
+
+Regressions : 238 tests backend reussis, zero echec, sept scenarios opt-in ignores ;
+43 tests React reussis. TypeScript, Vite et packaging NSIS hors ligne reussis.
+Le rendu des copies des quatre missions confirme zero etape active :
+Twitch v6 (65 evenements), React v5 (80), Calculator Verified (18) et Failed (29).
+Les reprises Twitch `resume-review-15`/`resume-review-20` appartiennent a v4/v6 ;
+la reprise React `resume-review-29` appartient a v5.
+Les 37 fichiers Windows et les 44 fichiers sauvegardes sont toujours identiques
+par SHA-256 ; Twitch conserve ses 13 fichiers, trois revisions et trois propositions.
+L'avertissement Vite de bundle superieur a 500 Ko reste non bloquant et preexistant.
+Installateur prepare, non execute :
+`AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.6.5_x64-setup.exe`.
+SHA-256 : `DA1393783A35525E2BE82AF4C88B7D393C1B150097D4444814FD09739017CC37`.
+
+### Mise a jour Windows 0.6.4 (installee sur place)
+
+La build 0.6.4 embarque les templates Discord, React et Twitch, le runner Vite
+corrige et le workflow collaboratif actuel. L'identifiant `com.aiplatform.studio`,
+le mode d'installation par utilisateur et le magasin Windows
+`%LOCALAPPDATA%\AIPlatformStudio\StudioData` restent inchanges.
+
+L'audit prealable confirmait une installation 0.6.3 fermee et trois missions Windows.
+Sauvegarde complete verifiee par SHA-256 :
+`%LOCALAPPDATA%\AIPlatformStudio-Backups\20261113-182254`,
+avec 23 fichiers Windows, 14 fichiers Twitch (mission et 13 sources) et
+sept fichiers de l'installation 0.6.3. Les onze JSON de sauvegarde sont lisibles.
+Empreinte du manifeste :
+`6BEC5DE324757696F64C0D644EBFF6FC5393898709CA2F696B6CC776D7A80CA5`.
+
+La compatibilite a ete testee sur une copie isolee combinant les quatre missions :
+Calculator Failed/Verified, React Verified v5 et Twitch Verified v6.
+Statuts, autorisations historiques, fichiers, evenements, revisions et propositions
+sont conserves, y compris apres rechargement du magasin. Les empreintes React
+et Twitch sont recomputees avec la configuration Desktop et correspondent
+exactement aux revisions approuvees. Aucune source ni reference de chemin
+n'est reecrite ; aucune execution Docker n'a ete lancee.
+Le workspace vide du Calculator Failed est une limitation preexistante conservee.
+
+La mission Twitch `4fc727c4-c386-4f03-bf7d-ea3b085241b4` a ete importee seule,
+avec son workspace, apres accord explicite : Verified v6, 13 fichiers,
+65 evenements, trois revisions, trois propositions. L'import conserve le JSON
+octet pour octet, sans nouvelle autorisation ni relance de validation.
+Les 23 fichiers Windows initiaux restent identiques aux sauvegardes.
+Le magasin final contient 37 fichiers et 17 repertoires, soit quatre missions.
+
+Packaging 0.6.4 reussi hors ligne : frontend TypeScript/Vite et backend
+self-contained win-x64. Les trois templates et la commande exacte du runner
+React corrige ont ete controles dans les binaires publies.
+Regressions : 236 tests backend reussis, zero echec, sept scenarios opt-in ignores ;
+35 tests frontend reussis, zero echec. L'avertissement Vite de bundle superieur
+a 500 Ko est preexistant et n'empeche pas la build.
+Installateur :
+`AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.6.4_x64-setup.exe`.
+SHA-256 : `E4F08B0234479CEDCDB7F711C73756D7A51F2F784E8CC93428ADBAD35FF61F23`.
+L'installation NSIS `/S /UPDATE` a reussi apres accord explicite, sans
+desinstallation ni modification du magasin de donnees existant.
+Les executables Studio et API installes sont respectivement en 0.6.4 et
+0.6.4.0 et correspondent aux binaires verifies. Le marqueur Tauri de type de
+bundle est normalise en memoire pour la comparaison UNK/NSS, sans modifier
+les executables.
+
+Controles sur l'application installee : lancement depuis le raccourci du
+menu Demarrer, API prete et protegee, Ollama disponible, moteur Docker pret ;
+les choix Discord Bot, React App et Twitch Bot sont presents dans le selecteur.
+La fermeture arrete proprement Studio et son backend. Apres redemarrage,
+les quatre missions sont toujours visibles : Calculator Failed, Calculator
+Verified, React Verified v5, Twitch Verified v6. Le journal Twitch affiche
+65 evenements et ses resultats historiques affichent compilation reussie
+et 31 tests reussis. Toutes les sauvegardes, tous les fichiers Windows initiaux
+et les 14 fichiers importes restent identiques par SHA-256.
+Aucun build/test Docker ni aucune nouvelle autorisation n'a ete lance apres import.
+
+L'export ZIP et la coloration de l'apercu sont disponibles pour les workspaces
+.NET et React existants. Les templates Discord, React et Twitch decrits ci-dessous
+reutilisent le meme workflow collaboratif. La mission React est maintenant
+`Verified` en version 5 : TypeScript, Vite et dix tests Vitest ont reellement
+reussi dans Docker. Cela ne valide pas les futures missions Twitch.
+
+### MVP 6.3 - Twitch (scenario Ollama/Docker reel verifie)
+
+Le choix **Twitch Bot** selectionne `twitch-bot-dotnet` v1. Le squelette versionne
+contient douze fichiers plus la solution creee par le stockage .NET existant.
+Planner planifie ; DeveloperAgent implemente progressivement `CommandRouter.cs`
+et `BotHost.cs` ; ReviewAgent examine ces sources et leurs contrats. Transport,
+authentification, configuration, projets, README et tests restent immuables et
+sont controles avant ecriture. Les corrections ne peuvent viser que les deux
+sources applicatives ; chaque revision exige une nouvelle autorisation.
+La revue Ollama n'embarque pas les longues sources immuables du transport :
+elles sont testees par les contrats hors ligne, pas presumees validees en live.
+
+Choix technique approuve : .NET 10 natif (`HttpClient`, `ClientWebSocket`,
+`System.Text.Json`, `TimeProvider`), sans TwitchLib, IRC ni package runtime.
+Twitch recommande EventSub WebSocket pour les bots installes et Helix pour
+l'envoi de chat :
+- https://dev.twitch.tv/docs/chat/
+- https://dev.twitch.tv/docs/chat/authenticating/
+- https://dev.twitch.tv/docs/eventsub/handling-websocket-events/
+- https://dev.twitch.tv/docs/chat/send-receive-messages/
+- https://dev.twitch.tv/docs/authentication/validate-tokens/
+
+Le transport souscrit a `channel.chat.message` v1 apres le welcome, surveille
+les keepalives, deduplique les 512 derniers identifiants et ignore ses propres
+messages. Une reprise Twitch conserve l'ancien socket jusqu'au nouveau welcome
+et transfere les abonnements sans les recreer. Une perte reseau provoque une
+nouvelle session avec temporisation exponentielle bornee a 64 secondes.
+Les destinations de reprise sont limitees au WebSocket TLS Twitch.
+L'envoi utilise `POST /helix/chat/messages`, espace les tentatives de 1,6 seconde
+et verifie `is_sent`. Aucun echec d'envoi n'est rejoue aveuglement.
+
+`!ping` repond `Pong!`, `!help` liste les commandes et `!uptime` mesure la duree
+de fonctionnement du **bot**, pas du live (decision utilisateur). Horloge
+monotone injectable, casse et arguments controles, messages ordinaires ignores.
+Les tests xUnit utilisent uniquement faux transport, HTTP, sockets et horloge :
+aucun compte Twitch, secret, Internet ou attente de reconnexion reelle.
+
+Configuration exclusivement par `TWITCH_CLIENT_ID`, `TWITCH_USER_ID`,
+`TWITCH_BROADCASTER_ID`, `TWITCH_ACCESS_TOKEN`. Ne jamais fournir ces secrets
+aux prompts ni les sauvegarder dans les sources, logs ou exports. Les scopes
+requis sont `user:read:chat` et `user:write:chat`. Le jeton utilisateur est
+valide au demarrage puis au plus toutes les 30 minutes, avant son expiration
+si elle est plus proche. Identite/scopes invalides ou revocation arretent le bot.
+**Limite explicite : obtention et renouvellement OAuth manuels, pas de connexion
+interactive ni de rafraichissement automatique. Aucune session Twitch reelle
+n'a ete ouverte ou validee.** Un lancement live necessite une decision manuelle
+distincte et `TWITCH_CONNECT_LIVE=1` ; la verification ne lance jamais le bot.
+
+Le runner reutilise `aiplatform-sandbox:net10` et son cache deja present :
+`xunit [2.9.3]`, `xunit.runner.visualstudio [3.1.4]`,
+`Microsoft.NET.Test.Sdk [17.14.1]`. Aucun telechargement/preparation reseau
+supplementaire. Les commandes sont `dotnet build` puis `dotnet test` en
+`--configuration Release`, avec restauration hors ligne depuis `/opt/nuget`.
+Image immuable, commandes exactes, fichiers et limites entrent dans l'empreinte
+d'autorisation. Reseau desactive, UID 10001, racine/sources en lecture seule,
+capacites supprimees, limites et nettoyage restent inchanges.
+
+Regressions Studio : **236 backend reussis, 0 echec, 7 ignores** (opt-in reels),
+**35 frontend reussis, 0 echec, 0 ignore**. Le build frontend TypeScript/Vite
+reussit ; avertissement preexistant de bundle >500 Ko. Ces tests ne compilent
+et n'executent aucun projet genere sur Windows. Le scenario Ollama/Docker
+Twitch a produit la mission `4fc727c4-c386-4f03-bf7d-ea3b085241b4`, initialement
+version 1 `AwaitingApproval`, dans le magasin de validation isole `twitch-validation`
+(aucun import Windows). Planner `qwen3:4b`, Developer et Review
+`qwen2.5-coder:7b` ont reellement ete appeles ; deux fichiers applicatifs generes,
+douze fichiers de projet plus la solution, onze evenements, une revision,
+aucune correction ni autorisation Docker. Empreinte de cette revision :
+`7D8B76D4F458D43184D8D32C4C8480F650CA779E2361FD3293E0BA91EFF03355`.
+
+L'inspection directe a constate des defauts dans le `BotHost` initial : boucle
+de reconnexion dupliquee, erreurs fatales absorbees et journalisation de
+`Exception.Message`. Le ReviewAgent n'a produit que des avertissements et
+a aussi emis des remarques erronees sur la configuration et les tests proteges
+non transmis. Sa revue n'est donc pas une preuve de correction.
+
+Apres autorisation explicite v1 : compilation Release reussie, aucun avertissement
+ni erreur ; tests arretes a la limite de 120 secondes a cause de la boucle du
+BotHost. Les deux conteneurs ont ete supprimes. Ollama a corrige progressivement
+le BotHost ; une sortie invalide et une limite de contexte ont interrompu des
+tentatives, reprises sans effacer l'historique ni reinitialiser le compteur.
+Une condition incorrecte qui selectionnait la politique .NET generique lors
+des corrections Twitch a ete corrigee. Le chemin JSON est maintenant contraint
+au seul fichier demande ; les anciennes sources restent stockees mais ne sont
+pas retransmises dans le contexte de correction du 7B.
+
+La revue inclut un controle serveur explicite des constructions interdites
+dans BotHost (boucle externe, catch global, texte d'exception). Ce controle
+borne ne remplace pas une analyse C# semantique ni les tests. Un faux positif
+sur le delai annulable apres erreur d'envoi a ete corrige : un cooldown n'est
+pas une reconnexion. Les regressions couvrent ces politiques et le budget.
+La proposition v5 deja generee par Ollama a ete relue puis appliquee en v6,
+sans nouvelle generation, autorisation automatique ou tentative supplementaire.
+
+Apres un **nouvel accord explicite v6**, pour l'empreinte
+`2B01709443ACB92342D7D52F9BC6FEF0F2E9FF5BFDCB5C529D0CD8D8EA4DF976` :
+- `dotnet build` Release : **Succeeded**, sortie 0, 0 erreur, 0 avertissement.
+- `dotnet test` Release : **Succeeded**, sortie 0, **31 tests executes et
+  reussis, 0 echec, 0 ignore**, rapport TRX reel controle.
+- Image `sha256:232a19ba3edf91e03de6c2804cc895dd07bf3585c226316b497c1ffdd3025515`.
+- Isolation Docker observee : reseau `none`, UID `10001:10001`, lecture seule,
+  capacites `ALL` supprimees, no-new-privileges, 2 CPU et 2 Go.
+  Les deux conteneurs v6 ont ete supprimes, comme ceux de v1.
+
+Etat persiste final : **Verified, workflow version 6**, treize fichiers avec
+la solution, **65 evenements**, trois revisions appliquees (v1/v3/v6), trois
+propositions conservees (v2/v3/v5), trois corrections sur la limite de trois.
+L'echec v1 reste dans l'historique. L'export ZIP du projet verifie contient
+treize entrees et passe les controles de secrets habituels.
+Les trois missions Windows d'origine gardent leurs empreintes JSON exactes ;
+la mission Twitch reste dans le magasin isole, sans import ni mise a jour Windows.
+Lors de cette livraison MVP Twitch, aucun installateur n'avait ete prepare.
+La mise a jour Windows 0.6.4 est decrite ci-dessus. La connexion a Twitch reste
+une action manuelle distincte, non realisee et non validee par ces tests.
+
+Fichiers ajoutes/modifies pour ce perimetre (sans compter les changements
+anterieurs deja presents dans le depot) :
+- Template : [TwitchTemplate.cs](AIPlatform.Infrastructure/Studio/TwitchTemplate.cs).
+- Workflow et protections : [WorkflowAgents.cs](AIPlatform.Infrastructure/Studio/WorkflowAgents.cs),
+  [CollaborativeProcessor.cs](AIPlatform.Infrastructure/Studio/CollaborativeProcessor.cs),
+  [MissionStore.cs](AIPlatform.Infrastructure/Studio/MissionStore.cs),
+  [WorkspaceStore.cs](AIPlatform.Infrastructure/Studio/WorkspaceStore.cs),
+  [ProjectExport.cs](AIPlatform.Infrastructure/Studio/ProjectExport.cs).
+- Docker : [DockerSandboxRunner.cs](AIPlatform.Infrastructure/Studio/DockerSandboxRunner.cs),
+  [ExecutionPlanService.cs](AIPlatform.Infrastructure/Studio/ExecutionPlanService.cs).
+- Interface : [App.tsx](AIPlatform.Web/src/App.tsx),
+  [MissionDetails.tsx](AIPlatform.Web/src/MissionDetails.tsx).
+- Tests : [TwitchTemplateTests.cs](AIPlatform.Tests/TwitchTemplateTests.cs),
+  [App.test.tsx](AIPlatform.Web/src/App.test.tsx),
+  [Workflow.test.tsx](AIPlatform.Web/src/Workflow.test.tsx).
+- Documentation : ce README.
+
+### Correctif du runner Vite 0.6.3
+
+Le profil precedent liait tout `/work/node_modules` aux packages immuables sous
+`/opt/aiplatform/node_modules`. Vite 6.4.6 y cherchait son cache `.vite-temp` :
+la creation echouait avec `ENOENT` dans le conteneur en lecture seule. Le meme
+echec a ete reproduit sans Ollama sur une application de reference ecrite a la
+main ; il ne provenait pas du projet utilisateur.
+
+Le runner cree maintenant un vrai repertoire `node_modules` dans le tmpfs
+`/work`, avec des liens individuels vers les packages approuves et `.bin`.
+Les caches `.vite-temp` et `.vite` sont inscriptibles et ephemeres ; les
+dependances sous `/opt` restent non modifiables. L'image, le Dockerfile, le
+manifeste et le lockfile approuves ne changent pas. Aucun package n'est installe.
+Les commandes React exactes entrent desormais dans l'empreinte d'autorisation :
+une autorisation du profil precedent n'autorise pas le runner corrige.
+Les empreintes des profils .NET et Discord ne sont pas modifiees par cet ajout.
+
+Apres autorisation limitee a cette reference isolee, le test
+`ReactReferenceBuildsAndTestsWithWritableCachesAndReadOnlyDependencies` passe :
+TypeScript, build Vite et dix tests Vitest/Testing Library reussissent. Il
+controle aussi UID 10001, reseau limite a loopback, absence de privileges,
+racine et sources en lecture seule, packages immuables, caches inscriptibles,
+limites Docker et suppression des quatre conteneurs. Les fichiers sources de
+reference restent inchanges. Le test echouait auparavant sur le vrai `ENOENT`
+Vite. Il reste opt-in avec `AIPLATFORM_TEST_DOCKER=1` et un filtre sur son nom,
+apres autorisation humaine ; les autres scenarios Docker/Ollama ne sont pas
+necessaires pour cette validation.
+
+Regressions : backend 226 reussis, aucun echec, sept ignores, dont ce scenario
+Docker execute separement avec succes ; frontend 33 reussis, aucun echec.
+L'installateur NSIS Windows 0.6.3 a ete construit puis installe sur place apres
+accord explicite et nouvelle sauvegarde verifiee. Le frontend NSIS et le backend
+installes correspondent au build ; les nouvelles commandes du runner ont aussi
+ete retrouvees dans le backend installe. Le demarrage par le raccourci du menu
+Demarrer, API, Ollama, Docker et les trois missions ont ete verifies.
+Les 23 fichiers de StudioData restent identiques a la sauvegarde, empreintes
+SHA-256 comprises. Aucune validation de la mission React n'a ete lancee.
+
+La mission v4 reste `BuildFailed`, avec 15 fichiers, 67 evenements, quatre
+revisions et trois corrections consommees. Le bouton existant **Reprendre**
+cree une nouvelle version et relance ReviewAgent : il ne convient pas a une
+revalidation strictement en v4 apres correction d'infrastructure.
+Une action distincte est proposee, pas encore implementee : verifier les sources
+contre la revision v4, ajouter un cycle de validation sans nouvelle revision,
+preserver les anciens resultats et le compteur de corrections, invalider
+l'ancien accord et demander une nouvelle autorisation sur le plan recalcule.
+Cette preparation ne doit appeler ni Ollama ni Docker pour executer du code.
+
+### Mise a jour Windows 0.6.2 (effectuee)
+
+La mise a jour sur place et l'importation ont ete autorisees et effectuees apres
+sauvegardes SHA-256 et compatibilite sur copies. Le magasin
+`%LOCALAPPDATA%\AIPlatformStudio\StudioData`, les deux Calculator et les
+donnees originales de validation sont conserves. Trois missions sont visibles.
+Le Calculator deja en echec garde son workspace vide, sans reparation.
+React a ete importe intact en v2 avec 15 fichiers, 33 evenements et deux
+revisions. L'application demarre par le raccourci du menu Demarrer et detecte
+API, Ollama et Docker.
+
+La mise a jour 0.6.3 conserve l'identifiant Tauri et le mode par utilisateur.
+Le mode NSIS `/UPDATE` evite une desinstallation prealable ; Studio et son
+backend doivent etre arretes avant toute installation explicitement autorisee.
+La preparation du correctif ne modifie pas le magasin Windows.
+
+### MVP 6.2 - React (validation Docker reelle reussie)
+
+Le dossier `sandbox/react` contient un manifeste npm de confiance, son lockfile
+et un Dockerfile de preparation. L'image locale
+`aiplatform-react-sandbox:1.0.0` a ete preparee sans code genere, avec scripts
+npm desactives. La resolution utilise `--legacy-peer-deps` pour contourner une
+erreur interne de npm 10 ; `npm ls --all` verifie ensuite l'arbre installe.
+Les commandes de version TypeScript, Vite, Vitest et esbuild ont fonctionne
+dans un conteneur sans reseau. Cela ne valide pas un projet React.
+
+Le choix **React App** initialise `react-typescript-vite` v1 dans le workflow
+Planner -> Developer -> Review -> autorisation -> TypeScript -> Vite -> Vitest.
+Le squelette fournit composants, styles responsive, configuration TypeScript
+stricte, ESLint, README et dix tests contractuels Vitest/Testing Library.
+DeveloperAgent implemente progressivement les trois fichiers applicatifs.
+Les tests, configurations, manifeste npm et lockfile sont immuables : aucun
+package, script ou fichier supplementaire ne peut etre ajoute par le modele.
+Le lockfile reel est embarque depuis `sandbox/react/package-lock.json`, sans
+regeneration par le LLM. La revue ne recoit que les sources et tests pertinents,
+pas les 160 Ko du lockfile. Les autres fichiers sont controles par le serveur.
+
+Le runner utilise l'image preparee, jamais `npm install` dans le projet genere.
+Les commandes fixes sont `tsc --noEmit`, `vite build`, puis `vitest run` avec
+rapport JSON. Un code de sortie nul sans rapport coherent, sans tests ou avec
+tests ignores ne valide pas les tests. Les trois etapes doivent reussir pour
+la meme version avant `Verified`. L'image reelle, les fichiers et les limites
+entrent dans l'empreinte d'autorisation. Chaque correction preserve les tests
+et exige une nouvelle revue et une nouvelle autorisation.
+
+Le 13 novembre 2026, deux premiers essais Ollama ont echoue avant Docker :
+limite de contexte de revue, puis rapport de revue invalide et tests generes
+inadequats. Le contexte a ete reduit et les tests rendus deterministes et
+immuables. La mission `eb0efd99-95a7-4d62-82ac-8c8053e35ec6` a ensuite
+ete generee avec `qwen2.5-coder:7b`, planifiee avec `qwen3:4b` et revue.
+Apres accord explicite pour la version 1 (empreinte
+`5C756026DAC7A31BE9E6F106217A2717F7BC105AAB742DC85A43E79340F92F27`),
+TypeScript a reellement echoue dans Docker (sortie 2, trois imports manquants).
+Vite et Vitest n'ont pas ete executes. La correction a d'abord atteint la
+limite de contexte ; les doublons de sources, de diagnostics et de tests
+immuables ont ete retires du contexte de correction, sans supprimer l'historique.
+Apres reprise explicite, Ollama a corrige uniquement les imports de `src/App.tsx`
+et ReviewAgent a examine cette version 2.
+
+La version 2 a ete importee avec l'empreinte
+`252FC2B97E711A0F430AEEAF4848CDA84B7143B340D96C6645A438AF134E88F9`.
+L'image est
+`sha256:a7f7808c85c85c61afb8e29784bcb85273e99c6e1d27c2416cfb3bcaa85411ee`.
+L'utilisateur a ensuite autorise lui-meme les versions 2, 3 et 4 dans Studio.
+TypeScript passe, mais Vite echoue a chaque fois sur le cache `.vite-temp` ;
+Vitest n'est pas execute. A l'ouverture du chantier correctif, la mission v4
+est deja `BuildFailed`, avec 67 evenements, quatre revisions et une autorisation
+historique encore enregistree. L'utilisateur a demande de conserver exactement
+cet etat : aucun statut, historique, fichier ou accord n'est modifie pendant
+la correction du runner. Le projet genere n'etait pas encore `Verified`.
+La revue ne remplace jamais TypeScript ni les tests.
+
+Apres installation du correctif 0.6.3 et decision utilisateur dans Studio,
+la mission est maintenant `Verified` en version 5 : 15 fichiers, 80 evenements,
+cinq revisions ; TypeScript, Vite et dix tests Vitest reussis, sorties 0.
+Le chantier Twitch utilise un autre magasin isole et ne modifie pas cette mission.
+
+Regressions du correctif Vite : 226 tests backend reussis, 0 echecs, 7 ignores (scenarios manuels
+ou integrations reelles opt-in) ; 33 tests frontend reussis, 0 echec, 0 ignore.
+Le build de Studio TypeScript/Vite reussit avec un avertissement de taille de
+bundle. Ces tests de Studio ne remplacent pas la validation du projet genere.
+L'installateur correctif ne constitue pas une validation du projet genere.
+
+### MVP 6.1 - Discord (validation en cours)
+
+Le mode projet propose le template versionne `discord-bot-dotnet` v1. Le
+squelette contient une application .NET 10 Discord.Net.WebSocket 3.20.2,
+les commandes `/ping`, `/help`, `/info` et des tests xUnit hors ligne. Le
+DeveloperAgent adapte la logique de reponse, puis ReviewAgent examine les
+sources. Les fichiers de tests et les references de packages restent proteges.
+Le bot lit `DISCORD_BOT_TOKEN` uniquement au demarrage : ne jamais transmettre
+de token a Studio ni le placer dans les sources. La detection de secrets est
+heuristique et ne garantit pas leur absence. L'analyse du ReviewAgent peut
+contenir des erreurs et ne prouve pas qu'un projet fonctionne.
+
+Le profil Discord utilise `aiplatform-sandbox:discord-net10`, distinct du
+profil generique. L'empreinte de l'autorisation inclut l'identifiant reel de
+l'image, les fichiers et les limites ; une image absente bloque la validation.
+Les dependances directes autorisees sont Discord.Net.WebSocket 3.20.2 dans le
+projet du bot, ainsi que xunit 2.9.3, xunit.runner.visualstudio 3.1.4 et
+Microsoft.NET.Test.Sdk 17.14.1 pour les tests. Le cache prepare contient aussi
+Discord.Net.Core, Discord.Net.Rest et Discord.Net.Dave 3.20.2 et Newtonsoft.Json
+13.0.4. Les autres references directes et versions sont refusees.
+
+Apres autorisation humaine specifique, preparer l'image depuis le dossier de
+confiance `sandbox`, sans y ajouter de code genere :
+
+```powershell
+docker buildx build --load --provenance=false --network=default --resource memory=2g --resource cpu-quota=200000 --resource cpu-period=100000 --build-arg BASE_IMAGE=aiplatform-sandbox:net10 --file sandbox\Discord.Dockerfile --tag aiplatform-sandbox:discord-net10 sandbox
+```
+
+Cette restauration est executee en utilisateur non privilegie avec une source
+NuGet configuree. Le reseau du conteneur de restauration n'est pas filtre par
+domaine. La compilation et les tests ulterieurs sont distincts, sans reseau,
+et necessitent une nouvelle autorisation liee a la version des fichiers. Ils
+ne demarrent pas le bot et ne testent pas une connexion Discord.
+
+Le 13 novembre 2026, la mission `0eaec9d6-f679-406c-9e2d-e610bedf1cfe`
+a ete generee et revue avec Ollama (`qwen2.5-coder:7b` ; plan par
+`qwen3:4b`). Une premiere reponse de revue invalide a exige une reprise
+explicite ; la seconde revue a produit cinq avertissements, susceptibles de
+contenir des erreurs. Apres autorisation humaine liee a l'empreinte
+`181F7813D1E7F44181C84AA03082EB3086D9BCB2F77E2704A4CCBC41326674E6`,
+la compilation Docker a reussi et les quatre tests hors ligne sont passes.
+La mission a atteint `Verified`. L'image locale utilisee etait identifiee par
+`sha256:c39d32476517215fd902a4fa1e88ecf3f143ab8f86d8d9d9467ce09a5ac11e2e`.
+Ces tests ne valident pas la connexion ou l'enregistrement des commandes sur
+Discord. Aucun installateur MVP 6.1 n'a ete prepare.
+
+### MVP 6.4 - Full-Stack React + ASP.NET Core
+
+Le template versionne `fullstack-react-dotnet` v1 partage un contrat OpenAPI
+fixe entre BackendAgent et FrontendAgent. Le workflow sequentiel genere le
+backend ASP.NET Core .NET 10 avec SQLite, puis le frontend React/TypeScript,
+et les fait examiner par ReviewAgent. Les lockfiles NuGet sont veritables et
+les dependances restent fixes. La validation requiert une autorisation humaine
+pour chaque version et enchaine build Release, xUnit, TypeScript, Vite, Vitest
+et un test HTTP reel sur loopback dans un conteneur sans reseau externe.
+
+L'image `aiplatform-fullstack-sandbox:1.0.0` reutilise les paquets .NET
+prepares avec `sandbox\FullStackSandboxPackages.csproj` et son lockfile, ainsi
+que les dependances Node de
+`aiplatform-react-sandbox:1.0.0`. Sa recette est `sandbox\FullStack.Dockerfile`;
+les deux images de base doivent deja etre presentes. La recette revision 2
+separe explicitement la preparation reseau du build final hors ligne :
+
+1. Apres autorisation reseau distincte, exporter le target `dependency-feed`.
+   Il utilise uniquement le projet fixe de preparation, jamais les sources
+   generees, reutilise `/opt/nuget` et restaure le graphe verrouille depuis
+   `https://api.nuget.org/v3/index.json`. `FullStackNuGet.Config` efface les
+   sources et fallback folders herites. Les six paquets manquants de SQLite
+   sont Microsoft.Data.Sqlite et Microsoft.Data.Sqlite.Core 10.0.15, puis
+   SQLitePCLRaw.bundle_e_sqlite3, core, lib.e_sqlite3 et provider.e_sqlite3
+   2.1.13. Les treize autres paquets sont deja dans l'image .NET de reference.
+2. Construire le target final avec `--network=none`. Il ne depend pas du
+   target reseau : il consomme uniquement le feed local exporte, verifie
+   `SHA512SUMS`, puis restaure a neuf avec `RestoreLockedMode=true`.
+   NuGet verifie aussi les empreintes de contenu du lockfile (distinctes du
+   SHA-512 brut des archives signees). Un feed absent ou incomplet bloque
+   le build, sans recours a Internet.
+
+Commandes a examiner avant autorisation (depuis la racine du depot) :
+
+```powershell
+# RESEAU : uniquement apres autorisation explicite, destination neuve.
+docker buildx build --pull=false --network=default --resource memory=2g --resource cpu-quota=200000 --resource cpu-period=100000 --target dependency-feed --file sandbox\FullStack.Dockerfile --output type=local,dest=sandbox/fullstack-feed sandbox
+# HORS LIGNE : apres preparation et verification du feed.
+docker buildx build --load --pull=false --network=none --resource memory=2g --resource cpu-quota=200000 --resource cpu-period=100000 --tag aiplatform-fullstack-sandbox:1.0.0 --file sandbox\FullStack.Dockerfile sandbox
+docker image inspect aiplatform-fullstack-sandbox:1.0.0 --format '{{.Id}}'
+```
+
+Le feed local est exclu de Git. Conserver son manifeste avec le lockfile
+pour les reconstructions. Le tag reste compatible, mais le label
+`org.aiplatform.fullstack.recipe=2` et l'identifiant SHA-256 de l'image
+identifient la nouvelle recette. Le plan d'execution inclut l'identifiant
+effectif de l'image et les commandes du runner dans son empreinte : une
+image reconstruite requiert un nouveau plan et une nouvelle autorisation.
+
+La restauration s'execute avec l'UID 10001 : les entrees sont sous
+`/opt/fullstack-seed`, les copies temporaires et `obj` sous `/tmp`, jamais
+dans `/seed/obj` herite de root. Les validations conservent la racine en
+lecture seule, les sources et caches en lecture seule et les tmpfs limites
+`/tmp` et `/work`. Ni npm install ni scripts du projet ne sont utilises
+pour preparer l'image. Le reseau de preparation ne constitue pas une
+autorisation d'execution. Aucune image n'est telechargee ou construite
+automatiquement. La mission et son plan doivent etre examines avant toute
+autorisation de validation Docker.
+
+Les tests .NET et le serveur HTTP d'integration utilisent `LD_LIBRARY_PATH`
+vers la bibliotheque SQLite approuvee du cache immuable `/opt/nuget`
+(Linux x64, SQLitePCLRaw 2.1.13). Cela permet son chargement natif sans
+rendre les tmpfs executables. Le runner lit TRX pour xUnit et JSON pour
+Vitest ; une sortie vide ou incoherente ne valide pas les tests.
+
+Une mission full-stack `GeneratedUnverified` deja relue peut utiliser
+« Preparer une nouvelle validation · sans regeneration » dans Studio
+(`POST /api/missions/{id}/revalidate`). Le systeme exige que tous les fichiers
+correspondent a la derniere revision relue et que l'image soit disponible.
+Il ajoute une version de validation avec les memes sources et une nouvelle
+empreinte, conserve les revisions, evenements et resultats precedents,
+ne consomme aucune correction et n'appelle ni Ollama ni Docker run.
+La mission attend ensuite une nouvelle autorisation humaine ; une ancienne
+autorisation n'est jamais reutilisee. Une modification des sources exige
+la reprise avec revue habituelle, pas ce raccourci d'infrastructure.
+Si cette validation echoue, elle s'arrete avec ses diagnostics sans declencher
+de correction automatique : l'utilisateur examine d'abord l'origine de l'erreur.
+Pour chaque version full-stack, le plan canonique enregistre les empreintes des
+fichiers, la politique sans correction automatique, les six commandes et leur
+isolation, l'image par identifiant effectif et les limites. Il est compare au
+plan actuel avant approbation et avant chaque etape. Les sources copiees dans le
+conteneur sont aussi comparees au manifeste approuve avant toute commande. Un
+changement exige une nouvelle version et un nouvel accord. Une ancienne version
+en attente sans plan canonique peut etre reprise par cette meme action de
+revalidation, sans reutiliser son autorisation ni modifier les anciennes preuves.
+
+Une correction full-stack examinee explicitement peut etre appliquee via
+`POST /api/missions/{id}/manual-backend-revision` ou
+`POST /api/missions/{id}/manual-frontend-revision`, avec l'empreinte courante et
+les remplacements complets des fichiers modifiables du role concerne. L'operation refuse
+les autres chemins et les sources ou plans perimes, conserve une proposition
+et les versions precedentes, invalide l'autorisation, puis cree une revision et
+un plan canoniques sans appeler de modele ni lancer Docker. La revision est
+attribuee a l'examen humain, sans inventer une revue d'agent. En cas d'interruption,
+la mission ne s'execute pas et la proposition reste consultable pour diagnostic.
+Elle est aussi disponible apres un echec de compilation `BuildFailed`, avec
+conservation des resultats et obligation d'une nouvelle autorisation.
+
+### Export ZIP des projets existants
+
+Projects propose l'export des sources d'un projet inactif. Les chemins sont
+valides avant lecture ; les liens sont refuses. L'archive exclut notamment
+`bin`, `obj`, `node_modules`, `.env`, les configurations `appsettings`, les
+fichiers dont le nom indique un secret et les certificats/cles. Les chemins
+inattendus bloquent l'export. Certains secrets visibles dans les sources
+provoquent aussi son refus, sans publier leur valeur dans l'erreur.
+Cette detection est **non exhaustive** : inspecter les fichiers et l'archive
+avant tout partage. Les configurations exclues doivent etre recreees localement.
+L'apercu colore les fichiers C#, projets XML, JSON, JavaScript et TypeScript ;
+les types inconnus restent affiches en texte brut sans executer le contenu.
+
+## Avancement MVP 7 (incomplet)
+
+Les workspaces generes existants peuvent etre analyses statiquement depuis
+Projects ou `GET /api/workspaces/{id}/analysis`. L'analyse examine les fichiers
+autorisés, les declarations de projets et de dependances, les noms de scripts,
+les points d'entree et les fichiers Docker. Les scripts ne sont pas executes,
+leurs commandes ne sont pas exposees et Ollama n'est pas appele. Les erreurs de
+lecture de manifestes sont signalees. Le rapport est une observation statique,
+non un calcul MSBuild/npm, et n'est actuellement pas persiste ; Git n'est pas
+inspecte. Les fichiers sensibles et les artefacts connus sont exclus.
+
+L'analyseur accepte au plus 2 000 fichiers, 256 Kio par fichier et 16 Mio au
+total par defaut ; ces limites sont configurables dans la section Studio.
+L'endpoint actuel utilise aussi les limites plus strictes des workspaces
+generes existants. XML interdit les DTD et la resolution d'entites externes ;
+JSON est limite en profondeur. Les versions de dependances non resolues sont
+signalees plutot qu'executees ou devinees. Un workspace actif ou modifie pendant
+une mission est refuse ; une modification externe concurrente peut toutefois
+changer les fichiers pendant l'analyse. Le rapport ne constitue donc ni un
+snapshot transactionnel ni une autorisation de build.
+
+L'importation de dossiers ou depots externes, la recherche et les changements
+sur un projet original ne sont pas disponibles. Il n'existe pas encore de
+selecteur natif ni d'autorisation de dossier, de PatchEngine, d'integration Git,
+de validation Docker pour projets importes ou d'installateur MVP 7. Aucun code
+importe ne doit etre execute sur Windows. La detection des secrets reste
+incomplete : elle ne peut pas garantir qu'un texte est sans secret.
+
+## Fiabilite des corrections collaboratives (MVP 5.1)
+
+Les erreurs de compilation et de tests produisent un diagnostic structure
+(commande, code de sortie, projet, fichier, ligne, colonne, code et message quand
+disponibles). Un extrait borne est envoye au modele ; le journal technique est
+conserve avec ses limites explicites : 24 000 octets de sortie de tests dans le
+conteneur et 65 536 caracteres pour la sortie Docker. Une troncature est signalee ;
+il ne s'agit pas d'un journal illimite.
+
+Les corrections ne peuvent modifier que les fichiers C# applicatifs planifies.
+Les tests, assertions et fichiers de projet restent inchanges. Le diagnostic
+selectionne le fichier applicatif identifie, sinon les sources applicatives
+existantes ; aucun nouveau chemin ni aucune dependance ne sont autorises.
+Les propositions, y compris celles refusees par la revue, sont persistees et
+validables avant ecriture. La revue contient
+probleme, justification, risques, conformite et recommandation ; elle ne remplace
+pas Docker. Les versions precedentes et leurs changements avant/apres sont
+consultables dans Missions et par `GET /api/missions/{id}/revisions/{version}`.
+
+Une interruption de correction exige une reprise manuelle : proposition et
+diagnostic sont conserves, la revue est reprise si necessaire et aucun accord
+precedent n'est reutilise. Si le workspace ne correspond plus aux fichiers connus,
+la reprise s'arrete explicitement. L'approbation est refusee si l'empreinte ne
+correspond pas a la version relue. Les changements de configuration invalident
+aussi l'empreinte. Une nouvelle approbation humaine est necessaire avant chaque
+validation de version ; aucune commande de projet genere n'est executee sur Windows.
+
+### Etat des validations MVP 5.1
+
+- Tests simules : erreur de compilation et limite de corrections, echec de tests,
+  refus, reprise d'une correction interrompue, diagnostic et empreinte non revue.
+- Regression : 176 tests backend reussis ; 5 integrations Docker/Ollama et la
+  preparation manuelle optionnelle ignorees par defaut ; 25 tests React reussis
+  et build frontend reussi. La preparation a aussi ete lancee separement et a
+  cree une mission en attente, sans execution ni autorisation Docker.
+- Scenario reel `c5dd4453-0594-41d5-ade8-a675aa59c412` : apres accord humain,
+  compilation Docker echouee (CS1525 ligne 1, colonne 92), suivie de trois
+  propositions Qwen2.5-Coder et revues reelles. Les trois premieres revues ont
+  repris a tort le diagnostic de l'ancienne version et epuise les tentatives.
+  Le contexte de revue a ete corrige puis la derniere proposition a ete relue
+  explicitement sans nouvelle execution Docker. Cette revue signale un
+  avertissement sur le test d'isolation ; ce test n'a pas ete modifie.
+  Apres une **seconde autorisation humaine**, la version corrigee a ete compilee
+  dans Docker (sortie 0, aucune erreur ni avertissement), puis ses **3 tests**
+  (addition, soustraction et isolation) ont reussi, sans echec : `Verified`.
+  Le test d'isolation verifie notamment UID, capacites, no-new-privileges,
+  interfaces reseau et ecriture refusee sur les montages en lecture seule.
+  Aucun conteneur AIPlatform restant n'a ete observe. Apres redemarrage du
+  backend isole, statut et trois resultats sont conserves.
+  Les deux premieres propositions, effectuees avant la persistance des
+  propositions, ne sont pas recuperables ; la derniere et sa revue sont conservees.
+- Le scenario B (test arithmetique defectueux) n'a pas ete execute avec les
+  services reels. Le refus et la reprise pendant correction ont ete couverts
+  par des tests simules ; ils ne constituent pas une validation Docker reelle.
+- L'installateur Windows x64 0.5.1 a ete construit. Son backend publie a passe
+  le smoke test isole (authentification locale, services, arret et redemarrage) ;
+  l'installation et l'interface native 0.5.1 n'ont pas ete testees.
+- Les tests Docker optionnels historiques ne constituent pas une preuve de ce
+  scenario collaboratif et ne doivent pas etre lances sans accord explicite.
+
+Pour preparer uniquement le scenario A reproductible, choisir un repertoire de
+donnees **inexistant**, hors du depot, puis lancer depuis la racine :
+
+```powershell
+$env:AIPLATFORM_PREPARE_CORRECTION = '1'
+$env:AIPLATFORM_SCENARIO_DIRECTORY = 'C:\Temp\AIPlatform-scenario-unique'
+dotnet test .\AIPlatform.Tests\AIPlatform.Tests.csproj --filter "FullyQualifiedName~ManualCorrectionScenarioTests" --logger "console;verbosity=detailed"
+```
+
+Cette preparation utilise un plan, des fichiers et une revue initiale simules ;
+elle ne lance ni Ollama ni Docker et ne donne aucune autorisation. La sortie
+indique la mission et son empreinte. Pour la consulter, demarrer le backend de
+developpement avec `Studio__DataDirectory` pointant sur ce repertoire, puis
+ouvrir l'interface de developpement. L'autorisation initiale concerne la
+compilation/tests de cette seule version. Apres l'echec et la correction/revue
+reelles, examiner les differences et prendre une decision distincte pour la
+version suivante. Les donnees de ce scenario sont isolees de celles de
+l'application installee.
 
 ## Collaboration locale (MVP 5)
 
@@ -69,16 +865,16 @@ Les fichiers restent consultables par les endpoints controles du workspace.
 Au redemarrage, une mission interrompue devient `Cancelled` avec un motif explicite.
 La reprise est manuelle ; aucune commande sensible n'est relancee automatiquement.
 Une mission deja en attente d'autorisation reste en attente. La reprise abandonne
-l'ancien accord, recharge et revalide les sources existantes, puis impose une
-nouvelle revue/autorisation. Les missions verifiees, supprimees ou anciennes sans
+l'ancien accord et reprend la correction interrompue ou revalide les sources
+existantes, puis impose une nouvelle revue/autorisation. Les missions verifiees, supprimees ou anciennes sans
 workflow ne peuvent pas etre reprises ; une nouvelle mission reste possible.
 
 Chaque modification collaborative invalide l'accord precedent. L'empreinte est
 recontrolee avant build ET tests. L'option historique `approveSandboxExecution`
 ne court-circuite pas l'accord post-generation d'un nouveau workflow. Les trois
 corrections automatiques maximum partagent un compteur persistant, y compris apres
-reprise ; les sources des tests sont immuables pendant ces corrections (les csproj
-peuvent etre corriges). Les fichiers non planifies, suppressions et modifications
+reprise ; les sources des tests et les csproj sont immuables pendant ces corrections.
+Les fichiers non planifies, suppressions et modifications
 hors workspace sont refuses. Une correction de test source exige une intervention
 humaine ou une nouvelle mission, pas un affaiblissement automatique des assertions.
 
@@ -193,7 +989,9 @@ compagnon. React est compile et embarque : aucun serveur Vite en production.
 ### Installer et lancer sans terminal
 
 1. Utiliser l'installateur Windows x64 produit dans
-   `AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.5.0_x64-setup.exe`.
+   `AIPlatform.Web\src-tauri\target\x86_64-pc-windows-msvc\release\bundle\nsis\AIPlatform Studio_0.6.4_x64-setup.exe`.
+   Pour une mise a jour, sauvegarder StudioData et fermer Studio/backend avant
+   de lancer l'installation explicitement autorisee, sans desinstallation prealable.
 2. L'installation est reservee a l'utilisateur courant, sans elevation demandee.
    Elle cree le raccourci **AIPlatform Studio** du menu Demarrer et propose un
    raccourci Bureau. L'icone est incluse.

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AIPlatform Hyper-V 65F static probe</title>
+<style>
+  body { margin: 0; background: #102030; color: white; font: 20px monospace; }
+  #marker { width: 96px; height: 96px; background: #00cc66; }
+  main { padding: 16px; }
+  button, input { font: inherit; }
+</style>
+<div id="marker"></div>
+<main>
+  <h1>PREVIEW_65F_STATIC_V1</h1>
+  <p id="ready">JS_NOT_EXECUTED</p>
+  <button id="increment" type="button">Incrementer</button>
+  <output id="clicks">0</output>
+  <p><label>Texte de test <input id="text" maxlength="32" autocomplete="off"></label></p>
+  <output id="echo"></output>
+</main>
+<script>
+  'use strict';
+  let clicks = 0;
+  document.getElementById('ready').textContent = 'JS_EXECUTED';
+  document.getElementById('increment').addEventListener('click', () => {
+    clicks += 1;
+    document.getElementById('clicks').textContent = String(clicks);
+  });
+  document.getElementById('text').addEventListener('input', (event) => {
+    document.getElementById('echo').textContent = event.target.value;
+  });
+</script>
+</html>

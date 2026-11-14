@@ -1,5 +1,6 @@
 using AIPlatform.Core.Studio;
 using AIPlatform.Infrastructure.Studio;
+using System.IO.Compression;
 
 namespace AIPlatform.Tests;
 
@@ -54,6 +55,60 @@ public sealed class WorkspaceTests
             fixture.Workspaces.ReadAsync(id, "../../appsettings.json", CancellationToken.None));
         Assert.Empty(fixture.Workspaces.List(Guid.NewGuid()));
         Assert.Throws<StudioValidationException>(() => fixture.Workspaces.Create(id));
+    }
+
+    [Fact]
+    public async Task ExportsSourcesWithoutCredentialsOrBuildArtifacts()
+    {
+        using var fixture = new StudioFixture();
+        var id = Guid.NewGuid();
+        fixture.Workspaces.Create(id);
+        await fixture.Workspaces.WriteAsync(id, StudioFixture.Manifest().Files, CancellationToken.None);
+        var directory = fixture.Workspaces.GetDirectory(id);
+        var app = Path.Combine(directory, "src", "App");
+        Directory.CreateDirectory(Path.Combine(app, "obj"));
+        await File.WriteAllTextAsync(Path.Combine(app, "obj", "built.cs"), "generated artifact");
+        await File.WriteAllTextAsync(Path.Combine(app, ".env"), "SECRET=must-not-be-exported");
+        await File.WriteAllTextAsync(Path.Combine(app, "credentials.json"), """{"value":"must-not-be-exported"}""");
+        await File.WriteAllTextAsync(Path.Combine(app, "appsettings.json"), """{"private":"must-not-be-exported"}""");
+        var bytes = await new ProjectExport(fixture.Workspaces, fixture.Options).CreateAsync(id, CancellationToken.None);
+        using var archive = new ZipArchive(new MemoryStream(bytes), ZipArchiveMode.Read);
+        Assert.Equal(5, archive.Entries.Count);
+        Assert.NotNull(archive.GetEntry("Generated.slnx"));
+        Assert.NotNull(archive.GetEntry("src/App/Program.cs"));
+        Assert.DoesNotContain(archive.Entries, entry => entry.FullName.Contains("obj") ||
+            entry.FullName.Contains("credentials") || entry.FullName.Contains(".env") || entry.FullName.Contains("appsettings"));
+    }
+
+    [Theory]
+    [InlineData("""class X { string password = "dummy-value"; }""")]
+    [InlineData("""class X { string x = "ghp_abcdefghijklmnopqrstuvwxyz012345"; }""")]
+    [InlineData("""// Bearer abcdefghijklmnop""")]
+    [InlineData("""{"ConnectionStrings":{"Default":"dummy"}}""")]
+    public async Task RefusesExportWhenSourcesContainPotentialCredentials(string content)
+    {
+        using var fixture = new StudioFixture();
+        var id = Guid.NewGuid();
+        fixture.Workspaces.Create(id);
+        await fixture.Workspaces.WriteAsync(id, StudioFixture.Manifest().Files, CancellationToken.None);
+        var path = Path.Combine(fixture.Workspaces.GetDirectory(id), "src", "App", "Extra.json");
+        await File.WriteAllTextAsync(path, content);
+        var error = await Assert.ThrowsAsync<StudioValidationException>(() =>
+            new ProjectExport(fixture.Workspaces, fixture.Options).CreateAsync(id, CancellationToken.None));
+        Assert.Contains("possible credential", error.Message);
+        Assert.DoesNotContain("dummy", error.Message);
+    }
+
+    [Fact]
+    public async Task RejectsUnexpectedSourcePathsInsteadOfExportingThem()
+    {
+        using var fixture = new StudioFixture();
+        var id = Guid.NewGuid();
+        fixture.Workspaces.Create(id);
+        await fixture.Workspaces.WriteAsync(id, StudioFixture.Manifest().Files, CancellationToken.None);
+        await File.WriteAllTextAsync(Path.Combine(fixture.Workspaces.GetDirectory(id), "unexpected.txt"), "not approved");
+        await Assert.ThrowsAsync<StudioValidationException>(() =>
+            new ProjectExport(fixture.Workspaces, fixture.Options).CreateAsync(id, CancellationToken.None));
     }
 
     [Fact]

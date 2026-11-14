@@ -24,11 +24,22 @@ export interface Workflow {
     id: string; kind: string; agentId: string; dependsOn: string[]; status: string
     attempts: number; durationMilliseconds: number | null; modelName?: string | null
     input: string | null; output: string | null; error: string | null
+    version?: number | null; startedAt?: string | null
   }[]
   plan: { name: string; description: string; decisions: string[]; files: { path: string; purpose: string; dependsOn: string[] }[] } | null
-  review: { summary: string; findings: { path: string; severity: string; message: string }[] } | null
+  review: { summary: string; findings: { path: string; severity: string; message: string }[]
+    problem?: string | null; modifiedFiles?: string[] | null; justification?: string | null
+    risks?: string[] | null; planCompliance?: string | null; recommendation?: string | null } | null
   revisions: { version: number; createdAt: string; reason: string; fingerprint: string; files: string[] }[]
   finalReport: string | null
+  correctionLimit?: number | null
+  proposals?: { version: number; createdAt: string; review: Workflow['review'] }[]
+}
+
+export interface RevisionComparison {
+  version: number; previousVersion: number | null
+  changes: { path: string; before: string | null; after: string | null }[]
+  proposed?: boolean; review?: Workflow['review']
 }
 
 export interface Model {
@@ -66,6 +77,9 @@ export interface Verification {
   warningCount?: number | null
   errorCount?: number | null
   failedTests?: number | null
+  diagnostics?: { stage: string; command: string; exitCode: number | null; excerpt: string
+    items: { type: string; project: string | null; file: string | null; line: number | null
+      column: number | null; code: string | null; message: string }[] } | null
 }
 
 export interface Mission {
@@ -91,6 +105,7 @@ export interface Mission {
   projectName?: string | null
   projectDescription?: string | null
   deleted?: boolean
+  templateId?: string | null
 }
 
 export interface LocalModels {
@@ -108,14 +123,29 @@ export interface ExecutionPlan {
   timeoutSeconds: number
   maxCorrectionAttempts: number
   operations: string[]
+  canonical?: {
+    workflowVersion: number
+    files: { path: string; sha256: string }[]
+    automaticCorrections: boolean
+    stages: { name: string; arguments: string[] }[]
+  } | null
 }
 export interface WorkspaceFile { path: string; size: number }
 export interface FileContent { path: string; content: string }
+export interface ProjectAnalysis {
+  gitRepositoryDetected: boolean | null
+  languages: string[]; frameworks: string[]; solutions: string[]; projects: string[]
+  packageManifests: string[]; testProjects: string[]; entryPoints: string[]; directories: string[]
+  dependencies: { ecosystem: string; name: string; version: string | null; manifest: string }[]
+  scripts: { manifest: string; name: string }[]
+  dockerFiles: string[]; issues: { path: string; message: string }[]
+}
 export interface CreateMission {
   task: string
   kind: MissionKind
   agentId: string | null
   approveSandboxExecution: boolean
+  templateId?: string | null
 }
 
 export const isActive = (mission: Mission) =>
@@ -137,9 +167,13 @@ export const statusLabels: Record<MissionStatus, string> = {
 export const stepLabels: Record<string, string> = {
   Queue: 'File d’attente', Analysis: 'Analyse', Routing: 'Routage',
   Generation: 'Génération', Writing: 'Écriture des fichiers', Build: 'Compilation',
-  Tests: 'Tests', Corrections: 'Corrections', Mission: 'Mission',
-  Authorization: 'Autorisation', ErrorAnalysis: 'Analyse des erreurs',
+  Tests: 'Tests', TypeScript: 'Vérification TypeScript', Corrections: 'Corrections', Mission: 'Mission',
+  Authorization: 'Autorisation', ErrorAnalysis: 'Analyse des erreurs', Revalidation: 'Nouvelle validation d’infrastructure',
   Plan: 'Planification', Generate: 'Génération incrémentale', Correct: 'Correction ciblée',
+  Contract: 'Contrat API', BackendGenerate: 'Génération backend', FrontendGenerate: 'Génération frontend',
+  BackendCorrect: 'Correction backend', FrontendCorrect: 'Correction frontend',
+  BackendBuild: 'Compilation backend Release', BackendTests: 'Tests xUnit',
+  FrontendBuild: 'Build Vite', FrontendTests: 'Tests Vitest', Integration: 'Intégration HTTP',
   Review: 'Revue', Approval: 'Autorisation', Report: 'Rapport final',
 }
 

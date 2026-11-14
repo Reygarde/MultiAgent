@@ -15,7 +15,8 @@ public static class AgentEndpoints
             return TypedResults.Ok(registry.Agents.Select(agent => new AgentResponse(
                 agent.Id, agent.Description, agent.Capabilities, agent.ModelId,
                 agent.Id == registry.Router.Id, agent.Enabled && (studio.CollaborativeWorkflows
-                    ? agent.Role == "Developer" && agent.TaskTypes.Contains("Project") : agent.Id == studio.DeveloperAgentId),
+                    ? (agent.Role is "Developer" or "Backend" or "Frontend") && agent.TaskTypes.Contains("Project")
+                    : agent.Id == studio.DeveloperAgentId),
                 agent.Name, agent.Role, agent.Enabled, agent.AllowedTools, agent.TaskTypes)).ToArray());
         })
         .WithName("GetAgents")

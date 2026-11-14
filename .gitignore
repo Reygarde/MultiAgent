@@ -27,3 +27,4 @@ TestResults/
 # Fichiers temporaires
 *.log
 coverage/
+sandbox/fullstack-feed/

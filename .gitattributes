@@ -1,0 +1,2 @@
+sandbox/FullStackRestore.sh text eol=lf
+tools/HyperVApplianceBuild/*.sh text eol=lf

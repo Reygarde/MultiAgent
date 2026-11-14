@@ -31,7 +31,7 @@ public sealed class MissionWorker(
                 store.Update(id, current => current with
                 {
                     Status = userCancelled ? MissionStatus.Cancelled : MissionStatus.Failed,
-                    Error = message
+                    Error = message, SandboxApproved = false, ApprovalFingerprint = null
                 });
                 store.AddEvent(id, "Mission", userCancelled ? StepStatus.Cancelled : StepStatus.Failed, message);
                 logger.LogInformation("Mission {MissionId}: {Message}", id, message);
@@ -42,7 +42,8 @@ public sealed class MissionWorker(
                 var message = exception is AIPlatform.Core.LlmProviderException or StudioValidationException
                     ? exception.Message : "Mission processing failed. Consult the server logs.";
                 CloseActiveSteps(id, StepStatus.Failed, message);
-                store.Update(id, current => current with { Status = MissionStatus.Failed, Error = message });
+                store.Update(id, current => current with { Status = MissionStatus.Failed, Error = message,
+                    SandboxApproved = false, ApprovalFingerprint = null });
                 store.AddEvent(id, "Mission", StepStatus.Failed, message);
             }
             finally

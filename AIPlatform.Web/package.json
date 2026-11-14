@@ -1,7 +1,7 @@
 {
   "name": "aiplatform-studio",
   "private": true,
-  "version": "0.5.0",
+  "version": "0.6.5",
   "type": "module",
   "engines": {
     "node": ">=20.14.0"
@@ -17,11 +17,14 @@
     "tauri": "tauri",
     "desktop:prepare": "node scripts/prepare-backend.mjs",
     "desktop:test-backend": "node --test scripts/test-backend.mjs",
+    "preview:test-browser": "node --test scripts/preview-browser.test.mjs",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build --target x86_64-pc-windows-msvc --bundles nsis"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",
+    "highlight.js": "11.11.2",
+    "lowlight": "3.3.0",
     "lucide-react": "^0.468.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

@@ -70,6 +70,21 @@ describe('Studio dashboard', () => {
     expect(screen.getByRole('button', { name: 'Demander l’annulation' })).toBeVisible()
   })
 
+  it('submits the Discord template without preapproving Docker', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'discord-bot-dotnet')
+    expect(screen.getByText(/Discord.Net.WebSocket 3.20.2/)).toBeVisible()
+    await userEvent.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer un bot Discord')
+    await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith({
+      task: 'Créer un bot Discord', kind: 'Project', agentId: null,
+      approveSandboxExecution: false, templateId: 'discord-bot-dotnet',
+    }))
+  })
+
   it('shows a real request error rather than inserting a successful answer', async () => {
     vi.mocked(api.create).mockRejectedValue(new Error('Fournisseur indisponible'))
     render(<App />)
@@ -78,6 +93,55 @@ describe('Studio dashboard', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
     expect(await screen.findByRole('alert')).toHaveTextContent('Fournisseur indisponible')
     expect(screen.getByRole('textbox', { name: 'Votre mission' })).toHaveValue('Bonjour')
+  })
+
+  it('submits Twitch Bot without credentials or preapproved Docker execution', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'twitch-bot-dotnet')
+    expect(screen.getByText(/Twitch Bot v1/)).toHaveTextContent('Release hors ligne après autorisation')
+    expect(screen.queryByLabelText(/token|secret/i)).not.toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer un bot Twitch')
+    await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith({
+      task: 'Créer un bot Twitch', kind: 'Project', agentId: null,
+      approveSandboxExecution: false, templateId: 'twitch-bot-dotnet',
+    }))
+  })
+
+  it('submits React App with approved dependencies but without Docker consent', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'react-typescript-vite')
+    expect(screen.getByText(/React App v1/)).toHaveTextContent('lockfile figés')
+    await userEvent.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer un gestionnaire de tâches')
+    await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith({
+      task: 'Créer un gestionnaire de tâches', kind: 'Project', agentId: null,
+      approveSandboxExecution: false, templateId: 'react-typescript-vite',
+    }))
+  })
+
+  it('submits the full-stack template with its backend specialist and no Docker consent', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'fullstack-react-dotnet')
+    expect(screen.getByText(/Contrat OpenAPI partagé/)).toBeVisible()
+    const agent = screen.getByRole('combobox', { name: 'Sélection de l’agent' })
+    expect(within(agent).getByRole('option', { name: 'BackendAgent' })).toBeVisible()
+    expect(within(agent).queryByRole('option', { name: 'FrontendAgent' })).not.toBeInTheDocument()
+    await userEvent.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer une app full-stack')
+    await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith({
+      task: 'Créer une app full-stack', kind: 'Project', agentId: null,
+      approveSandboxExecution: false, templateId: 'fullstack-react-dotnet',
+    }))
   })
 
   it('distinguishes installed loaded and in-use model states', async () => {
@@ -94,7 +158,7 @@ describe('Studio dashboard', () => {
     render(<App />)
     expect(await screen.findByText('Fichiers disponibles. Compilation et tests NON exécutés.')).toBeVisible()
     await userEvent.click(screen.getByRole('button', { name: 'Projects' }))
-    expect(await screen.findByText('Console.WriteLine("Hello");')).toBeVisible()
+    await waitFor(() => expect(document.querySelector('.file-preview code')).toHaveTextContent('Console.WriteLine("Hello");'))
     expect(screen.getByText('Build · Unavailable · sortie non exécuté')).toBeVisible()
     expect(api.file).toHaveBeenCalledWith(mission.id, 'src/App/Program.cs', expect.any(AbortSignal))
   })

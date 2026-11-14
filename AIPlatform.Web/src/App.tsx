@@ -33,6 +33,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
   const [loading, setLoading] = useState(true)
   const [task, setTask] = useState('')
   const [kind, setKind] = useState<MissionKind>('Chat')
+  const [templateId, setTemplateId] = useState('')
   const [agentId, setAgentId] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
@@ -101,7 +102,8 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
     if (!task.trim() || busy) return
     setBusy(true); setError(null)
     try {
-      const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: false })
+      const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: false,
+        ...(kind === 'Project' && templateId ? { templateId } : {}) })
       setMissions(previous => [mission, ...previous.filter(item => item.id !== mission.id)])
       setSelectedId(mission.id); setTask('')
     } catch (error) { setError(errorMessage(error)) }
@@ -117,7 +119,9 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
 
   const pageInfo = navigation.find(item => item.id === page)!
   const eligible = agents.filter(agent => agent.enabled !== false && !agent.isRouter &&
-    (kind === 'Chat' ? !agent.taskTypes || agent.taskTypes.includes('Chat') : agent.canGenerateProjects))
+    (kind === 'Chat' ? !agent.taskTypes || agent.taskTypes.includes('Chat') :
+      agent.canGenerateProjects && (templateId === 'fullstack-react-dotnet'
+        ? agent.role === 'Backend' : !agent.role || agent.role === 'Developer')))
 
   return <div className="studio">
     <aside className="sidebar">
@@ -135,7 +139,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
           <p>Exécution locale · aucun cloud</p><div className="local-card-line"><Cpu size={13} /> Une mission IA active maximum</div></div>
-        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · MVP 5</small></span><ShieldCheck size={16} /></div>
+        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · 0.6.5</small></span><ShieldCheck size={16} /></div>
       </div>
     </aside>
     <main>
@@ -212,8 +216,15 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
             <form className="composer panel" onSubmit={event => { event.preventDefault(); void submit() }}>
               <div className="composer-options"><label>Mode <select aria-label="Mode de mission" value={kind}
                 onChange={event => { setKind(event.target.value as MissionKind); setAgentId('') }}>
-                <option value="Chat">Conversation</option><option value="Project">Projet .NET</option>
+                <option value="Chat">Conversation</option><option value="Project">Projet</option>
               </select></label>
+                {kind === 'Project' && <label>Template <select aria-label="Template du projet" value={templateId}
+                  onChange={event => { setTemplateId(event.target.value); setAgentId('') }}>
+                  <option value="">Projet .NET générique</option><option value="discord-bot-dotnet">Discord Bot</option>
+                  <option value="react-typescript-vite">React App</option>
+                  <option value="twitch-bot-dotnet">Twitch Bot</option>
+                  <option value="fullstack-react-dotnet">Full-Stack App</option>
+                </select></label>}
                 <label>Agent <select aria-label="Sélection de l’agent" value={agentId} onChange={event => setAgentId(event.target.value)}>
                   <option value="">Automatique</option>{eligible.map(agent => <option key={agent.id} value={agent.id}>{agent.id}</option>)}
                 </select></label>
@@ -221,6 +232,14 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
               <textarea id="mission-task" aria-label="Votre mission" placeholder="Décrivez ce que vous voulez créer, comprendre ou améliorer…"
                 value={task} onChange={event => setTask(event.target.value)} rows={3} />
               {kind === 'Project' && <div className="project-consent">
+                {templateId === 'discord-bot-dotnet' && <p>Discord Bot v1 · Discord.Net.WebSocket 3.20.2 · xUnit 2.9.3 · tests hors ligne.</p>}
+                {templateId === 'twitch-bot-dotnet' && <p>Twitch Bot v1 · .NET 10 · EventSub + Helix · xUnit 2.9.3.
+                  OAuth par environnement uniquement ; connexion Twitch séparée et manuelle.
+                  Compilation et tests Release hors ligne après autorisation.</p>}
+                {templateId === 'react-typescript-vite' && <p>React App v1 · React 19.3.1 · TypeScript 5.9.3 · Vite 6.4.6 · Vitest 4.1.12.
+                  Dépendances et lockfile figés ; TypeScript, build et tests hors ligne après autorisation.</p>}
+                {templateId === 'fullstack-react-dotnet' && <p>Full-Stack App v1 · ASP.NET Core .NET 10 · SQLite 10.0.15 · React/TypeScript.
+                  Contrat OpenAPI partagé ; build Release/xUnit, TypeScript, Vite, Vitest et intégration HTTP isolée après autorisation.</p>}
                 <p><ShieldCheck size={14} /> Écriture autorisée uniquement dans un workspace dédié.</p>
                 <p>Après génération, consultez les fichiers et autorisez ou refusez le plan de compilation et de tests.</p>
                 {!sandbox?.available && <span className="warning-text">Isolation indisponible : fichiers uniquement, aucune exécution sur l’hôte.</span>}

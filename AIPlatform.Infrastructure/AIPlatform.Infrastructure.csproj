@@ -1,7 +1,10 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <ProjectReference Include="..\AIPlatform.Core\AIPlatform.Core.csproj" />
+    <EmbeddedResource Include="..\sandbox\react\package.json" LogicalName="React.package.json" />
+    <EmbeddedResource Include="..\sandbox\react\package-lock.json" LogicalName="React.package-lock.json" />
   </ItemGroup>
 
   <PropertyGroup>

@@ -1,5 +1,6 @@
 using AIPlatform.Core;
 using AIPlatform.Core.Studio;
+using AIPlatform.Infrastructure.Studio;
 using Microsoft.AspNetCore.Diagnostics;
 
 namespace AIPlatform.API.Middleware;
@@ -13,6 +14,7 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
         {
             LlmTimeoutException => (StatusCodes.Status504GatewayTimeout, "LLM provider timeout"),
             LlmProviderException => (StatusCodes.Status503ServiceUnavailable, "LLM provider unavailable"),
+            PreviewUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Preview unavailable"),
             BadHttpRequestException badRequest => (badRequest.StatusCode, "Invalid HTTP request"),
             StudioValidationException => (StatusCodes.Status400BadRequest, "Invalid Studio request"),
             StudioCapacityException => (StatusCodes.Status429TooManyRequests, "Studio mission limit reached"),
@@ -31,6 +33,8 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
             detail: exception is StudioValidationException or StudioCapacityException
                 ? exception.Message : status < 500
                 ? "Provide a valid JSON request body with a task string."
+                : exception is PreviewUnavailableException
+                ? "The preview runtime or its cleanup is unavailable. Check the backend logs."
                 : "The mission could not be completed. Check the local provider and server logs.",
             instance: context.Request.Path).ExecuteAsync(context);
         return true;

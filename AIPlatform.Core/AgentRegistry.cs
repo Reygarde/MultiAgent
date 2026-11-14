@@ -56,7 +56,7 @@ public sealed class AgentRegistry : IAgentRegistry
                 agent.Capabilities.Any(string.IsNullOrWhiteSpace) ||
                 agent.FallbackKeywords.Any(string.IsNullOrWhiteSpace) ||
                 agent.TimeoutSeconds is < 5 or > 900 ||
-                agent.Role is not ("Chat" or "Router" or "Planner" or "Developer" or "Review" or "Test" or "Orchestrator") ||
+                agent.Role is not ("Chat" or "Router" or "Planner" or "Developer" or "Backend" or "Frontend" or "Review" or "Test" or "Orchestrator") ||
                 agent.AllowedTools.Except(AgentPermissions.ToolsFor(agent.Role), StringComparer.Ordinal).Any() ||
                 agent.TaskTypes.Any(type => type is not ("Chat" or "Project")))
                 throw new ArgumentException("Invalid agent configuration or model assignment.");
@@ -80,7 +80,7 @@ public static class AgentPermissions
     public static string[] ToolsFor(string role) => role switch
     {
         "Planner" => ["Plan"],
-        "Developer" => ["GenerateFiles"],
+        "Developer" or "Backend" or "Frontend" => ["GenerateFiles"],
         "Review" => ["ReadSources"],
         "Test" => ["DockerBuild", "DockerTests"],
         "Orchestrator" => ["Workflow"],

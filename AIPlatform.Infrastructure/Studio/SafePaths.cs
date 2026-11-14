@@ -26,6 +26,7 @@ public static partial class SafePaths
         if (string.IsNullOrWhiteSpace(path) || path.Length > 180 || path.Contains('\\') ||
             Path.IsPathRooted(path) || path.Contains(':'))
             throw new StudioValidationException("Use a short relative project path with forward slashes.");
+        if (path == ".gitignore" && FullStackTemplate.IsPath(path)) return path;
         var segments = path.Split('/');
         if (segments.Length > 8 || segments.Any(segment =>
             !SegmentPattern().IsMatch(segment) || segment.EndsWith('.') ||
@@ -34,6 +35,7 @@ public static partial class SafePaths
         if (segments.Any(segment => new[] { "bin", "obj", "node_modules" }
                 .Contains(segment, StringComparer.OrdinalIgnoreCase)))
             throw new StudioValidationException("Generated output directories are not allowed.");
+        if (ReactTemplate.IsPath(path) || FullStackTemplate.IsPath(path)) return path;
         if (!new[] { ".cs", ".csproj", ".json", ".md" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
             throw new StudioValidationException("Only C#, project, JSON and Markdown source files are allowed.");
         if (!(path.StartsWith("src/App/", StringComparison.Ordinal) ||

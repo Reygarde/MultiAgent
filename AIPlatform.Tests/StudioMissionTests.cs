@@ -139,7 +139,7 @@ public sealed class StudioMissionTests
         {
             Result = stage => stage == "Tests" && ++tests == 1
                 ? new(stage, "Failed", 1, "Assertion failed")
-                : new(stage, "Succeeded", 0, "OK", stage == "Tests" ? 1 : null)
+                : new(stage, "Succeeded", 0, "OK", stage == "Tests" ? 1 : null, FailedTests: stage == "Tests" ? 0 : null)
         };
         var generator = new FakeProjectGenerator();
         await fixture.Processor(generator, sandbox).ProcessAsync(mission.Id, CancellationToken.None);
@@ -210,7 +210,7 @@ public sealed class StudioMissionTests
         {
             Result = stage => stage == "Build" && ++builds == 1
                 ? new(stage, "Failed", 1, "CS1002")
-                : new(stage, "Succeeded", 0, "OK", stage == "Tests" ? 1 : null)
+                : new(stage, "Succeeded", 0, "OK", stage == "Tests" ? 1 : null, FailedTests: stage == "Tests" ? 0 : null)
         };
         await fixture.Processor(generator, sandbox).ProcessAsync(mission.Id, CancellationToken.None);
         Assert.Equal(MissionStatus.Verified, fixture.Missions.Get(mission.Id)!.Status);

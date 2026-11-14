@@ -1,0 +1,316 @@
+{
+  "schema": "aiplatform.hyperv-static-preparation.v1",
+  "canonicalization": "65f-ascii-json-v1",
+  "planId": "b7b65f01-9a39-4c72-9180-8efa162aa6f0",
+  "revision": 1,
+  "stage": "preparation-only",
+  "executionEligible": false,
+  "previewHttpStatus": 503,
+  "previewAuthorizationCreated": false,
+  "blockedBy": [
+    "B1-appliance-not-built-or-hashed",
+    "B2-prototype-software-not-implemented",
+    "B3-signatures-and-package-closure-not-verified",
+    "B4-per-vm-host-channel-restriction-unproven",
+    "B5-hyperv-management-read-access-denied",
+    "B6-available-memory-below-threshold",
+    "B7-independent-supervision-and-recovery-unproven",
+    "B8-windows-11-pro-23h2-out-of-support"
+  ],
+  "artifacts": {
+    "runbook": {
+      "path": "docs/preview-hyperv-mvp65f.md",
+      "sha256": "90a6c9402275db30103e4ab350c8928b47dc1a2ebe9538ea6a9dd73cd955602d",
+      "hashMode": "exact-file-bytes"
+    },
+    "staticPage": {
+      "path": "docs/hyperv65f-static.html",
+      "sha256": "9c0e1de23e465609561a1b52a9befde1bdc7aca9fcc9a832c594145d60735c37",
+      "hashMode": "exact-file-bytes",
+      "executed": false,
+      "guestOrigin": "http://127.0.0.1:5080",
+      "readyMarker": "JS_EXECUTED",
+      "titleMarker": "PREVIEW_65F_STATIC_V1"
+    }
+  },
+  "image": {
+    "distribution": "Debian GNU/Linux",
+    "release": "13.7.0",
+    "codename": "trixie",
+    "architecture": "amd64",
+    "installer": {
+      "url": "https://cdimage.debian.org/debian-cd/13.7.0/amd64/iso-cd/debian-13.7.0-amd64-netinst.iso",
+      "sha256": "a7ef94ac2fb9a7fec454552abd629b7cc9d5155c886165a45649f5ce6167e355",
+      "checksumsUrl": "https://cdimage.debian.org/debian-cd/13.7.0/amd64/iso-cd/SHA256SUMS",
+      "signatureUrl": "https://cdimage.debian.org/debian-cd/13.7.0/amd64/iso-cd/SHA256SUMS.sign",
+      "evidence": "publisher-https-metadata-only",
+      "signatureVerified": false,
+      "downloaded": false,
+      "isAppliance": false
+    },
+    "packageSources": [
+      "https://snapshot.debian.org/archive/debian/20261114T000000Z/ trixie main",
+      "https://snapshot.debian.org/archive/debian-security/20261114T000000Z/ trixie-security main"
+    ],
+    "kernel": {
+      "package": "linux-image-6.12.117+deb13-amd64",
+      "version": "6.12.117-1",
+      "publishedPackageSha256": "ca712d36790184f6ac125ce2b20ea4e2202ae6bb7817b7de268f1f0115ccda73"
+    },
+    "browser": {
+      "package": "chromium",
+      "version": "156.0.8078.79-1~deb13u1",
+      "publishedPackageSha256": "9325777fb842eafa3f992209ee6f1b69bad76c3311a88efd4d7772cec22e3795",
+      "chromiumSandbox": true,
+      "webrtcDisabled": false,
+      "runtimeUser": "non-root",
+      "externalDebugging": false
+    },
+    "compositor": {
+      "package": "weston",
+      "version": "14.0.2-1",
+      "publishedPackageSha256": "cb2cddfc082a6f14d15e4682cdbb9778439f9b89123ed41356f108ccb3ebb48e",
+      "backend": "headless",
+      "renderer": "pixman",
+      "captureAndInputModuleImplemented": false
+    },
+    "softwareTargetVersion": "0.1.0-design",
+    "brokerSha256": null,
+    "guestAgentSha256": null,
+    "westonModuleSha256": null,
+    "viewerSha256": null,
+    "supervisorSha256": null,
+    "packageLockSha256": null,
+    "signedManifestSha256": null,
+    "applianceSha256": null,
+    "applianceFormat": "VHDX",
+    "applianceDiskType": "Fixed",
+    "applianceVirtualBytes": 6442450944,
+    "applianceMaximumFileBytes": 6509559808,
+    "proposedBasePath": "C:\\ProgramData\\AIPlatformPreviewPrototype\\images\\debian-13.7.0-preview65f-0.1.0.vhdx",
+    "reproducibleBuildVerified": false,
+    "allPackagesMatchedToSignedSnapshot": false,
+    "updates": "offline-rebuild-new-hash-review-no-session-update",
+    "automaticFallback": false
+  },
+  "vm": {
+    "name": "AIPlatform-Preview-65F-b7b65f01",
+    "hypervId": null,
+    "hypervIdPolicy": "new-vm-allocated-journal-bound-before-boot",
+    "generation": 2,
+    "firmware": "UEFI",
+    "secureBoot": true,
+    "secureBootTemplate": "MicrosoftUEFICertificateAuthority",
+    "firmwareConsoleMode": "None",
+    "cpuCount": 2,
+    "cpuMaximumPercent": 50,
+    "exposeVirtualizationExtensions": false,
+    "memoryBytes": 2147483648,
+    "dynamicMemory": false,
+    "networkAdapters": [],
+    "switches": [],
+    "optionalIntegrationServices": [],
+    "guestDiskMode": "private-copy-of-verified-fixed-vhdx",
+    "guestDiskController": "SCSI-0-0",
+    "sessionConfiguration": {
+      "mode": "host-built-read-only-iso",
+      "controller": "SCSI-0-1",
+      "maximumBytes": 2097152,
+      "challengeBytesPerStream": 32,
+      "studioSecrets": false,
+      "autorun": false
+    },
+    "bootDevice": "SCSI-0-0-only",
+    "hostFolders": [],
+    "physicalDisks": [],
+    "sharedDevices": [],
+    "clipboard": false,
+    "rdpOrEnhancedSession": false,
+    "vmconnectUsed": false,
+    "vtpm": false,
+    "gpuPassthrough": false,
+    "serialHostPipes": [],
+    "automaticStartAction": "Nothing",
+    "automaticStopAction": "TurnOff",
+    "checkpointType": "Disabled",
+    "automaticCheckpoints": false,
+    "sessionRoot": "C:\\ProgramData\\AIPlatformPreviewPrototype\\65f\\b7b65f01-9a39-4c72-9180-8efa162aa6f0",
+    "runtimeDiskName": "runtime.vhdx",
+    "configurationIsoName": "session-config.iso",
+    "journalName": "ownership.json"
+  },
+  "channels": {
+    "transport": "AF_HYPERV-host-AF_VSOCK-guest",
+    "direction": "guest-connects-host-exact-vmid-listeners",
+    "guestHostCid": 2,
+    "wildcardVmIdAllowed": false,
+    "registryRoot": "HKLM\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Virtualization\\GuestCommunicationServices",
+    "services": [
+      {
+        "role": "control",
+        "guestPort": 50065,
+        "serviceId": "0000c391-facb-11e6-bd58-64006a7986d3",
+        "elementName": "AIPlatform Preview 65F Control",
+        "registered": false
+      },
+      {
+        "role": "frames",
+        "guestPort": 50066,
+        "serviceId": "0000c392-facb-11e6-bd58-64006a7986d3",
+        "elementName": "AIPlatform Preview 65F Frames",
+        "registered": false
+      }
+    ],
+    "observedHostRegistrations": [
+      {
+        "serviceId": "999e53d4-3d5c-4c3e-8779-bed06ec056e1",
+        "elementName": "VM Session Service"
+      },
+      {
+        "serviceId": "a5201c21-2770-4c11-a68e-f182edb29220",
+        "elementName": "VM Session Service-2"
+      }
+    ],
+    "hostRegistryInventoryExhaustsListeners": false,
+    "perVmOtherServicesDeniedVerified": false,
+    "vmbusTargetAllowlist": [
+      "hypervisor-core-vmbus-interrupts-timers-uefi",
+      "synthetic-storage-private-fixed-disk-and-read-only-config",
+      "hv-sock-two-session-services-only"
+    ],
+    "guestVmbusInventory": null,
+    "unknownChannelPolicy": "stop-qualification-and-review",
+    "browserAndApplicationAfVsock": false,
+    "guestRootConsideredHostile": true,
+    "firstBootQualificationRiskConsentRequired": true,
+    "globalFirewallChange": false,
+    "otherHostServicesModification": false
+  },
+  "protocol": {
+    "version": "65e-binary-v1",
+    "headerBytes": 48,
+    "maximumPayloadBytes": 4194304,
+    "headerDeadlineSeconds": 2,
+    "payloadDeadlineSeconds": 2,
+    "maximumMessagesPerSecond": 200,
+    "burstMessages": 256,
+    "maximumFrameBytesPerSecond": 41943040,
+    "burstFrameBytes": 4194304,
+    "challengeBytesPerStream": 32,
+    "sessionRoleSequenceValidation": true,
+    "reconnectAfterSessionEnd": false,
+    "arbitraryCommands": false,
+    "studioTokens": false,
+    "render": {
+      "format": "BGRA8-opaque-host-alpha",
+      "width": 960,
+      "height": 540,
+      "strideBytes": 3840,
+      "metadataBytes": 16,
+      "maximumFramesPerSecond": 10,
+      "maximumUnacknowledgedFrames": 1,
+      "maximumBuffers": 2,
+      "compression": false
+    },
+    "input": {
+      "maximumPayloadBytes": 512,
+      "maximumEventsPerSecond": 120,
+      "maximumMouseMovesPerSecond": 30,
+      "maximumQueuedEvents": 64,
+      "maximumTextUtf8Bytes": 256,
+      "requiresViewerFocusAndReady": true,
+      "releaseKeysOnBlurDisconnectStop": true,
+      "windowsInputInjection": false
+    },
+    "logs": {
+      "enumeratedEventsOnly": true,
+      "maximumPayloadBytes": 1024,
+      "maximumEventsPerSecond": 10,
+      "maximumRingBytes": 65536,
+      "maximumLifecycleEvents": 64,
+      "rawGuestOutput": false
+    }
+  },
+  "lifecycle": {
+    "readinessTimeoutSeconds": 90,
+    "absoluteLifetimeSeconds": 180,
+    "lifetimeBegins": "before-first-start-vm-invocation-monotonic-clock",
+    "normalStopAtOrBeforeSeconds": 175,
+    "forceOffAtOrBeforeSeconds": 178,
+    "offConfirmedBeforeSeconds": 180,
+    "heartbeatSeconds": 1,
+    "leaseExpirySeconds": 3,
+    "brokerCrashStopDeadlineSeconds": 3,
+    "maximumStartAttempts": 1,
+    "independentSupervisorRequiredBeforeStart": true,
+    "independentSupervisorImplemented": false,
+    "guestWatchdogAloneSufficient": false,
+    "totalHostSupervisorFailureBoundVerified": false,
+    "ownershipJournalRequired": true,
+    "reparsePointsAllowed": false,
+    "deleteUnjournaledResources": false,
+    "ambiguousCreationPolicy": "quarantine-block-starts-operator-review",
+    "mountGuestWrittenDiskOnHost": false,
+    "cleanupFailurePolicy": "CleanupFailed-block-future-starts",
+    "removeBaseImage": false,
+    "removeOnlyOwnedUnchangedRegistryKeys": true
+  },
+  "resources": {
+    "minimumFreePhysicalKiB": 4718592,
+    "minimumFreeDiskBytes": 16106127360,
+    "closeApplicationsAutomatically": false,
+    "observation": {
+      "at": "2026-11-14T05:07:10+01:00",
+      "freePhysicalKiB": 1804128,
+      "totalVisiblePhysicalKiB": 15927668,
+      "memoryGatePassed": false,
+      "windowsEdition": "Professional",
+      "windowsVersion": "23H2",
+      "windowsBuild": "22631.6199",
+      "windowsVersionInSupport": false,
+      "hypervManagementRead": "access-denied",
+      "resourcesReserved": false
+    },
+    "recheckBeforeAllocationAndBoot": true
+  },
+  "tests": {
+    "vmTestsExecuted": false,
+    "required": [
+      "T01-browser-compositor-process-tree-js-ready-before-90s",
+      "T02-pinned-static-page-green-marker-and-first-frame",
+      "T03-bounded-hvsock-frames",
+      "T04-focused-guest-only-mouse-and-keyboard",
+      "T05-http-browser-vectors-zero-host-connections",
+      "T06-ipv4-ipv6-webrtc-stun-dns-websocket-zero-host-packets",
+      "T07-redirect-private-link-local-and-custom-schemes",
+      "T08-no-windows-sentinel-files-or-sharing",
+      "T09-root-child-vmbus-hvsock-other-services-denied",
+      "T10-malformed-protocol-backpressure-and-flood",
+      "T11-manual-stop-immediate-revocation",
+      "T12-absolute-180s-off-deadline",
+      "T13-broker-controller-crash-independent-supervisor",
+      "T14-partial-allocation-failure-locks-and-recovery",
+      "T15-owned-resources-removed-third-parties-unchanged"
+    ],
+    "positiveControlsRequired": true,
+    "hostReceiverExpectedForbiddenConnections": 0,
+    "hostReceiverExpectedForbiddenDatagrams": 0,
+    "browserCrashWithZeroPacketsIsPass": false,
+    "missingObservationIsPass": false,
+    "privilegedCaptureAutomaticallyAllowed": false
+  },
+  "restrictions": {
+    "createOrStartVmInThisStage": false,
+    "registerHvSocketInThisStage": false,
+    "downloadOrExecuteBinariesInThisStage": false,
+    "installWindowsComponents": false,
+    "automaticElevation": false,
+    "docker": false,
+    "ollama": false,
+    "generatedProjectExecution": false,
+    "modifyVerifiedV9": false,
+    "createPreviewAuthorization": false,
+    "disableHttp503": false
+  },
+  "referenceMissionJsonSha256": "6563af1edef8180cabd5cbe6cfc1ccfc09af936b6bb9038d66279256cb5f29ff"
+}

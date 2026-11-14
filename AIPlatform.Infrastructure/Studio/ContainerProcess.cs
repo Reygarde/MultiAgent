@@ -8,13 +8,21 @@ public sealed record ContainerProcessResult(int ExitCode, string Output);
 public interface IContainerProcess
 {
     Task<ContainerProcessResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken);
+    Task<ContainerProcessResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken,
+        int maximumOutputCharacters) => RunAsync(arguments, cancellationToken);
 }
 
 public sealed class ContainerProcess : IContainerProcess
 {
+    public Task<ContainerProcessResult> RunAsync(
+        IReadOnlyList<string> arguments, CancellationToken cancellationToken) =>
+        RunAsync(arguments, cancellationToken, 65536);
+
     public async Task<ContainerProcessResult> RunAsync(
-        IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        IReadOnlyList<string> arguments, CancellationToken cancellationToken, int maximumOutputCharacters)
     {
+        if (maximumOutputCharacters is < 1 or > 2097152)
+            throw new ArgumentOutOfRangeException(nameof(maximumOutputCharacters));
         cancellationToken.ThrowIfCancellationRequested();
         using var process = new Process
         {
@@ -52,7 +60,7 @@ public sealed class ContainerProcess : IContainerProcess
             throw;
         }
         if (truncated)
-            output.Append("\n[Log truncated at 64 KiB of characters.]");
+            output.Append($"\n[Log truncated at {maximumOutputCharacters} characters.]");
         return new(process.ExitCode, output.ToString());
 
         async Task Drain(StreamReader reader)
@@ -63,7 +71,7 @@ public sealed class ContainerProcess : IContainerProcess
             {
                 lock (sync)
                 {
-                    var remaining = 65536 - output.Length;
+                    var remaining = maximumOutputCharacters - output.Length;
                     if (remaining > 0)
                         output.Append(buffer, 0, Math.Min(remaining, count));
                     if (count > remaining)

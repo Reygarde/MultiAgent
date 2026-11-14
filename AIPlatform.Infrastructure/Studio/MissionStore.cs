@@ -8,6 +8,8 @@ namespace AIPlatform.Infrastructure.Studio;
 
 public sealed class MissionStore : IMissionService, IDisposable
 {
+    public const string InfrastructureRevalidationReason =
+        "Infrastructure revalidation; identical reviewed sources, no generation or correction.";
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new JsonStringEnumConverter() }
@@ -43,9 +45,11 @@ public sealed class MissionStore : IMissionService, IDisposable
             {
                 snapshot = snapshot with
                 {
-                    Status = MissionStatus.Cancelled, UpdatedAt = DateTimeOffset.UtcNow,
+                    Status = MissionStatus.Cancelled,
+                    UpdatedAt = DateTimeOffset.UtcNow,
                     Error = "Mission interrupted by a server restart. Explicit resumption is required.",
-                    SandboxApproved = false, ApprovalFingerprint = null,
+                    SandboxApproved = false,
+                    ApprovalFingerprint = null,
                     Workflow = snapshot.Workflow is { } interrupted ? interrupted with
                     {
                         Steps = interrupted.Steps.Select(step => step.Status == WorkflowStatus.Running
@@ -67,9 +71,18 @@ public sealed class MissionStore : IMissionService, IDisposable
         if (string.IsNullOrWhiteSpace(submission.Task) || submission.Task.Length > platform.MaxTaskLength ||
             !Enum.IsDefined(submission.Kind))
             throw new StudioValidationException($"Provide a task of 1 to {platform.MaxTaskLength} characters and a valid kind.");
+        if (submission.TemplateId is not null &&
+            ((submission.TemplateId != DiscordTemplate.Id && submission.TemplateId != ReactTemplate.Id &&
+              submission.TemplateId != TwitchTemplate.Id && submission.TemplateId != FullStackTemplate.Id) ||
+             submission.Kind != MissionKind.Project || !options.CollaborativeWorkflows))
+            throw new StudioValidationException("The selected template requires the collaborative project workflow.");
+        if (submission.TemplateId is not null && ProjectExport.ContainsPotentialSecret(submission.Task))
+            throw new StudioValidationException("A possible credential was detected in the mission. Do not submit tokens.");
         var candidates = submission.Kind == MissionKind.Chat ? registry.Candidates :
             registry.Agents.Where(agent => agent.Enabled &&
-                (options.CollaborativeWorkflows ? agent.Role == "Developer" && agent.TaskTypes.Contains("Project") :
+                (options.CollaborativeWorkflows ? agent.Role ==
+                    (submission.TemplateId == FullStackTemplate.Id ? "Backend" : "Developer") &&
+                    agent.TaskTypes.Contains("Project") :
                     agent.Id == options.DeveloperAgentId)).ToArray();
         if (submission.AgentId is not null && !candidates.Any(agent => agent.Id == submission.AgentId))
             throw new StudioValidationException("The requested execution agent is not registered.");
@@ -86,15 +99,22 @@ public sealed class MissionStore : IMissionService, IDisposable
                 Guid.NewGuid(), submission.Task.Trim(), submission.Kind, submission.AgentId,
                 submission.ApproveSandboxExecution, MissionStatus.Queued, now, now,
                 null, null, null, false, null, null, false, 0,
-                [new(1, now, "Queue", StepStatus.Running, "Waiting for the single mission worker.")], []);
+                [new(1, now, "Queue", StepStatus.Running, "Waiting for the single mission worker.")], [],
+                TemplateId: submission.TemplateId);
             if (options.CollaborativeWorkflows && submission.Kind == MissionKind.Project)
             {
-                var workflow = CollaborativeProcessor.Create(snapshot.Id, registry);
-                var developer = workflow.Agents.Single(agent => agent.Role == "Developer" && agent.Enabled);
-                snapshot = snapshot with { Workflow = workflow, SandboxApproved = false,
+                var workflow = CollaborativeProcessor.Create(snapshot.Id, registry, options.MaxCorrectionAttempts,
+                    submission.TemplateId);
+                var developer = workflow.Agents.Single(agent => agent.Role ==
+                    (submission.TemplateId == FullStackTemplate.Id ? "Backend" : "Developer") && agent.Enabled);
+                snapshot = snapshot with
+                {
+                    Workflow = workflow,
+                    SandboxApproved = false,
                     SelectedAgent = developer.Id,
                     SelectedModel = workflow.Models.Single(model => model.Id == developer.ModelId).Name,
-                    Reason = "Deterministic collaborative .NET workflow; each sensitive file version requires human approval." };
+                    Reason = "Deterministic collaborative project workflow; each sensitive file version requires human approval."
+                };
             }
             Save(snapshot);
             missions.Add(snapshot.Id, snapshot);
@@ -144,6 +164,16 @@ public sealed class MissionStore : IMissionService, IDisposable
             if (!missions.TryGetValue(id, out var current) || current.Status != MissionStatus.AwaitingApproval ||
                 cancellations[id].IsCancellationRequested)
                 return false;
+            if (approved && current.Workflow is { } pending &&
+                (pending.Revisions?.LastOrDefault() is not { } revision ||
+                 revision.Version != pending.Version || revision.Fingerprint != fingerprint))
+                return false;
+            if (approved && current.TemplateId == FullStackTemplate.Id &&
+                (current.Workflow?.Revisions?.LastOrDefault()?.ExecutionPlan is not { Canonical: { } canonical } saved ||
+                 saved.Fingerprint != fingerprint || canonical.WorkflowVersion != current.Workflow.Version ||
+                 canonical.ComputeFingerprint() != fingerprint || canonical.AutomaticCorrections ||
+                 !canonical.Image.StartsWith("sha256:", StringComparison.Ordinal)))
+                return false;
             Update(id, mission => mission with
             {
                 SandboxApproved = approved,
@@ -153,9 +183,12 @@ public sealed class MissionStore : IMissionService, IDisposable
                 {
                     FinalReport = approved ? null : "Execution refused. Files retained; build and tests not executed.",
                     Steps = flow.Steps.Select(step => step.Status == WorkflowStatus.WaitingForApproval
-                        ? step with { Status = approved ? WorkflowStatus.Completed : WorkflowStatus.Skipped,
+                        ? step with
+                        {
+                            Status = approved ? WorkflowStatus.Completed : WorkflowStatus.Skipped,
                             Output = approved ? $"Human approved fingerprint {fingerprint}." : "Human refused execution.",
-                            DurationMilliseconds = step.StartedAt is { } start ? (DateTimeOffset.UtcNow - start).TotalMilliseconds : null }
+                            DurationMilliseconds = step.StartedAt is { } start ? (DateTimeOffset.UtcNow - start).TotalMilliseconds : null
+                        }
                         : !approved && step.Status == WorkflowStatus.Pending
                             ? step with { Status = WorkflowStatus.Skipped, Output = "Execution refused." } : step).ToArray()
                 } : null
@@ -167,13 +200,15 @@ public sealed class MissionStore : IMissionService, IDisposable
                 throw new InvalidOperationException("The mission worker queue is closed.");
             if (!approved)
             {
+                var skippedStages = current.TemplateId == FullStackTemplate.Id
+                    ? new[] { "BackendBuild", "BackendTests", "TypeScript", "FrontendBuild", "FrontendTests", "Integration" }
+                    : current.TemplateId == ReactTemplate.Id
+                        ? new[] { "TypeScript", "Build", "Tests" } : ["Build", "Tests"];
                 Update(id, mission => mission with
                 {
-                    Verification =
-                    [
-                        .. mission.Verification, new("Build", "Skipped", null, "Human approval refused; not executed."),
-                        new("Tests", "Skipped", null, "Human approval refused; not executed.")
-                    ]
+                    Verification = [.. mission.Verification,
+                        .. skippedStages.Select(stage => new VerificationResult(stage, "Skipped", null,
+                            "Human approval refused; not executed."))]
                 });
                 AddEvent(id, "Mission", StepStatus.Skipped, "GeneratedUnverified: execution refused by the user.");
             }
@@ -196,7 +231,48 @@ public sealed class MissionStore : IMissionService, IDisposable
             cancellations.GetValueOrDefault(id)?.Dispose();
             cancellations[id] = new();
             var steps = flow.Steps;
-            if (current.HasWorkspace && flow.Revisions?.Count > 0)
+            var correctionPrefix = $"correct-{flow.Version}-";
+            var correctionStages = steps.Where(step => step.Id.StartsWith(correctionPrefix, StringComparison.Ordinal))
+                .ToArray();
+            var legacyCorrection = steps.LastOrDefault(step => step.Id == $"correct-{flow.Version}");
+            var correctionReview = steps.LastOrDefault(step => step.Id == $"review-{flow.Version}");
+            var correctionsCompleted = correctionStages.Length > 0 &&
+                correctionStages.All(step => step.Status == WorkflowStatus.Completed);
+            if (flow.Proposal is not null && correctionsCompleted &&
+                (flow.Proposals ?? []).All(item => item.Version != flow.Version))
+                flow = flow with
+                {
+                    Proposals = [.. flow.Proposals ?? [],
+                    new(flow.Version, correctionStages[^1].StartedAt ?? current.UpdatedAt, flow.Proposal, flow.Review)]
+                };
+            if (correctionStages.Length > 0 && correctionReview is not null && !correctionsCompleted)
+            {
+                var ids = correctionStages.Select(step => step.Id).ToHashSet(StringComparer.Ordinal);
+                steps = steps.Select(step => ids.Contains(step.Id)
+                    ? step.Status == WorkflowStatus.Completed
+                        ? step : step with { Status = WorkflowStatus.Pending, Error = null }
+                    : step.Id == correctionReview.Id
+                        ? step with { Status = WorkflowStatus.Pending, Error = null }
+                        : step.Status is WorkflowStatus.Pending or WorkflowStatus.Running
+                            ? step with { Status = WorkflowStatus.Skipped, Output = "Superseded by explicit resumption." }
+                            : step).ToArray();
+                flow = flow with { Steps = steps };
+            }
+            else if (legacyCorrection is not null && correctionReview is not null &&
+                (legacyCorrection.Status != WorkflowStatus.Completed ||
+                 (flow.Proposal is not null && correctionReview.Status != WorkflowStatus.Completed)))
+            {
+                var resumeReview = legacyCorrection.Status == WorkflowStatus.Completed && flow.Proposal is not null;
+                steps = steps.Select(step => step.Id == legacyCorrection.Id
+                    ? step with { Status = resumeReview ? WorkflowStatus.Completed : WorkflowStatus.Pending, Error = null }
+                    : step.Id == correctionReview.Id
+                        ? step with { Status = WorkflowStatus.Pending, Error = null }
+                        : step.Status is WorkflowStatus.Pending or WorkflowStatus.Running
+                            ? step with { Status = WorkflowStatus.Skipped, Output = "Superseded by explicit resumption." }
+                            : step).ToArray();
+                flow = flow with { Steps = steps };
+            }
+            else if (current.HasWorkspace && flow.Revisions?.Count > 0)
             {
                 var reviewer = flow.Agents.Single(agent => agent.Enabled && agent.Role == "Review");
                 steps = [.. steps.Select(step => step.Status is WorkflowStatus.Pending or WorkflowStatus.Running
@@ -211,14 +287,225 @@ public sealed class MissionStore : IMissionService, IDisposable
                 flow = flow with { Steps = steps };
             }
             WorkflowGraph.Validate(flow.Steps);
-            Update(id, mission => mission with { Status = MissionStatus.Queued, Error = null,
-                SandboxApproved = false, ApprovalFingerprint = null, Workflow = flow with { FinalReport = null } });
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.Queued,
+                Error = null,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Workflow = flow with { FinalReport = null }
+            });
             AddEvent(id, "Queue", StepStatus.Running, "Explicit resumption; prior authorization discarded.");
             if (!queue.Writer.TryWrite(id)) throw new InvalidOperationException("Mission queue closed.");
             return true;
         }
     }
 
+    public bool PrepareRevalidation(Guid id, DateTimeOffset expectedUpdatedAt, ExecutionPlan plan)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.UpdatedAt != expectedUpdatedAt ||
+                current.Status is not (MissionStatus.GeneratedUnverified or MissionStatus.AwaitingApproval) ||
+                current.TemplateId != FullStackTemplate.Id ||
+                current.Deleted || !current.HasWorkspace || current.Workflow is not { } flow ||
+                flow.Proposal is not null || flow.Review is not { } review ||
+                review.Findings.Any(finding => finding.Severity == "Error") ||
+                flow.Revisions?.LastOrDefault() is not { } revision || revision.Version != flow.Version ||
+                flow.Steps.LastOrDefault(step => step.Kind == "Review")?.Status != WorkflowStatus.Completed ||
+                (current.Status == MissionStatus.GeneratedUnverified &&
+                    flow.Steps.Any(step => step.Status is WorkflowStatus.Pending or WorkflowStatus.Running)) ||
+                (current.Status == MissionStatus.AwaitingApproval && revision.ExecutionPlan is not null) ||
+                plan.Canonical is not { } canonical || canonical.MissionId != id ||
+                canonical.WorkflowVersion != flow.Version + 1 || canonical.AutomaticCorrections ||
+                !canonical.Image.StartsWith("sha256:", StringComparison.Ordinal) ||
+                canonical.ComputeFingerprint() != plan.Fingerprint ||
+                plan.Fingerprint.Length != 64 || !plan.Fingerprint.All(Uri.IsHexDigit))
+                return false;
+
+            var cycle = flow.Steps.Where(step => step.Id.EndsWith($"-{flow.Version}", StringComparison.Ordinal) &&
+                (step.Kind == "Approval" || FullStackBuildProfile.IsStage(step.Kind))).ToArray();
+            if (cycle.Length != 7 || cycle.Select(step => step.Kind).Distinct(StringComparer.Ordinal).Count() != 7 ||
+                cycle.Where(step => step.Kind == "Approval").Any(step =>
+                    step.DependsOn.Any(dependency => flow.Steps.Single(item => item.Id == dependency).Status != WorkflowStatus.Completed)))
+                return false;
+
+            var version = flow.Version + 1;
+            var now = DateTimeOffset.UtcNow;
+            var identifiers = cycle.ToDictionary(step => step.Id,
+                step => step.Id[..(step.Id.LastIndexOf('-') + 1)] + version, StringComparer.Ordinal);
+            var steps = cycle.Select(step => step with
+            {
+                Id = identifiers[step.Id],
+                DependsOn = step.DependsOn.Select(dependency => identifiers.GetValueOrDefault(dependency, dependency)).ToArray(),
+                Status = step.Kind == "Approval" ? WorkflowStatus.WaitingForApproval : WorkflowStatus.Pending,
+                Attempts = 0,
+                StartedAt = step.Kind == "Approval" ? now : null,
+                DurationMilliseconds = null,
+                Input = null,
+                Output = null,
+                Error = null
+            }).ToArray();
+            var workflow = flow with
+            {
+                Version = version,
+                FinalReport = null,
+                Steps = [.. flow.Steps.Select(step => current.Status == MissionStatus.AwaitingApproval &&
+                    step.Status is (WorkflowStatus.Pending or WorkflowStatus.WaitingForApproval)
+                        ? step with { Status = WorkflowStatus.Skipped, Output = "Superseded by a new canonical plan." } : step), .. steps],
+                Revisions = [.. flow.Revisions!, new(version, now, InfrastructureRevalidationReason, plan.Fingerprint, revision.Files, plan)]
+            };
+            WorkflowGraph.Validate(workflow.Steps);
+            cancellations.GetValueOrDefault(id)?.Dispose();
+            cancellations[id] = new();
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.AwaitingApproval,
+                Error = null,
+                Response = null,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Workflow = workflow
+            });
+            AddEvent(id, "Revalidation", StepStatus.Succeeded,
+                $"Infrastructure plan refreshed for version {version}; sources and correction count unchanged. Fingerprint {plan.Fingerprint}.");
+            AddEvent(id, "Authorization", StepStatus.Running,
+                "New human authorization required. No model or container execution was queued.");
+            return true;
+        }
+    }
+
+    public bool BeginManualRevision(Guid id, DateTimeOffset expectedUpdatedAt, string fingerprint, ManualRevisionRole role,
+        IReadOnlyList<GeneratedFile> files)
+    {
+        lock (sync)
+        {
+            if (!Enum.IsDefined(role) || !missions.TryGetValue(id, out var current) || current.UpdatedAt != expectedUpdatedAt ||
+                current.Status is not (MissionStatus.AwaitingApproval or MissionStatus.BuildFailed) ||
+                current.TemplateId != FullStackTemplate.Id ||
+                current.Deleted || current.SandboxApproved || current.Workflow is not { } flow ||
+                flow.Proposal is not null || flow.Revisions?.LastOrDefault() is not { ExecutionPlan: { } saved } revision ||
+                revision.Version != flow.Version || revision.Fingerprint != fingerprint ||
+                saved.Fingerprint != fingerprint || saved.Canonical?.ComputeFingerprint() != fingerprint ||
+                (current.Status == MissionStatus.AwaitingApproval &&
+                    (!cancellations.TryGetValue(id, out var cancellation) || cancellation.IsCancellationRequested)))
+                return false;
+            if (current.Status == MissionStatus.BuildFailed)
+            {
+                cancellations.GetValueOrDefault(id)?.Dispose();
+                cancellations[id] = new();
+            }
+            var version = flow.Version + 1;
+            var orchestrator = flow.Agents.Single(agent => agent.Enabled && agent.Role == "Orchestrator");
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.Running,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Workflow = flow with
+                {
+                    Version = version,
+                    FinalReport = null,
+                    Proposals = [.. flow.Proposals ?? [], new(version, DateTimeOffset.UtcNow, files)],
+                    Steps = [.. flow.Steps.Select(step => step.Status is WorkflowStatus.Pending or WorkflowStatus.WaitingForApproval
+                            ? step with { Status = WorkflowStatus.Skipped, Output = "Superseded by manual revision." } : step),
+                            new($"manual-revision-{version}", "ManualRevision", orchestrator.Id, [],
+                                WorkflowStatus.Running, 1, DateTimeOffset.UtcNow, Input: role.ToString())]
+                }
+            });
+            AddEvent(id, "ManualRevision", StepStatus.Running,
+                $"Human-requested {role} revision {version}; previous plan invalidated. No agent or container was started.");
+            return true;
+        }
+    }
+
+    public bool CompleteManualRevision(Guid id, ExecutionPlan plan, IReadOnlyList<GeneratedFile> files)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.Status != MissionStatus.Running ||
+                current.Workflow is not { } flow || cancellations[id].IsCancellationRequested ||
+                flow.Steps.LastOrDefault() is not { Kind: "ManualRevision", Status: WorkflowStatus.Running } manual ||
+                manual.Input is not ("Backend" or "Frontend") ||
+                flow.Proposals?.LastOrDefault() is not { } proposal || proposal.Version != flow.Version ||
+                plan.Canonical is not { } canonical || canonical.MissionId != id ||
+                canonical.WorkflowVersion != flow.Version || canonical.AutomaticCorrections ||
+                canonical.ComputeFingerprint() != plan.Fingerprint ||
+                !canonical.Image.StartsWith("sha256:", StringComparison.Ordinal))
+                return false;
+            var previousVersion = flow.Version - 1;
+            var cycle = flow.Steps.Where(step => step.Id.EndsWith($"-{previousVersion}", StringComparison.Ordinal) &&
+                (step.Kind == "Approval" || FullStackBuildProfile.IsStage(step.Kind))).ToArray();
+            if (cycle.Length != 7 || cycle.Select(step => step.Kind).Distinct(StringComparer.Ordinal).Count() != 7)
+                return false;
+            var identifiers = cycle.ToDictionary(step => step.Id,
+                step => step.Id[..(step.Id.LastIndexOf('-') + 1)] + flow.Version, StringComparer.Ordinal);
+            var now = DateTimeOffset.UtcNow;
+            var steps = cycle.Select(step => step with
+            {
+                Id = identifiers[step.Id],
+                DependsOn = step.Kind == "Approval" ? [manual.Id] :
+                    step.DependsOn.Select(dependency => identifiers.GetValueOrDefault(dependency, dependency)).ToArray(),
+                Status = step.Kind == "Approval" ? WorkflowStatus.WaitingForApproval : WorkflowStatus.Pending,
+                Attempts = 0,
+                StartedAt = step.Kind == "Approval" ? now : null,
+                DurationMilliseconds = null,
+                Input = null,
+                Output = null,
+                Error = null
+            }).ToArray();
+            var workflow = flow with
+            {
+                Draft = files,
+                Review = null,
+                Proposal = null,
+                Steps = [.. flow.Steps.Select(step => step.Id == manual.Id
+                        ? step with { Status = WorkflowStatus.Completed,
+                            Output = $"Human-reviewed {manual.Input} correction applied; no automated review or validation was performed." } : step),
+                        .. steps],
+                Revisions = [.. flow.Revisions ?? [], new(flow.Version, now,
+                        $"Human-reviewed manual {manual.Input} correction; no model or Docker execution.", plan.Fingerprint, files, plan)]
+            };
+            WorkflowGraph.Validate(workflow.Steps);
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.AwaitingApproval,
+                Error = null,
+                Response = null,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Workflow = workflow
+            });
+            AddEvent(id, "ManualRevision", StepStatus.Succeeded,
+                $"Manual {manual.Input} revision {flow.Version} saved with canonical fingerprint {plan.Fingerprint}.");
+            AddEvent(id, "Authorization", StepStatus.Running,
+                "New human authorization required. No model or container execution was queued.");
+            return true;
+        }
+    }
+
+    public void FailManualRevision(Guid id, string message)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.Status != MissionStatus.Running ||
+                current.Workflow?.Steps.LastOrDefault() is not { Kind: "ManualRevision", Status: WorkflowStatus.Running } manual)
+                return;
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.Failed,
+                Error = message,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Workflow = mission.Workflow! with
+                {
+                    Steps = mission.Workflow.Steps.Select(step => step.Id == manual.Id
+                        ? step with { Status = WorkflowStatus.Failed, Error = message } : step).ToArray()
+                }
+            });
+            AddEvent(id, "ManualRevision", StepStatus.Failed, message);
+        }
+    }
     public bool RenameProject(Guid id, string name, string description)
     {
         if (string.IsNullOrWhiteSpace(name) || name.Length > 80 || name.Any(char.IsControl) ||
@@ -241,8 +528,12 @@ public sealed class MissionStore : IMissionService, IDisposable
             if (!missions.TryGetValue(id, out var mission) || !mission.IsTerminal || !mission.HasWorkspace || mission.Deleted)
                 return false;
             (workspaces ?? throw new InvalidOperationException("Workspace store required for deletion.")).Delete(id);
-            Update(id, current => current with { HasWorkspace = false, Deleted = true,
-                Workflow = current.Workflow is { } flow ? flow with { Draft = [], Revisions = [] } : null });
+            Update(id, current => current with
+            {
+                HasWorkspace = false,
+                Deleted = true,
+                Workflow = current.Workflow is { } flow ? flow with { Draft = [], Proposal = null, Revisions = [], Proposals = [] } : null
+            });
             AddEvent(id, "Project", StepStatus.Succeeded, "Project sources deleted by explicit user request. Mission audit retained.");
             return true;
         }
@@ -264,15 +555,21 @@ public sealed class MissionStore : IMissionService, IDisposable
                 cancellations.TryGetValue(id, out var cancellation))
                 cancellation.Token.ThrowIfCancellationRequested();
             if (next.Workflow is { } flow && (next.Status is MissionStatus.Failed or MissionStatus.Cancelled))
-                next = next with { Workflow = flow with
+                next = next with
                 {
-                    Steps = flow.Steps.Select(step => step.Status == WorkflowStatus.Running ||
-                        (next.Status == MissionStatus.Cancelled && step.Status is WorkflowStatus.Pending or WorkflowStatus.WaitingForApproval)
-                        ? step with { Status = next.Status == MissionStatus.Cancelled ? WorkflowStatus.Cancelled : WorkflowStatus.Failed,
-                            Error = next.Error ?? "Mission cancelled.",
-                            DurationMilliseconds = step.StartedAt is { } start ? (DateTimeOffset.UtcNow - start).TotalMilliseconds : null }
-                        : step).ToArray()
-                } };
+                    Workflow = flow with
+                    {
+                        Steps = flow.Steps.Select(step => step.Status == WorkflowStatus.Running ||
+                            (next.Status == MissionStatus.Cancelled && step.Status is WorkflowStatus.Pending or WorkflowStatus.WaitingForApproval)
+                            ? step with
+                            {
+                                Status = next.Status == MissionStatus.Cancelled ? WorkflowStatus.Cancelled : WorkflowStatus.Failed,
+                                Error = next.Error ?? "Mission cancelled.",
+                                DurationMilliseconds = step.StartedAt is { } start ? (DateTimeOffset.UtcNow - start).TotalMilliseconds : null
+                            }
+                            : step).ToArray()
+                    }
+                };
             Save(next);
             missions[id] = next;
             return next;
@@ -286,8 +583,11 @@ public sealed class MissionStore : IMissionService, IDisposable
             var previous = mission.Events.LastOrDefault(item => item.Step == step);
             double? duration = status != StepStatus.Running && previous?.Status == StepStatus.Running
                 ? (now - previous.Timestamp).TotalMilliseconds : null;
-            return mission with { Events = mission.Events.Append(new(mission.Events.Count + 1,
-                now, step, status, message, duration)).ToArray() };
+            return mission with
+            {
+                Events = mission.Events.Append(new(mission.Events.Count + 1,
+                now, step, status, message, duration)).ToArray()
+            };
         });
 
     private void Save(MissionSnapshot snapshot)

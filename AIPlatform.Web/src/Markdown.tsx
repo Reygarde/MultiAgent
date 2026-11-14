@@ -1,7 +1,42 @@
 import { useState } from 'react'
 import { Check, Copy } from 'lucide-react'
+import { createLowlight } from 'lowlight'
+import csharp from 'highlight.js/lib/languages/csharp'
+import css from 'highlight.js/lib/languages/css'
+import javascript from 'highlight.js/lib/languages/javascript'
+import json from 'highlight.js/lib/languages/json'
+import markdown from 'highlight.js/lib/languages/markdown'
+import plaintext from 'highlight.js/lib/languages/plaintext'
+import typescript from 'highlight.js/lib/languages/typescript'
+import xml from 'highlight.js/lib/languages/xml'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+
+const highlighter = createLowlight({ csharp, css, javascript, json, markdown, plaintext, typescript, xml })
+type HighlightNode = ReturnType<typeof highlighter.highlight>['children'][number]
+
+function renderToken(node: HighlightNode, index: number): React.ReactNode {
+  if (node.type === 'text') return node.value
+  if (node.type === 'element') {
+    const classes = node.properties.className
+    return <span key={index} className={Array.isArray(classes) ? classes.join(' ') : String(classes ?? '')}>
+      {node.children.map(renderToken)}
+    </span>
+  }
+  throw new Error(`Type de nœud de coloration inattendu : ${node.type}`)
+}
+
+function highlightLanguage(language: string) {
+  const value = language.toLowerCase()
+  const extension = value.split('.').pop() ?? value
+  const aliases: Record<string, string> = {
+    cs: 'csharp', 'c#': 'csharp', csproj: 'xml', slnx: 'xml', html: 'xml',
+    js: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript',
+    md: 'markdown', text: 'plaintext',
+  }
+  const name = aliases[extension] ?? extension
+  return highlighter.registered(name) ? name : 'plaintext'
+}
 
 export function CodeBlock({ code, language = 'text' }: { code: string; language?: string }) {
   const [copied, setCopied] = useState(false)
@@ -22,7 +57,7 @@ export function CodeBlock({ code, language = 'text' }: { code: string; language?
       </button>
     </div>
     {error && <p role="alert" className="error-inline">{error}</p>}
-    <pre><code>{code}</code></pre>
+    <pre><code>{highlighter.highlight(highlightLanguage(language), code).children.map(renderToken)}</code></pre>
   </div>
 }
 
