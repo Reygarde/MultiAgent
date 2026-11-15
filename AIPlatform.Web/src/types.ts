@@ -12,6 +12,79 @@ export interface Agent {
   taskTypes?: string[]
 }
 
+export interface CustomAgent {
+  id: string
+  name: string
+  description: string
+  systemPrompt: string
+  modelName: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CustomAgentMessage {
+  role: 'user' | 'assistant'
+  content: string
+  createdAt: string
+  proposal?: CustomAgentProposal | null
+}
+
+export type CustomAgentWorkspaceKind = 'None' | 'Studio' | 'External'
+
+export interface CustomAgentWorkspace {
+  kind: CustomAgentWorkspaceKind
+  workspaceId: string | null
+  name: string
+}
+
+export interface CustomAgentWorkspaceFile {
+  path: string
+  content: string
+}
+
+export interface CustomAgentFileChange {
+  path: string
+  summary: string
+  before: string | null
+  after: string
+}
+
+export interface CustomAgentProposal {
+  id: string
+  createdAt: string
+  status: 'Pending' | 'Applied' | 'Rejected'
+  changes: CustomAgentFileChange[]
+  canApply: boolean
+  applyReason: string | null
+  workspace?: CustomAgentWorkspace | null
+}
+
+export interface CustomAgentConversationSummary {
+  id: string
+  agentId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messageCount: number
+}
+
+export interface CustomAgentConversation {
+  id: string
+  agentId: string
+  title: string
+  createdAt: string
+  updatedAt: string
+  messages: CustomAgentMessage[]
+  workspace?: CustomAgentWorkspace | null
+}
+
+export interface CustomAgentDraft {
+  name: string
+  description: string
+  systemPrompt: string
+  modelName: string
+}
+
 export interface AgentSettings {
   id: string; name: string; role: string; enabled: boolean; description: string
   modelId: string; systemPrompt: string; capabilities: string[]; fallbackKeywords: string[]
@@ -106,6 +179,27 @@ export interface Mission {
   projectDescription?: string | null
   deleted?: boolean
   templateId?: string | null
+  archived?: boolean
+  archivedAt?: string | null
+  completedAt?: string | null
+}
+
+export interface MissionCapacity { count: number; limit: number; remaining: number }
+export interface TwitchSettings { clientId: string; configured: boolean }
+export interface TwitchCommand { name: string; response: string; cooldownSeconds: number; enabled: boolean }
+export interface TwitchEvent { timestamp: string; kind: string; message: string }
+export interface TwitchBot {
+  id: string; name: string; channel: string; state: string; authorized: boolean
+  accountLogin: string | null; error: string | null; commands: TwitchCommand[]; events: TwitchEvent[]
+}
+export interface TwitchDeviceAuthorization {
+  verificationUri: string; userCode: string; expiresIn: number; interval: number
+}
+export interface TwitchConnectResult {
+  pending: boolean; authorized: boolean; accountLogin: string | null; message: string | null
+}
+export interface TwitchCommandTestResult {
+  matched: boolean; response: string | null; cooldownRemainingSeconds: number
 }
 
 export interface LocalModels {

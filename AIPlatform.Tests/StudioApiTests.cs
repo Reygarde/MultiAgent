@@ -249,12 +249,190 @@ public sealed class StudioApiTests
         foreach (var path in new[] { "/api/missions", "/api/missions/{id}", "/api/missions/{id}/events",
                      "/api/missions/{id}/cancel", "/api/workspaces", "/api/workspaces/{id}/file",
                      "/api/models/local", "/api/sandbox", "/api/missions/{id}/approval", "/api/missions/{id}/execution-plan",
-                     "/api/workspaces/{id}/export", "/api/workspaces/{id}/analysis" })
+                     "/api/workspaces/{id}/export", "/api/workspaces/{id}/analysis",
+                     "/api/missions/capacity", "/api/missions/{id}/archive", "/api/missions/{id}/restore",
+                     "/api/twitch/settings", "/api/twitch/bots", "/api/twitch/bots/{id}",
+                     "/api/twitch/bots/{id}/connect", "/api/twitch/bots/{id}/connect/poll",
+                     "/api/twitch/bots/{id}/start", "/api/twitch/bots/{id}/stop",
+                     "/api/twitch/bots/{id}/commands/test" })
+            Assert.True(paths.TryGetProperty(path, out _), path);
+    }
+
+    [Fact]
+    public async Task TwitchBotApiCreatesDemoCommandWithoutConnectingOrReturningCredentials()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture, tokenVault: new EmptyTwitchVault());
+        using var client = factory.CreateClient();
+        using var created = await client.PostAsJsonAsync("/api/twitch/bots",
+            new { name = "Studio Bot", channel = "samplechannel" });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        Assert.StartsWith("/api/twitch/bots/", created.Headers.Location!.ToString());
+        var bot = await created.Content.ReadFromJsonAsync<TwitchBotResponse>(JsonOptions);
+        Assert.Equal("Stopped", bot!.State);
+        Assert.False(bot.Authorized);
+        Assert.Equal("!hello", Assert.Single(bot.Commands).Name);
+        var json = await client.GetStringAsync("/api/twitch/bots");
+        Assert.DoesNotContain("accessToken", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("refreshToken", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task MissionArchiveApiRetainsCapacityAndSupportsRestore()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture);
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<AIPlatform.Infrastructure.Studio.MissionStore>();
+        var submitted = store.Submit(new("Mission for archive"));
+        var terminal = await WaitForTerminal(client, submitted.Id);
+        Assert.Equal(MissionStatus.Completed, terminal.Status);
+
+        using var archivedResponse = await client.PostAsync($"/api/missions/{submitted.Id}/archive", null);
+        Assert.Equal(HttpStatusCode.OK, archivedResponse.StatusCode);
+        var archived = await archivedResponse.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        Assert.True(archived!.Archived);
+        Assert.Equal(terminal.Response, archived.Response);
+        var capacity = await client.GetFromJsonAsync<MissionCapacityResponse>("/api/missions/capacity", JsonOptions);
+        Assert.Equal(1, capacity!.Count);
+        Assert.Equal(199, capacity.Remaining);
+
+        using var restoredResponse = await client.PostAsync($"/api/missions/{submitted.Id}/restore", null);
+        Assert.Equal(HttpStatusCode.OK, restoredResponse.StatusCode);
+        Assert.False((await restoredResponse.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!.Archived);
+    }
+
+    [Fact]
+    public async Task CustomAgentApiKeepsUserAgentsSeparateAndSupportsCrud()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture, modelCatalog: new FakeOllamaModelCatalog());
+        using var client = factory.CreateClient();
+        var systemAgents = await client.GetFromJsonAsync<AgentResponse[]>("/api/agents", JsonOptions);
+        Assert.NotEmpty(systemAgents!);
+        Assert.Empty(await client.GetFromJsonAsync<CustomAgentResponse[]>("/api/custom-agents", JsonOptions) ?? []);
+        Assert.Equal(new[] { "qwen2.5-coder:7b", "qwen3:4b" },
+            await client.GetFromJsonAsync<string[]>("/api/custom-agents/models", JsonOptions));
+
+        using var invalidModel = await client.PostAsJsonAsync("/api/custom-agents",
+            new { name = "Assistant", description = "", systemPrompt = "Help.", modelName = "invented:1b" });
+        Assert.Equal(HttpStatusCode.BadRequest, invalidModel.StatusCode);
+
+        using var created = await client.PostAsJsonAsync("/api/custom-agents",
+            new { name = "Assistant Développeur", description = "Aide au code", systemPrompt = "Réponds en français.",
+                modelName = "qwen2.5-coder:7b" });
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var agent = await created.Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions);
+        Assert.Equal($"/api/custom-agents/{agent!.Id}", created.Headers.Location!.ToString());
+
+        using var updated = await client.PutAsJsonAsync($"/api/custom-agents/{agent.Id}",
+            new { name = "Assistant C#", description = "C# uniquement", systemPrompt = "Sois précis.",
+                modelName = "qwen3:4b" });
+        Assert.Equal(HttpStatusCode.OK, updated.StatusCode);
+        Assert.Equal("Assistant C#",
+            (await updated.Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions))!.Name);
+
+        using var duplicated = await client.PostAsync($"/api/custom-agents/{agent.Id}/duplicate", null);
+        Assert.Equal(HttpStatusCode.Created, duplicated.StatusCode);
+        var copy = await duplicated.Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions);
+        Assert.NotEqual(agent.Id, copy!.Id);
+        Assert.EndsWith("(copie)", copy.Name);
+        Assert.Empty(await client.GetFromJsonAsync<CustomAgentConversationSummaryResponse[]>(
+            $"/api/custom-agents/{copy.Id}/conversations", JsonOptions) ?? []);
+
+        using var deleted = await client.DeleteAsync($"/api/custom-agents/{agent.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deleted.StatusCode);
+        Assert.Single(await client.GetFromJsonAsync<CustomAgentResponse[]>("/api/custom-agents", JsonOptions) ?? []);
+        Assert.Equal(systemAgents!.Select(item => item.Id),
+            (await client.GetFromJsonAsync<AgentResponse[]>("/api/agents", JsonOptions))!.Select(item => item.Id));
+    }
+
+    [Fact]
+    public async Task CustomAgentChatUsesSystemPromptAndPersistsConversationContext()
+    {
+        using var fixture = new StudioFixture();
+        var provider = new FakeProvider((request, _) =>
+            Task.FromResult($"Réponse {request.Messages.Count(item => item.Role == "user")}"));
+        using var factory = Factory(fixture, provider, modelCatalog: new FakeOllamaModelCatalog());
+        using var client = factory.CreateClient();
+        var agent = await (await client.PostAsJsonAsync("/api/custom-agents",
+            new { name = "Assistant", description = "", systemPrompt = "Use French.", modelName = "qwen2.5-coder:7b" }))
+            .Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions);
+        var created = await client.PostAsync($"/api/custom-agents/{agent!.Id}/conversations", null);
+        Assert.Equal(HttpStatusCode.Created, created.StatusCode);
+        var conversation = await created.Content.ReadFromJsonAsync<CustomAgentConversationResponse>(JsonOptions);
+
+        var first = await client.PostAsJsonAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation!.Id}/messages", new { message = "Bonjour" });
+        Assert.Equal(HttpStatusCode.OK, first.StatusCode);
+        var firstResult = await first.Content.ReadFromJsonAsync<CustomAgentConversationResponse>(JsonOptions);
+        Assert.Equal("Bonjour", firstResult!.Messages[0].Content);
+        Assert.Equal("Réponse 1", firstResult.Messages[1].Content);
+
+        var second = await client.PostAsJsonAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation.Id}/messages", new { message = "Explique une classe." });
+        Assert.Equal(HttpStatusCode.OK, second.StatusCode);
+        var secondResult = await second.Content.ReadFromJsonAsync<CustomAgentConversationResponse>(JsonOptions);
+        Assert.Equal(4, secondResult!.Messages.Count);
+        var request = Assert.IsType<FakeProvider>(factory.Services.GetServices<ILLMProvider>().Single()).Requests.Last();
+        Assert.Equal("qwen2.5-coder:7b", request.Model.Name);
+        Assert.Equal(new[] { "system", "user", "assistant", "user" }, request.Messages.Select(item => item.Role));
+        Assert.Equal("Use French.", request.Messages[0].Content);
+        Assert.Equal("Bonjour", request.Messages[1].Content);
+        Assert.Equal("Réponse 1", request.Messages[2].Content);
+        Assert.Equal(4, (await client.GetFromJsonAsync<CustomAgentConversationSummaryResponse[]>(
+            $"/api/custom-agents/{agent.Id}/conversations", JsonOptions))!.Single().MessageCount);
+        using var deletedConversation = await client.DeleteAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation.Id}");
+        Assert.Equal(HttpStatusCode.NoContent, deletedConversation.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation.Id}")).StatusCode);
+    }
+
+    [Fact]
+    public async Task CustomAgentApiRejectsInvalidMessagesAndReportsRemovedModels()
+    {
+        using var fixture = new StudioFixture();
+        var catalog = new FakeOllamaModelCatalog();
+        using var factory = Factory(fixture, modelCatalog: catalog);
+        using var client = factory.CreateClient();
+        var agent = await (await client.PostAsJsonAsync("/api/custom-agents",
+            new { name = "Assistant", description = "", systemPrompt = "Help.", modelName = "qwen3:4b" }))
+            .Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions);
+        var conversation = await (await client.PostAsync($"/api/custom-agents/{agent!.Id}/conversations", null))
+            .Content.ReadFromJsonAsync<CustomAgentConversationResponse>(JsonOptions);
+        using var invalid = await client.PostAsJsonAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation!.Id}/messages", new { message = "  " });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+
+        catalog.Models = ["qwen2.5-coder:7b"];
+        using var unavailable = await client.PostAsJsonAsync(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation.Id}/messages", new { message = "Hello" });
+        Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailable.StatusCode);
+        Assert.Contains("no longer installed", await unavailable.Content.ReadAsStringAsync(), StringComparison.OrdinalIgnoreCase);
+        Assert.Empty((await client.GetFromJsonAsync<CustomAgentConversationResponse>(
+            $"/api/custom-agents/{agent.Id}/conversations/{conversation.Id}", JsonOptions))!.Messages);
+    }
+
+    [Fact]
+    public async Task OpenApiIncludesCustomAgentAndConversationEndpoints()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture, modelCatalog: new FakeOllamaModelCatalog());
+        using var client = factory.CreateClient();
+        using var document = JsonDocument.Parse(await client.GetStringAsync("/openapi/v1.json"));
+        var paths = document.RootElement.GetProperty("paths");
+        foreach (var path in new[] { "/api/custom-agents", "/api/custom-agents/models", "/api/custom-agents/{id}",
+                     "/api/custom-agents/{id}/duplicate", "/api/custom-agents/{id}/conversations",
+                     "/api/custom-agents/{id}/conversations/{conversationId}",
+                     "/api/custom-agents/{id}/conversations/{conversationId}/messages" })
             Assert.True(paths.TryGetProperty(path, out _), path);
     }
 
     private static WebApplicationFactory<Program> Factory(
-        StudioFixture fixture, ILLMProvider? provider = null, ISandboxRunner? sandbox = null) =>
+        StudioFixture fixture, ILLMProvider? provider = null, ISandboxRunner? sandbox = null,
+        ITwitchTokenVault? tokenVault = null, IOllamaModelCatalog? modelCatalog = null) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.UseEnvironment("Development");
@@ -265,12 +443,27 @@ public sealed class StudioApiTests
                 services.RemoveAll<ILLMProvider>();
                 services.AddSingleton(provider ?? new FakeProvider((request, _) => Task.FromResult(request.IsRouting()
                     ? """{"agentId":"DeveloperAgent","reason":"Code"}""" : """{"response":"Answer"}""")));
+                services.RemoveAll<IOllamaModelCatalog>();
+                services.AddSingleton(modelCatalog ?? new FakeOllamaModelCatalog());
                 services.RemoveAll<IProjectGenerator>();
                 services.AddSingleton<IProjectGenerator>(new FakeProjectGenerator());
                 services.RemoveAll<ISandboxRunner>();
                 services.AddSingleton(sandbox ?? new FakeSandbox());
+                if (tokenVault is not null)
+                {
+                    services.RemoveAll<ITwitchTokenVault>();
+                    services.AddSingleton(tokenVault);
+                }
             });
         });
+
+    private sealed class EmptyTwitchVault : ITwitchTokenVault
+    {
+        public bool IsAvailable => true;
+        public TwitchStoredCredentials? Read(Guid botId) => null;
+        public void Save(Guid botId, TwitchStoredCredentials credentials) { }
+        public void Delete(Guid botId) { }
+    }
 
     private static async Task<MissionResponse> WaitForTerminal(HttpClient client, Guid id)
     {

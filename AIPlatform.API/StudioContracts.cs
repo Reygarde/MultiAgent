@@ -15,7 +15,8 @@ public sealed record MissionResponse(
     string? Response, string? Error, bool HasWorkspace, int CorrectionAttempts,
     IReadOnlyList<MissionEventResponse> Events, IReadOnlyList<VerificationResponse> Verification,
     WorkflowResponse? Workflow = null, string? ProjectName = null, string? ProjectDescription = null, bool Deleted = false,
-    string? TemplateId = null)
+    string? TemplateId = null, bool Archived = false, DateTimeOffset? ArchivedAt = null,
+    DateTimeOffset? CompletedAt = null)
 {
     public static MissionResponse From(MissionSnapshot mission) => new(
         mission.Id, mission.Task, mission.Kind, mission.RequestedAgent, mission.SandboxApproved,
@@ -24,8 +25,12 @@ public sealed record MissionResponse(
         mission.CorrectionAttempts, mission.Events.Select(MissionEventResponse.From).ToArray(),
         mission.Verification.Select(VerificationResponse.From).ToArray(),
         mission.Workflow is { } flow ? WorkflowResponse.From(flow) : null,
-        mission.ProjectName, mission.ProjectDescription, mission.Deleted, mission.TemplateId);
+        mission.ProjectName, mission.ProjectDescription, mission.Deleted, mission.TemplateId,
+        mission.Archived, mission.ArchivedAt, mission.CompletedAt);
 }
+
+/// <summary>Current persisted mission count and the configured capacity, including archived missions.</summary>
+public sealed record MissionCapacityResponse(int Count, int Limit, int Remaining);
 
 /// <summary>Observable workflow state, excluding raw prompts, draft source and internal model reasoning.</summary>
 public sealed record WorkflowResponse(Guid WorkflowId, Guid MissionId, int Version,

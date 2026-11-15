@@ -225,3 +225,63 @@ PUT {{AIPlatform.API_HostAddress}}/api/agents/configuration
 Content-Type: application/json
 
 { "agents": [], "models": [] }
+
+### Modeles reellement installes dans Ollama pour les agents personnalises
+GET {{AIPlatform.API_HostAddress}}/api/custom-agents/models
+
+### Liste des agents personnalises (separee des agents de workflows)
+GET {{AIPlatform.API_HostAddress}}/api/custom-agents
+
+### Creer un agent personnalise
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents
+Content-Type: application/json
+
+{
+  "name": "Assistant Développeur",
+  "description": "Aide à développer et expliquer du code.",
+  "systemPrompt": "Réponds en français. Explique clairement les choix techniques.",
+  "modelName": "qwen2.5-coder:7b"
+}
+
+@customAgentId = 00000000-0000-0000-0000-000000000000
+@customConversationId = 00000000-0000-0000-0000-000000000000
+
+### Lire un agent personnalise
+GET {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}
+
+### Modifier un agent personnalise
+PUT {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}
+Content-Type: application/json
+
+{
+  "name": "Assistant Développeur",
+  "description": "Réponses orientées C# et .NET.",
+  "systemPrompt": "Réponds en français et n'exécute jamais de code.",
+  "modelName": "qwen2.5-coder:7b"
+}
+
+### Dupliquer la configuration sans l'historique
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/duplicate
+
+### Lister les conversations
+GET {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations
+
+### Creer une conversation
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations
+
+### Charger l'historique complet
+GET {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}
+
+### Envoyer un message a Ollama en conservant le contexte
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}/messages
+Content-Type: application/json
+
+{
+  "message": "Explique la différence entre une interface et une classe abstraite en C#."
+}
+
+### Supprimer une conversation (confirmation attendue dans l'interface)
+DELETE {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}
+
+### Supprimer un agent et ses conversations (confirmation attendue dans l'interface)
+DELETE {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}

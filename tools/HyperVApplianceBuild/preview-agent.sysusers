@@ -1,0 +1,2 @@
+g preview-agent -
+u preview-agent - "AIPlatform Preview Guest Agent" /nonexistent /usr/sbin/nologin

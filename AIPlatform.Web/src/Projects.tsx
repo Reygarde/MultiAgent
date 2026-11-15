@@ -5,15 +5,29 @@ import type { FileContent, Mission, ProjectAnalysis, WorkspaceFile } from './typ
 import { CodeBlock } from './Markdown'
 import { StatusBadge } from './MissionDetails'
 import { isActive } from './types'
+import { formatDateTime, missionSearchText, missionTitle, projectVerificationLabel } from './missionPresentation'
 
-export function Projects({ missions, selectedId, onSelect, refresh }: {
+export function Projects({ missions, selectedId, onSelect, refresh, onOpenMission }: {
   missions: Mission[]; selectedId: string | null; onSelect: (id: string) => void; refresh: () => Promise<unknown>
+  onOpenMission?: (id: string) => void
 }) {
   const projects = missions.filter(mission => mission.hasWorkspace)
-  const selected = projects.find(project => project.id === selectedId) ?? projects[0]
+  const [search, setSearch] = useState('')
+  const [sort, setSort] = useState<'newest' | 'oldest'>('newest')
+  const visibleProjects = projects.filter(project => !search.trim() ||
+    missionSearchText(project).includes(search.trim().toLocaleLowerCase('fr-FR')))
+    .sort((left, right) => {
+      const leftDate = Date.parse(left.createdAt)
+      const rightDate = Date.parse(right.createdAt)
+      const leftValue = Number.isNaN(leftDate) ? Number.NEGATIVE_INFINITY : leftDate
+      const rightValue = Number.isNaN(rightDate) ? Number.NEGATIVE_INFINITY : rightDate
+      return sort === 'newest' ? rightValue - leftValue : leftValue - rightValue
+    })
+  const selected = visibleProjects.find(project => project.id === selectedId) ?? visibleProjects[0]
   const [files, setFiles] = useState<WorkspaceFile[]>([])
   const [content, setContent] = useState<FileContent | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [filesLoading, setFilesLoading] = useState(false)
   const [loading, setLoading] = useState(false)
   const [path, setPath] = useState<string | null>(null)
   const [editing, setEditing] = useState(false)
@@ -21,6 +35,9 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
+  const createdAt = selected ? formatDateTime(selected.createdAt) : null
+  const updatedAt = selected && Date.parse(selected.updatedAt) > Date.parse(selected.createdAt)
+    ? formatDateTime(selected.updatedAt) : null
   useEffect(() => { setEditing(false); setConfirmDelete(false) }, [selected?.id])
   async function changeProject(deleting: boolean) {
     if (!selected) return
@@ -47,12 +64,14 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
   }
   useEffect(() => {
     setFiles([]); setContent(null); setPath(null); setError(null)
+    setFilesLoading(!!selected)
     if (!selected) return
     const controller = new AbortController()
     void api.files(selected.id, controller.signal).then(result => {
       setFiles(result)
       setPath(result.find(file => file.path.endsWith('Program.cs'))?.path ?? result[0]?.path ?? null)
     }).catch(error => { if (!controller.signal.aborted) setError(errorMessage(error)) })
+      .finally(() => { if (!controller.signal.aborted) setFilesLoading(false) })
     return () => controller.abort()
   }, [selected?.id, selected?.updatedAt])
   useEffect(() => {
@@ -68,21 +87,45 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
   if (!projects.length) return <div className="empty panel"><FolderOpen size={36} /><h2>Aucun projet généré</h2>
     <p>Lancez une mission « Projet .NET » depuis le Workspace. Les fichiers apparaîtront ici après leur validation.</p></div>
   return <div className="projects-layout">
-    <aside className="panel project-list"><h2>Workspaces <span className="count">{projects.length}</span></h2>
-      {projects.map(project => <button key={project.id} className={`project-entry ${selected?.id === project.id ? 'selected' : ''}`}
+    <aside className="panel project-list"><h2>Projets <span className="count">{visibleProjects.length} / {projects.length}</span></h2>
+      <div className="project-toolbar">
+        <label>Rechercher<input aria-label="Rechercher un projet" type="search" value={search}
+          onChange={event => setSearch(event.target.value)} placeholder="Nom, demande ou description" /></label>
+        <label>Trier par<select aria-label="Trier les projets par date" value={sort}
+          onChange={event => setSort(event.target.value as typeof sort)}>
+          <option value="newest">Plus récents</option><option value="oldest">Plus anciens</option>
+        </select></label>
+      </div>
+      {!visibleProjects.length && <div className="empty compact"><FolderOpen size={24} /><p>Aucun projet ne correspond à la recherche.</p></div>}
+      {visibleProjects.map(project => <button key={project.id} className={`project-entry ${selected?.id === project.id ? 'selected' : ''}`}
         onClick={() => onSelect(project.id)}>
-        <FolderOpen size={17} /><span><strong>{project.projectName || `Projet ${project.id.slice(0, 8)}`}</strong><small>{new Date(project.createdAt).toLocaleDateString('fr-FR')}</small><StatusBadge mission={project} /></span>
+        <FolderOpen size={17} /><span><strong>{missionTitle(project)}</strong>
+          <small>{formatDateTime(project.createdAt) ?? 'Date inconnue'}</small>
+          <StatusBadge mission={project} />
+          <small className="project-entry-verification">{projectVerificationLabel(project)}</small></span>
       </button>)}
     </aside>
     <section className="panel explorer">
       <div className="panel-heading"><h2><FileCode2 size={17} /> Fichiers du projet</h2><span className="muted">{files.length} fichiers</span></div>
       {error && <div className="notice danger" role="alert">{error}</div>}
+      {filesLoading && <div className="loading"><LoaderCircle className="spin" size={16} /> Chargement des fichiers…</div>}
       {selected && <div className="project-verification">
-        <h3>{selected.projectName || `Projet ${selected.id.slice(0, 8)}`}</h3>
+        <h3>{missionTitle(selected)}</h3>
         <p>{selected.projectDescription || 'Projet .NET généré dans un workspace isolé.'}</p>
-        <p className="mission-id">Mission associée : {selected.id}</p>
+        <div className="project-dates">
+          <span>Créé le <strong>{createdAt ?? 'date inconnue'}</strong></span>
+          {updatedAt && <span>Dernière mise à jour <strong>{updatedAt}</strong></span>}
+        </div>
+        <div className="project-status">
+          <span>Génération <StatusBadge mission={selected} /></span>
+          <span>Vérification <strong>{projectVerificationLabel(selected)}</strong></span>
+        </div>
+        <button className="button secondary" disabled={!onOpenMission} onClick={() => onOpenMission?.(selected.id)}>
+          Ouvrir la mission associée
+        </button>
+        <details className="technical-logs"><summary>Identifiant technique</summary><code>{selected.id}</code></details>
         <button className="button secondary" onClick={() => {
-          setName(selected.projectName || `Projet ${selected.id.slice(0, 8)}`); setDescription(selected.projectDescription || ''); setEditing(true)
+          setName(selected.projectName || missionTitle(selected)); setDescription(selected.projectDescription || ''); setEditing(true)
         }}>Renommer</button>
         <button className="button secondary" disabled={isActive(selected)} onClick={() => setConfirmDelete(true)}>Supprimer le projet</button>
         <button className="button secondary" disabled={busy || selected.status === 'Running' || selected.status === 'Queued'}
@@ -105,6 +148,7 @@ export function Projects({ missions, selectedId, onSelect, refresh }: {
             <p>{revision.reason}</p><p>{revision.files.join(', ')}</p><code>{revision.fingerprint}</code>
           </section>)}</details>}
       </div>}
+      {!filesLoading && !error && selected && !files.length && <p className="empty compact">Aucun fichier n’est associé à ce workspace.</p>}
       <div className="file-browser">
         <nav className="file-tree" aria-label="Fichiers générés">{files.map(file => <button key={file.path}
           className={path === file.path ? 'selected' : ''} onClick={() => { setError(null); setPath(file.path) }}>

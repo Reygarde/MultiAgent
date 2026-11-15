@@ -8,15 +8,19 @@ import { Markdown } from './Markdown'
 import { MissionDetails, StatusBadge } from './MissionDetails'
 import { Projects } from './Projects'
 import { ConfigurationEditor } from './ConfigurationEditor'
-import type { Agent, LocalModels, Mission, MissionKind, Model, Sandbox } from './types'
+import { TwitchBots } from './TwitchBots'
+import { CustomAgents } from './CustomAgents'
+import type { Agent, LocalModels, Mission, MissionCapacity, MissionKind, Model, Sandbox } from './types'
 import { isActive } from './types'
+import { groupMissionsByDay, missionSearchText, missionTitle } from './missionPresentation'
 
 const navigation = [
-  { id: 'Workspace', icon: MessageSquare, subtitle: 'Votre espace de création' },
-  { id: 'Agents', icon: Bot, subtitle: 'Votre équipe spécialisée' },
-  { id: 'Models', icon: Cpu, subtitle: 'Intelligence locale' },
-  { id: 'Projects', icon: FolderOpen, subtitle: 'Du prompt aux fichiers' },
-  { id: 'Missions', icon: Workflow, subtitle: 'Chaque étape, en transparence' },
+  { id: 'Workspace', label: 'Espace', icon: MessageSquare, subtitle: 'Votre espace de création' },
+  { id: 'Twitch', label: 'Twitch', icon: Bot, subtitle: 'Bots Twitch configurables' },
+  { id: 'Agents', label: 'Agents', icon: Bot, subtitle: 'Votre équipe spécialisée' },
+  { id: 'Models', label: 'Modèles', icon: Cpu, subtitle: 'Intelligence locale' },
+  { id: 'Projects', label: 'Projets', icon: FolderOpen, subtitle: 'Du prompt aux fichiers' },
+  { id: 'Missions', label: 'Missions', icon: Workflow, subtitle: 'Chaque étape, en transparence' },
 ] as const
 type Page = typeof navigation[number]['id']
 
@@ -25,12 +29,18 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
   const [agents, setAgents] = useState<Agent[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [missions, setMissions] = useState<Mission[]>([])
+  const [missionCapacity, setMissionCapacity] = useState<MissionCapacity | null>(null)
+  const [missionFilter, setMissionFilter] = useState<'active' | 'archived' | 'all'>('all')
+  const [missionStatusFilter, setMissionStatusFilter] = useState<'all' | 'completed' | 'error' | 'active' | 'cancelled'>('all')
+  const [missionSearch, setMissionSearch] = useState('')
+  const [missionSort, setMissionSort] = useState<'newest' | 'oldest'>('newest')
   const [local, setLocal] = useState<LocalModels | null>(null)
   const [sandbox, setSandbox] = useState<Sandbox | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pollError, setPollError] = useState<string | null>(null)
   const [telemetryError, setTelemetryError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [missionHistoryLoaded, setMissionHistoryLoaded] = useState(false)
   const [task, setTask] = useState('')
   const [kind, setKind] = useState<MissionKind>('Chat')
   const [templateId, setTemplateId] = useState('')
@@ -43,8 +53,10 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
   const activeCount = missions.filter(isActive).length
 
   const refresh = useCallback(async () => {
-    const result = await api.missions()
+    const [result, capacity] = await Promise.all([api.missions(), api.missionCapacity()])
     setMissions(result)
+    setMissionCapacity(capacity)
+    setMissionHistoryLoaded(true)
     setPollError(null)
     return result
   }, [])
@@ -67,10 +79,17 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
     let timer: ReturnType<typeof setTimeout>
     async function poll() {
       try {
-        const result = await api.missions(controller.signal)
-        if (!controller.signal.aborted) { setMissions(result); setPollError(null) }
+        const [result, capacity] = await Promise.all([
+          api.missions(controller.signal), api.missionCapacity(controller.signal),
+        ])
+        if (!controller.signal.aborted) {
+          setMissions(result); setMissionCapacity(capacity); setMissionHistoryLoaded(true); setPollError(null)
+        }
       } catch (error) {
-        if (!controller.signal.aborted) setPollError(`Suivi des missions interrompu : ${errorMessage(error)}`)
+        if (!controller.signal.aborted) {
+          setMissionHistoryLoaded(true)
+          setPollError(`Suivi des missions interrompu : ${errorMessage(error)}`)
+        }
       } finally {
         if (!controller.signal.aborted) timer = setTimeout(() => void poll(), 2000)
       }
@@ -105,7 +124,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: false,
         ...(kind === 'Project' && templateId ? { templateId } : {}) })
       setMissions(previous => [mission, ...previous.filter(item => item.id !== mission.id)])
-      setSelectedId(mission.id); setTask('')
+      setSelectedId(mission.id); setMissionHistoryLoaded(true); setTask('')
     } catch (error) { setError(errorMessage(error)) }
     finally { setBusy(false) }
   }
@@ -116,6 +135,44 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
     catch (error) { setError(errorMessage(error)) }
     finally { setBusy(false) }
   }
+
+  async function archiveMission(id: string) {
+    if (!window.confirm('Archiver cette mission ? Ses résultats, journaux, fichiers et audits seront conservés. Elle comptera toujours dans la limite de stockage.')) return
+    setBusy(true); setError(null)
+    try { await api.archiveMission(id); await refresh() }
+    catch (error) { setError(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
+
+  async function restoreMission(id: string) {
+    setBusy(true); setError(null)
+    try { await api.restoreMission(id); await refresh() }
+    catch (error) { setError(errorMessage(error)) }
+    finally { setBusy(false) }
+  }
+
+  const visibleMissions = missions.filter(mission => missionFilter === 'all' ||
+    (missionFilter === 'archived' ? mission.archived : !mission.archived))
+    .filter(mission => {
+      switch (missionStatusFilter) {
+        case 'completed': return ['Completed', 'Verified', 'GeneratedUnverified'].includes(mission.status)
+        case 'error': return ['Failed', 'BuildFailed', 'TestsFailed'].includes(mission.status)
+        case 'active': return isActive(mission)
+        case 'cancelled': return mission.status === 'Cancelled'
+        default: return true
+      }
+    })
+    .filter(mission => !missionSearch.trim() ||
+      missionSearchText(mission).includes(missionSearch.trim().toLocaleLowerCase('fr-FR')))
+    .sort((left, right) => {
+      const leftDate = Date.parse(left.createdAt)
+      const rightDate = Date.parse(right.createdAt)
+      const leftValue = Number.isNaN(leftDate) ? Number.NEGATIVE_INFINITY : leftDate
+      const rightValue = Number.isNaN(rightDate) ? Number.NEGATIVE_INFINITY : rightDate
+      return missionSort === 'newest' ? rightValue - leftValue : leftValue - rightValue
+    })
+  const missionDayGroups = groupMissionsByDay(visibleMissions)
+  const selectedVisibleMission = visibleMissions.find(mission => mission.id === selectedId) ?? visibleMissions[0]
 
   const pageInfo = navigation.find(item => item.id === page)!
   const eligible = agents.filter(agent => agent.enabled !== false && !agent.isRouter &&
@@ -132,9 +189,9 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
         <Plus size={17} /> Nouvelle mission <span>↗</span>
       </button>
       <div className="nav-label">PLATEFORME</div>
-      <nav aria-label="Navigation principale">{navigation.map(item => <button key={item.id} aria-label={item.id} title={item.id} aria-current={page === item.id ? 'page' : undefined}
+      <nav aria-label="Navigation principale">{navigation.map(item => <button key={item.id} aria-label={item.label} title={item.label} aria-current={page === item.id ? 'page' : undefined}
         className={`nav-item ${page === item.id ? 'active' : ''}`} onClick={() => setPage(item.id)}>
-        <item.icon size={18} /><span>{item.id}</span>{item.id === 'Missions' && activeCount > 0 && <small>{activeCount}</small>}
+        <item.icon size={18} /><span>{item.label}</span>{item.id === 'Missions' && activeCount > 0 && <small>{activeCount}</small>}
       </button>)}</nav>
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
@@ -143,11 +200,11 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       </div>
     </aside>
     <main>
-      <header className="topbar"><div><LayoutDashboard size={15} /><span>Studio</span><ChevronRight size={13} /><strong>{page}</strong></div>
+      <header className="topbar"><div><LayoutDashboard size={15} /><span>Studio</span><ChevronRight size={13} /><strong>{pageInfo.label}</strong></div>
         <span className="local-pill"><CircleDot size={13} /> LOCAL FIRST</span>
       </header>
       <div className="page-content">
-        <div className="page-title"><div><p className="eyebrow">{pageInfo.subtitle}</p><h1>{page === 'Workspace' ? 'Construisons la suite.' : page}</h1></div>
+        <div className="page-title"><div><p className="eyebrow">{pageInfo.subtitle}</p><h1>{page === 'Workspace' ? 'Construisons la suite.' : pageInfo.label}</h1></div>
           <span className="badge quiet"><Activity size={13} /> {activeCount} mission{activeCount > 1 ? 's' : ''} en attente / active{activeCount > 1 ? 's' : ''}</span></div>
         {error && <div className="notice danger" role="alert">{error}<button onClick={() => setError(null)} aria-label="Fermer l’erreur">×</button></div>}
         {pollError && <div className="notice danger" role="alert">{pollError} Les états affichés peuvent être périmés.</div>}
@@ -192,7 +249,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
             </section> : <section className="conversation panel" aria-label="Historique des missions">
               <div className="panel-heading"><h2><MessageSquare size={16} /> Historique</h2><span className="muted">Missions indépendantes</span></div>
               {[...missions].reverse().map(mission => <article key={mission.id} data-mission-id={mission.id} className={`conversation-item ${selected?.id === mission.id ? 'focused' : ''}`}>
-                <button className="user-message" onClick={() => setSelectedId(mission.id)}><span className="avatar user">U</span><span>{mission.task}</span></button>
+                <button className="user-message" onClick={() => setSelectedId(mission.id)}><span className="avatar user">U</span><span>{missionTitle(mission)}</span></button>
                 <div className="agent-message"><span className="avatar agent"><Bot size={17} /></span><div className="answer">
                   <div className="answer-header"><strong>{mission.selectedAgent ?? 'Studio'}</strong><StatusBadge mission={mission} /></div>
                   {mission.selectedModel && <p className="model-caption">{mission.selectedModel}</p>}
@@ -250,7 +307,8 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
                 </button></div>
             </form>
           </div>
-          <aside className="context-column">{selected ? <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} refresh={refresh} />
+          <aside className="context-column">{selected ? <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} refresh={refresh}
+            openProject={id => { setSelectedId(id); setPage('Projects') }} />
             : <section className="panel mission-details"><div className="panel-heading"><h2><Workflow size={16} /> Suivi de mission</h2></div>
               <div className="empty compact"><Workflow size={28} /><p>Les étapes apparaîtront ici dès votre première mission.</p><span>Aucune progression simulée.</span></div></section>}
             <section className="panel safety-card"><ShieldCheck size={20} /><h3>Vous gardez le contrôle.</h3>
@@ -267,7 +325,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
           <p>{agent.description}</p><div className="tags">{agent.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
           <p className="muted">Outils : {agent.allowedTools?.join(', ') || 'aucun'}</p>
           <div className="card-bottom"><Cpu size={14} /><span>{models.find(model => model.id === agent.modelId)?.name ?? agent.modelId}</span></div>
-        </article>)}</div></>}
+        </article>)}</div><CustomAgents /></>}
 
         {page === 'Models' && <><ConfigurationEditor mode="models" saved={refreshCatalog} />{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
           <div className="cards-grid">{models.map(model => {
@@ -283,16 +341,65 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
             </article>
           })}</div></>}
 
-        {page === 'Projects' && <Projects missions={missions} selectedId={selectedId} onSelect={setSelectedId} refresh={refresh} />}
+        {page === 'Twitch' && <TwitchBots />}
+        {page === 'Projects' && <Projects missions={missions} selectedId={selectedId} onSelect={setSelectedId} refresh={refresh}
+          onOpenMission={id => {
+            setSelectedId(id); setMissionFilter('all'); setMissionStatusFilter('all'); setMissionSearch(''); setPage('Missions')
+          }} />}
         {page === 'Missions' && <div className="missions-layout">
-          <section className="panel mission-list"><div className="panel-heading"><h2><Workflow size={17} /> Toutes les missions</h2><span className="count">{missions.length}</span></div>
-            {!missions.length && <div className="empty compact"><Workflow size={28} /><p>Aucune mission pour le moment.</p></div>}
-            {missions.map(mission => <button key={mission.id} className={`mission-row ${selected?.id === mission.id ? 'selected' : ''}`} onClick={() => setSelectedId(mission.id)}>
-              <span className="mission-row-icon">{mission.kind === 'Project' ? <FolderOpen size={18} /> : <MessageSquare size={18} />}</span>
-              <span><strong>{mission.task}</strong><small>{mission.selectedAgent ?? 'Routage en attente'} · {new Date(mission.createdAt).toLocaleString('fr-FR')}</small></span>
-              <StatusBadge mission={mission} /><ChevronRight size={16} />
-            </button>)}
-          </section>{selected && <MissionDetails mission={selected} cancel={id => void cancel(id)} busy={busy} refresh={refresh} />}
+          <section className="panel mission-list">
+            <div className="panel-heading"><h2><Workflow size={17} /> Missions</h2>
+              <span className="count">{visibleMissions.length}</span></div>
+            <div className="mission-filters" role="group" aria-label="Filtrer les missions">
+              <button aria-pressed={missionFilter === 'active'} onClick={() => setMissionFilter('active')}>Actives</button>
+              <button aria-pressed={missionFilter === 'archived'} onClick={() => setMissionFilter('archived')}>Archivées</button>
+              <button aria-pressed={missionFilter === 'all'} onClick={() => setMissionFilter('all')}>Toutes</button>
+            </div>
+            <div className="mission-toolbar">
+              <label>Rechercher<input aria-label="Rechercher une mission" type="search" value={missionSearch}
+                onChange={event => setMissionSearch(event.target.value)} placeholder="Titre, demande ou résultat" /></label>
+              <label>Statut<select aria-label="Filtrer par statut" value={missionStatusFilter}
+                onChange={event => setMissionStatusFilter(event.target.value as typeof missionStatusFilter)}>
+                <option value="all">Tous les statuts</option><option value="completed">Terminées</option>
+                <option value="error">En erreur</option><option value="active">En cours</option>
+                <option value="cancelled">Annulées</option>
+              </select></label>
+              <label>Trier par<select aria-label="Trier les missions par date" value={missionSort}
+                onChange={event => setMissionSort(event.target.value as typeof missionSort)}>
+                <option value="newest">Plus récentes</option><option value="oldest">Plus anciennes</option>
+              </select></label>
+            </div>
+            <p className="mission-capacity">Stockage : {missionCapacity?.count ?? '—'} / {missionCapacity?.limit ?? '—'} missions.
+              Archiver ne libère pas de capacité et aucune purge automatique n’est effectuée.</p>
+            {missionCapacity?.remaining === 0 && <div className="notice warning mission-capacity-warning">
+              Limite atteinte. Pour créer de nouvelles missions, augmentez <code>Studio:MaxMissions</code> (maximum 10 000) dans la configuration locale puis redémarrez Studio. Aucune mission ne sera supprimée automatiquement.
+            </div>}
+            {!missionHistoryLoaded && <div className="loading"><LoaderCircle className="spin" size={16} /> Chargement de l’historique…</div>}
+            {missionHistoryLoaded && !visibleMissions.length && <div className="empty compact"><Workflow size={28} />
+              <p>{missionSearch ? 'Aucun résultat pour cette recherche et ces filtres.' : 'Aucune mission dans ce filtre.'}</p>
+            </div>}
+            {missionDayGroups.map(group => <section className="mission-day" key={group.key}>
+              <h3>{group.label}<span>{group.missions.length}</span></h3>
+              {group.missions.map(mission => <div key={mission.id} className="mission-row-shell">
+                <button className={`mission-row ${selectedVisibleMission?.id === mission.id ? 'selected' : ''}`} onClick={() => setSelectedId(mission.id)}>
+                  <span className="mission-row-icon">{mission.kind === 'Project' ? <FolderOpen size={18} /> : <MessageSquare size={18} />}</span>
+                  <span><strong>{missionTitle(mission)}</strong><small>
+                    Créée le {Number.isNaN(Date.parse(mission.createdAt)) ? 'date inconnue' : new Date(mission.createdAt).toLocaleString('fr-FR')}
+                    {mission.selectedAgent && ` · ${mission.selectedAgent}`}
+                  </small></span>
+                  {mission.archived && <span className="badge quiet">Archivée</span>}
+                  <StatusBadge mission={mission} /><ChevronRight size={16} />
+                </button>
+                {mission.hasWorkspace && <button className="mission-project-action" disabled={busy}
+                  onClick={() => { setSelectedId(mission.id); setPage('Projects') }}>Ouvrir le projet</button>}
+                {mission.archived
+                  ? <button className="mission-archive-action" disabled={busy} onClick={() => void restoreMission(mission.id)}>Restaurer</button>
+                  : !mission.deleted && !isActive(mission) && <button className="mission-archive-action" disabled={busy}
+                    onClick={() => void archiveMission(mission.id)}>Archiver</button>}
+              </div>)}
+            </section>)}
+          </section>{selectedVisibleMission && <MissionDetails mission={selectedVisibleMission} cancel={id => void cancel(id)} busy={busy}
+            refresh={refresh} openProject={id => { setSelectedId(id); setPage('Projects') }} />}
         </div>}
         <footer className="page-footer"><span>AIPlatform Studio</span><span>Les modèles peuvent se tromper. Vérifiez le code avant toute utilisation.</span></footer>
       </div>

@@ -7,9 +7,10 @@ import { agents, mission, models } from './test/fixtures'
 
 vi.mock('./api', () => ({
   api: {
-    agents: vi.fn(), models: vi.fn(), missions: vi.fn(), localModels: vi.fn(),
+    agents: vi.fn(), models: vi.fn(), missions: vi.fn(), missionCapacity: vi.fn(), archiveMission: vi.fn(), restoreMission: vi.fn(), localModels: vi.fn(),
     sandbox: vi.fn(), create: vi.fn(), cancel: vi.fn(), files: vi.fn(), file: vi.fn(),
-    executionPlan: vi.fn(), approve: vi.fn(),
+    executionPlan: vi.fn(), approve: vi.fn(), twitchSettings: vi.fn(), twitchBots: vi.fn(),
+    customAgents: vi.fn(), customAgentModels: vi.fn(),
   },
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Error',
 }))
@@ -18,7 +19,12 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.agents).mockResolvedValue(agents)
   vi.mocked(api.models).mockResolvedValue(models)
+  vi.mocked(api.customAgents).mockResolvedValue([])
+  vi.mocked(api.customAgentModels).mockResolvedValue(['custom:4b'])
   vi.mocked(api.missions).mockResolvedValue([])
+  vi.mocked(api.missionCapacity).mockResolvedValue({ count: 0, limit: 200, remaining: 200 })
+  vi.mocked(api.twitchSettings).mockResolvedValue({ clientId: '', configured: false })
+  vi.mocked(api.twitchBots).mockResolvedValue([])
   vi.mocked(api.localModels).mockResolvedValue({ available: true, error: null,
     models: [{ name: 'custom:4b', installed: true, loaded: false, inUse: false }] })
   vi.mocked(api.sandbox).mockResolvedValue({ available: false, reason: 'Docker absent.' })
@@ -49,6 +55,13 @@ describe('Studio dashboard', () => {
     expect(screen.getByRole('heading', { name: 'Dispatch' })).toBeVisible()
     expect(screen.getByRole('heading', { name: 'CustomCoder' })).toBeVisible()
     expect(screen.queryByText('DeveloperAgent')).not.toBeInTheDocument()
+  })
+
+  it('opens the Twitch bot controls from the Studio navigation', async () => {
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: 'Twitch' }))
+    expect(await screen.findByRole('heading', { name: 'Connexion OAuth Twitch' })).toBeVisible()
+    expect(screen.getByRole('heading', { name: 'Bots Twitch' })).toBeVisible()
   })
 
   it('creates a project mission without allowing unavailable sandbox execution', async () => {
@@ -147,7 +160,7 @@ describe('Studio dashboard', () => {
   it('distinguishes installed loaded and in-use model states', async () => {
     render(<App />)
     await screen.findByText('Ollama connecté')
-    await userEvent.click(screen.getByRole('button', { name: 'Models' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Modèles' }))
     expect(screen.getByText('Installé : oui')).toBeVisible()
     expect(screen.getByText('Chargé : non')).toBeVisible()
     expect(screen.getByText('Utilisé : non')).toBeVisible()
@@ -157,7 +170,7 @@ describe('Studio dashboard', () => {
     vi.mocked(api.missions).mockResolvedValue([mission])
     render(<App />)
     expect(await screen.findByText('Fichiers disponibles. Compilation et tests NON exécutés.')).toBeVisible()
-    await userEvent.click(screen.getByRole('button', { name: 'Projects' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Projets' }))
     await waitFor(() => expect(document.querySelector('.file-preview code')).toHaveTextContent('Console.WriteLine("Hello");'))
     expect(screen.getByText('Build · Unavailable · sortie non exécuté')).toBeVisible()
     expect(api.file).toHaveBeenCalledWith(mission.id, 'src/App/Program.cs', expect.any(AbortSignal))
@@ -189,6 +202,55 @@ describe('Studio dashboard', () => {
     const article = olderMessage.closest('article')!
     await userEvent.click(within(article).getByRole('button', { name: 'Explorer les fichiers' }))
     await waitFor(() => expect(api.files).toHaveBeenCalledWith(older.id, expect.any(AbortSignal)))
+  })
+
+  it('archives and restores a terminal mission without hiding the retained history', async () => {
+    let archived = false
+    vi.mocked(api.missions).mockImplementation(async () => [{ ...mission, archived }])
+    vi.mocked(api.archiveMission).mockImplementation(async () => {
+      archived = true
+      return { ...mission, archived: true }
+    })
+    vi.mocked(api.restoreMission).mockImplementation(async () => {
+      archived = false
+      return { ...mission, archived: false }
+    })
+    vi.stubGlobal('confirm', vi.fn(() => true))
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: 'Missions' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Archiver' }))
+    await waitFor(() => expect(api.archiveMission).toHaveBeenCalledWith(mission.id))
+    await userEvent.click(screen.getByRole('button', { name: 'Archivées' }))
+    await screen.findByText('Archivée')
+    await userEvent.click(screen.getByRole('button', { name: 'Restaurer' }))
+    await waitFor(() => expect(api.restoreMission).toHaveBeenCalledWith(mission.id))
+    await userEvent.click(screen.getByRole('button', { name: 'Actives' }))
+    expect(await screen.findByRole('button', { name: 'Actives' })).toHaveAttribute('aria-pressed', 'true')
+    expect(await screen.findByRole('heading', { name: 'Créer un projet de test' })).toBeVisible()
+    vi.unstubAllGlobals()
+  })
+
+  it('searches and filters the mission history while sorting newest first by default', async () => {
+    const newest = { ...mission, id: '22222222-2222-2222-2222-222222222222',
+      task: 'Projet bêta', status: 'Verified' as const, createdAt: '2026-11-13T10:00:00Z',
+      response: 'Résultat détaillé à retrouver' }
+    const oldest = { ...mission, id: '33333333-3333-3333-3333-333333333333',
+      task: 'Discussion alpha', status: 'Cancelled' as const, createdAt: '2026-11-10T10:00:00Z' }
+    vi.mocked(api.missions).mockResolvedValue([oldest, newest])
+    render(<App />)
+    await userEvent.click(screen.getByRole('button', { name: 'Missions' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Toutes' }))
+    await screen.findByRole('heading', { name: 'Projet bêta' })
+    const rows = [...document.querySelectorAll('.mission-row strong')].map(node => node.textContent)
+    expect(rows.slice(0, 2)).toEqual(['Projet bêta', 'Discussion alpha'])
+
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Filtrer par statut' }), 'cancelled')
+    expect(document.querySelector('.mission-row strong')?.textContent).toBe('Discussion alpha')
+    expect(document.querySelectorAll('.mission-row strong')).toHaveLength(1)
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Filtrer par statut' }), 'all')
+    await userEvent.type(screen.getByRole('searchbox', { name: 'Rechercher une mission' }), 'résultat détaillé')
+    expect(document.querySelector('.mission-row strong')?.textContent).toBe('Projet bêta')
+    expect(document.querySelectorAll('.mission-row strong')).toHaveLength(1)
   })
 
   it.each([true, false])('reviews the scoped plan and submits human decision %s', async approved => {

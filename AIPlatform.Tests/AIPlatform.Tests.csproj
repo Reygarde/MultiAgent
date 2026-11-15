@@ -23,6 +23,8 @@
     <ProjectReference Include="..\AIPlatform.Core\AIPlatform.Core.csproj" />
     <ProjectReference Include="..\AIPlatform.Infrastructure\AIPlatform.Infrastructure.csproj" />
     <ProjectReference Include="..\AIPlatform.API\AIPlatform.API.csproj" />
+    <ProjectReference Include="..\AIPlatform.PreviewSupervisor\AIPlatform.PreviewSupervisor.csproj" />
+    <ProjectReference Include="..\AIPlatform.PreviewGuestAgent\AIPlatform.PreviewGuestAgent.csproj" />
   </ItemGroup>
 
 </Project>

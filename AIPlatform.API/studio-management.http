@@ -1,0 +1,101 @@
+@baseUrl = http://localhost:5167/api
+@botId = 11111111-1111-1111-1111-111111111111
+@missionId = 22222222-2222-2222-2222-222222222222
+@customAgentId = 33333333-3333-3333-3333-333333333333
+@conversationId = 44444444-4444-4444-4444-444444444444
+@proposalId = 55555555-5555-5555-5555-555555555555
+
+### Read Twitch settings
+GET {{baseUrl}}/twitch/settings
+
+### Configure the real Client ID supplied by the user
+PUT {{baseUrl}}/twitch/settings
+Content-Type: application/json
+
+{ "clientId": "{{twitchClientId}}" }
+
+### List saved bots
+GET {{baseUrl}}/twitch/bots
+
+### Create a bot; creation does not connect it
+POST {{baseUrl}}/twitch/bots
+Content-Type: application/json
+
+{ "name": "Chat Bot", "channel": "samplechannel" }
+
+### Read one bot
+GET {{baseUrl}}/twitch/bots/{{botId}}
+
+### Update bot commands
+PUT {{baseUrl}}/twitch/bots/{{botId}}
+Content-Type: application/json
+
+{
+  "name": "Chat Bot",
+  "channel": "samplechannel",
+  "commands": [
+    { "name": "!hello", "response": "Salut le chat !", "cooldownSeconds": 5, "enabled": true }
+  ]
+}
+
+### Start Device Code authorization after an explicit user action
+POST {{baseUrl}}/twitch/bots/{{botId}}/connect
+
+### Poll the active Device Code authorization
+POST {{baseUrl}}/twitch/bots/{{botId}}/connect/poll
+
+### Locally test command matching without connecting to Twitch
+POST {{baseUrl}}/twitch/bots/{{botId}}/commands/test
+Content-Type: application/json
+
+{ "input": "!hello" }
+
+### Start a saved bot explicitly
+POST {{baseUrl}}/twitch/bots/{{botId}}/start
+
+### Stop a running bot
+POST {{baseUrl}}/twitch/bots/{{botId}}/stop
+
+### Delete a stopped bot and its secure credentials
+DELETE {{baseUrl}}/twitch/bots/{{botId}}
+
+### Read persisted mission capacity; archived missions still count
+GET {{baseUrl}}/missions/capacity
+
+### List all missions
+GET {{baseUrl}}/missions
+
+### Archive a terminal mission without deleting its data
+POST {{baseUrl}}/missions/{{missionId}}/archive
+
+### Restore an archived mission
+POST {{baseUrl}}/missions/{{missionId}}/restore
+
+### Attach an existing Studio project to a custom-agent conversation
+POST {{baseUrl}}/custom-agents/{{customAgentId}}/conversations/{{conversationId}}/workspace
+Content-Type: application/json
+
+{
+  "workspace": {
+    "kind": "Studio",
+    "workspaceId": "{{missionId}}",
+    "name": "Projet Studio"
+  }
+}
+
+### Send a user-authorized read-only external snapshot to local Ollama
+POST {{baseUrl}}/custom-agents/{{customAgentId}}/conversations/{{conversationId}}/messages
+Content-Type: application/json
+
+{
+  "message": "Analyse cette classe et propose une correction si nécessaire.",
+  "externalFiles": [
+    { "path": "example/src/Example.cs", "content": "public sealed class Example { }" }
+  ]
+}
+
+### Explicitly apply or refuse a proposal returned with the assistant message
+POST {{baseUrl}}/custom-agents/{{customAgentId}}/conversations/{{conversationId}}/proposals/{{proposalId}}/decision
+Content-Type: application/json
+
+{ "approved": false }

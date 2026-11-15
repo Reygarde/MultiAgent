@@ -14,7 +14,9 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
         {
             LlmTimeoutException => (StatusCodes.Status504GatewayTimeout, "LLM provider timeout"),
             LlmProviderException => (StatusCodes.Status503ServiceUnavailable, "LLM provider unavailable"),
+            CustomAgentModelUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Custom agent model unavailable"),
             PreviewUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Preview unavailable"),
+            TwitchIntegrationException twitch => (twitch.StatusCode, "Twitch integration error"),
             BadHttpRequestException badRequest => (badRequest.StatusCode, "Invalid HTTP request"),
             StudioValidationException => (StatusCodes.Status400BadRequest, "Invalid Studio request"),
             StudioCapacityException => (StatusCodes.Status429TooManyRequests, "Studio mission limit reached"),
@@ -23,19 +25,25 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
         if (status == 0)
             return false;
 
-        if (status >= 500)
-            logger.LogError(exception, "Mission failed: {Title}", title);
+        if (exception is TwitchIntegrationException twitchException)
+            logger.LogWarning("Twitch integration request rejected: {Code}", twitchException.Code);
+        else if (status >= 500)
+            logger.LogError(exception, "AIPlatform request failed: {Title}", title);
         else
             logger.LogWarning("Request rejected with HTTP {Status}: {Title}", status, title);
         await TypedResults.Problem(
             statusCode: status,
             title: title,
-            detail: exception is StudioValidationException or StudioCapacityException
-                ? exception.Message : status < 500
-                ? "Provide a valid JSON request body with a task string."
-                : exception is PreviewUnavailableException
-                ? "The preview runtime or its cleanup is unavailable. Check the backend logs."
-                : "The mission could not be completed. Check the local provider and server logs.",
+            detail: exception switch
+            {
+                StudioValidationException or StudioCapacityException or TwitchIntegrationException or
+                    CustomAgentModelUnavailableException => exception.Message,
+                LlmTimeoutException => "Ollama took too long to respond. Try again.",
+                LlmProviderException => "Ollama is unavailable or returned an error. Check that it is running and try again.",
+                _ when status < 500 => "Provide a valid request body.",
+                PreviewUnavailableException => "The preview runtime or its cleanup is unavailable. Check the backend logs.",
+                _ => "The request could not be completed. Check the local provider and server logs."
+            },
             instance: context.Request.Path).ExecuteAsync(context);
         return true;
     }

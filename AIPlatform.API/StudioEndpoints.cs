@@ -152,6 +152,39 @@ public static class StudioEndpoints
         }).WithName("ListMissions").WithSummary("List persisted Studio missions")
             .WithDescription("Includes real events, final answers and isolated verification logs.");
 
+        app.MapGet("/api/missions/capacity", (IMissionService missions, StudioOptions options, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var count = missions.List().Count;
+            return TypedResults.Ok(new MissionCapacityResponse(count, options.MaxMissions,
+                Math.Max(0, options.MaxMissions - count)));
+        }).WithName("GetMissionCapacity").WithSummary("Read persisted mission capacity")
+            .WithDescription("Archived missions continue to count toward the configured limit; no data is purged.");
+
+        app.MapPost("/api/missions/{id:guid}/archive",
+            Results<Ok<MissionResponse>, NotFound, Conflict> (
+                Guid id, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            return missions.Archive(id)
+                ? TypedResults.Ok(MissionResponse.From(missions.Get(id)!))
+                : TypedResults.Conflict();
+        }).WithName("ArchiveMission").WithSummary("Archive a terminal mission")
+            .WithDescription("Retains results, logs, audit events and workspace files. Archiving does not free capacity.");
+
+        app.MapPost("/api/missions/{id:guid}/restore",
+            Results<Ok<MissionResponse>, NotFound, Conflict> (
+                Guid id, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            return missions.Restore(id)
+                ? TypedResults.Ok(MissionResponse.From(missions.Get(id)!))
+                : TypedResults.Conflict();
+        }).WithName("RestoreMission").WithSummary("Restore an archived mission")
+            .WithDescription("Restores the mission to the active list without changing retained results or workspace files.");
+
         app.MapGet("/api/missions/{id:guid}", Results<Ok<MissionResponse>, NotFound> (
             Guid id, IMissionService missions, CancellationToken token) =>
         {

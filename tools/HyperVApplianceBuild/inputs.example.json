@@ -2,12 +2,38 @@
   "schemaVersion": 1,
   "distribution": "trixie",
   "architecture": "amd64",
-  "sourceDateEpoch": 1794614400,
-  "kernelRelease": "6.12.117+deb13-amd64",
+  "sourceDateEpoch": null,
+  "kernelRelease": null,
   "keyring": "trust/debian-archive-keyring.gpg",
   "grubSecureBootCertificate": "trust/debian-grub.pem",
   "kernelSecureBootCertificate": "trust/debian-kernel.pem",
   "microsoftUefiCertificate": "trust/microsoft-uefi.pem",
+  "repositories": [
+    {
+      "root": "debian",
+      "suite": "trixie",
+      "inRelease": "debian/dists/trixie/InRelease",
+      "signerFingerprints": [],
+      "indexes": [
+        {
+          "path": "debian/dists/trixie/main/binary-amd64/Packages.gz",
+          "sha256": null
+        }
+      ]
+    },
+    {
+      "root": "security",
+      "suite": "trixie-security",
+      "inRelease": "security/dists/trixie-security/InRelease",
+      "signerFingerprints": [],
+      "indexes": [
+        {
+          "path": "security/dists/trixie-security/main/binary-amd64/Packages.gz",
+          "sha256": null
+        }
+      ]
+    }
+  ],
   "files": [
     {
       "path": "trust/debian-archive-keyring.gpg",
@@ -32,13 +58,84 @@
       "sha256": null,
       "origin": "Microsoft UEFI certificate matching the selected signed shim",
       "version": null
+    },
+    {
+      "path": "debian/dists/trixie/main/binary-amd64/Packages.gz",
+      "sha256": null,
+      "origin": "Packages index authenticated through the signed Debian InRelease",
+      "version": null
+    },
+    {
+      "path": "security/dists/trixie-security/main/binary-amd64/Packages.gz",
+      "sha256": null,
+      "origin": "Packages index authenticated through the signed Debian security InRelease",
+      "version": null
+    },
+    {
+      "path": "payload/preview-agent",
+      "sha256": null,
+      "origin": "Linux x86_64 guest agent artifact; build and pin after runtime review",
+      "version": null
+    },
+    {
+      "path": "payload/preview-agent.service",
+      "sha256": null,
+      "origin": "Reviewed systemd guest-agent unit template",
+      "version": null
+    },
+    {
+      "path": "payload/preview-agent.path",
+      "sha256": null,
+      "origin": "Reviewed systemd credential-arrival trigger",
+      "version": null
+    },
+    {
+      "path": "payload/preview-agent.sysusers",
+      "sha256": null,
+      "origin": "Reviewed system user definition",
+      "version": null
+    },
+    {
+      "path": "payload/preview-session.target",
+      "sha256": null,
+      "origin": "Reviewed systemd guest-session target template",
+      "version": null
+    },
+    {
+      "path": "payload/preview-browser.service",
+      "sha256": null,
+      "origin": "Reviewed browser kiosk unit template",
+      "version": null
     }
   ],
   "packages": [],
   "builderTools": [],
-  "overlay": [],
+  "overlay": [
+    { "source": "payload/preview-agent", "target": "usr/local/lib/preview/agent", "mode": 493 },
+    {
+      "source": "payload/preview-session.target",
+      "target": "etc/systemd/system/preview-session.target",
+      "mode": 420
+    },
+    {
+      "source": "payload/preview-agent.service",
+      "target": "etc/systemd/system/preview-agent.service",
+      "mode": 420
+    },
+    {
+      "source": "payload/preview-agent.path",
+      "target": "etc/systemd/system/preview-agent.path",
+      "mode": 420
+    },
+    {
+      "source": "payload/preview-browser.service",
+      "target": "etc/systemd/system/preview-browser.service",
+      "mode": 420
+    },
+    { "source": "payload/preview-agent.sysusers", "target": "etc/sysusers.d/preview-agent.conf", "mode": 420 }
+  ],
   "prototypeComponents": [
-    { "role": "guest-agent", "path": null, "version": null },
+    { "role": "guest-agent", "path": "payload/preview-agent", "version": null },
     { "role": "weston-module", "path": null, "version": null },
     { "role": "host-broker", "path": null, "version": null },
     { "role": "host-viewer", "path": null, "version": null },

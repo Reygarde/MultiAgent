@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Text;
 using AIPlatform.Core;
+using AIPlatform.Core.Studio;
 
 namespace AIPlatform.Tests;
 
@@ -15,6 +16,17 @@ internal sealed class FakeProvider(
     {
         Requests.Enqueue(request);
         return complete(request, cancellationToken);
+    }
+}
+
+internal sealed class FakeOllamaModelCatalog(IReadOnlyList<string>? models = null) : IOllamaModelCatalog
+{
+    public IReadOnlyList<string> Models { get; set; } = models ?? ["qwen2.5-coder:7b", "qwen3:4b"];
+
+    public Task<IReadOnlyList<string>> GetInstalledModelsAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        return Task.FromResult(Models);
     }
 }
 

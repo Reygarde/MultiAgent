@@ -54,8 +54,7 @@ keyring="$bundle/$(field keyring)"
 grub_cert="$bundle/$(field grubSecureBootCertificate)"
 kernel_cert="$bundle/$(field kernelSecureBootCertificate)"
 ms_cert="$bundle/$(field microsoftUefiCertificate)"
-gpgv --keyring "$keyring" "$bundle/debian/dists/trixie/InRelease"
-gpgv --keyring "$keyring" "$bundle/security/dists/trixie-security/InRelease"
+node "$helper" signatures "$bundle" "$lock" "$digest"
 mkdir -- "$output"
 output="$(realpath -e -- "$output")"
 root="$output/rootfs"
@@ -76,6 +75,8 @@ chroot "$root" dpkg-query -W '-f=${Package}\t${Version}\t${Architecture}\t${db:S
   > "$output/packages.installed.tsv"
 node "$helper" installed "$bundle" "$lock" "$digest" "$output/packages.installed.tsv"
 node "$helper" overlay "$bundle" "$lock" "$digest" "$root"
+node "$helper" runtime-gate "$root"
+node "$helper" enable-session "$root"
 
 shim="$root/usr/lib/shim/shimx64.efi.signed"
 grub="$root/usr/lib/grub/x86_64-efi-signed/grubx64.efi.signed"
@@ -103,6 +104,7 @@ menuentry 'AIPlatform static appliance' {
     initrd /boot/initrd.img-$kernel
 }
 EOF
+node "$helper" boot-config "$root/etc/fstab" "$root/boot/grub/grub.cfg" "$kernel"
 # No grub-install or efibootmgr: never touch the builder's boot disk/NVRAM.
 truncate -s 268435456 "$output/esp.fat"
 mkfs.vfat --invariant -F 32 -i 65006500 "$output/esp.fat"
@@ -117,6 +119,7 @@ cat > "$output/grub-esp.cfg" <<EOF
 search --no-floppy --fs-uuid --set=root $root_uuid
 configfile /boot/grub/grub.cfg
 EOF
+node "$helper" esp-boot-config "$output/grub-esp.cfg"
 for target in ::/EFI/BOOT/grub.cfg ::/EFI/debian/grub.cfg; do
   mcopy -i "$output/esp.fat" "$output/grub-esp.cfg" "$target"
 done
@@ -132,12 +135,18 @@ unit: sectors
 start=2048, size=524288, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, uuid=42506567-6510-4000-8000-000000000003
 start=526336, size=12054528, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, uuid=42506567-6510-4000-8000-000000000004
 EOF
+sfdisk --json "$output/disk.raw" > "$output/partition-table.raw.json"
+node "$helper" partition-info "$output/partition-table.raw.json" "$output/partition-table.json"
 dd if="$output/esp.fat" of="$output/disk.raw" bs=512 seek=2048 conv=notrunc status=none
 dd if="$output/root.ext4" of="$output/disk.raw" bs=512 seek=526336 conv=notrunc status=none
 qemu-img convert -f raw -O vhdx -o subformat=fixed "$output/disk.raw" "$output/appliance.vhdx"
 qemu-img info --output=json "$output/appliance.vhdx" > "$output/vhdx-info.json"
-node "$helper" image-info "$output/vhdx-info.json" "$output/appliance.vhdx"
-node "$helper" manifest "$output/build-manifest.json" "$digest" \
-  "$output/appliance.vhdx" "$output/vhdx-info.json" "$output/packages.installed.tsv" "$script" "$helper"
+node "$helper" image-info "$output/vhdx-info.json" "$output/appliance.vhdx" "$output/vhdx-summary.json"
+qemu-img map --output=json "$output/appliance.vhdx" > "$output/vhdx-map.raw.json"
+node "$helper" image-map "$output/vhdx-map.raw.json" "$output/vhdx-map.json"
+node "$helper" manifest "$output/build-manifest.json" "$bundle" "$lock" "$digest" \
+  "$output/appliance.vhdx" "$output/vhdx-summary.json" "$output/vhdx-map.json" \
+  "$output/partition-table.json" "$output/packages.installed.tsv" "$output/esp.fat" \
+  "$output/grub-esp.cfg" "$script" "$helper"
 printf '%s\n' 'Build artifacts only. Not signed, boot-tested, isolated, reproducible-bit-for-bit certified or authorized for Preview.'
 BUILD

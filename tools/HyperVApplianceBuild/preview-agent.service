@@ -1,0 +1,38 @@
+[Unit]
+Description=AIPlatform Preview guest agent
+After=systemd-sysusers.service
+ConditionPathExists=/run/aiplatform-preview/session.json
+
+[Service]
+Type=exec
+User=preview-agent
+Group=preview-agent
+LoadCredential=agent.json:/run/aiplatform-preview/session.json
+ExecStart=/usr/local/lib/preview/agent --serve ${CREDENTIALS_DIRECTORY}/agent.json
+Restart=no
+KillSignal=SIGTERM
+TimeoutStopSec=3s
+KillMode=control-group
+UMask=0077
+MemoryMax=256M
+TasksMax=32
+LimitNOFILE=64
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_VSOCK
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=preview-session.target

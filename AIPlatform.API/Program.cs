@@ -77,6 +77,21 @@ builder.Services.AddSingleton(studio);
 builder.Services.AddSingleton(sandboxOptions);
 builder.Services.AddSingleton<MissionStore>();
 builder.Services.AddSingleton<IMissionService>(services => services.GetRequiredService<MissionStore>());
+builder.Services.AddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<ITwitchBotStore, TwitchBotStore>();
+builder.Services.AddSingleton<ITwitchTokenVault, WindowsCredentialTokenVault>();
+builder.Services.AddHttpClient<ITwitchOAuthClient, TwitchOAuthClient>(client => client.Timeout = TimeSpan.FromSeconds(15))
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+builder.Services.AddHttpClient<ITwitchChatClient, TwitchChatClient>(client => client.Timeout = Timeout.InfiniteTimeSpan)
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
+builder.Services.AddSingleton<TwitchBotService>();
+builder.Services.AddSingleton<ITwitchBotService>(services => services.GetRequiredService<TwitchBotService>());
+builder.Services.AddHostedService(services => services.GetRequiredService<TwitchBotService>());
+builder.Services.AddSingleton<ICustomAgentStore, CustomAgentStore>();
+builder.Services.AddSingleton<IOllamaModelCatalog>(services => new OllamaModelCatalog(
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"),
+    services.GetRequiredService<OllamaOptions>()));
+builder.Services.AddSingleton<ICustomAgentService, CustomAgentService>();
 builder.Services.AddSingleton<IWorkspaceStore, WorkspaceStore>();
 builder.Services.AddSingleton<IProjectExport, ProjectExport>();
 builder.Services.AddSingleton<IProjectAnalyzer, ProjectAnalyzer>();
@@ -142,8 +157,10 @@ app.Use(async (context, next) =>
 if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 app.MapAgents();
+app.MapCustomAgents();
 app.MapModels();
 app.MapStudio();
+app.MapTwitch();
 app.MapPreview();
 app.MapGet("/api/health", (CancellationToken token) =>
 {

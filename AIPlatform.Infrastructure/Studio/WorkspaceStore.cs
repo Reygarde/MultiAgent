@@ -8,6 +8,7 @@ namespace AIPlatform.Infrastructure.Studio;
 public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
 {
     private readonly string root = Path.Combine(SafePaths.ValidateStorageDirectory(options.DataDirectory), "workspaces");
+    private readonly SemaphoreSlim applyGate = new(1, 1);
 
     public void Create(Guid id)
     {
@@ -28,6 +29,22 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
     public void Delete(Guid id)
     {
         var path = GetDirectory(id);
+        FileAttributes attributes;
+        try
+        {
+            attributes = File.GetAttributes(path);
+        }
+        catch (FileNotFoundException)
+        {
+            return;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return;
+        }
+        if ((attributes & FileAttributes.Directory) == 0)
+            throw new IOException("The workspace path is not a directory.");
+
         var files = List(id);
         foreach (var file in files)
         {
@@ -312,6 +329,117 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         return new(path, await File.ReadAllTextAsync(fullPath, cancellationToken));
     }
 
+    public async Task<IReadOnlyList<GeneratedFile>> ApplyReviewedChangesAsync(
+        Guid id, string? templateId, IReadOnlyList<ReviewedWorkspaceChange> changes,
+        Func<IReadOnlyList<GeneratedFile>, bool> commit, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(commit);
+        if (changes.Count is < 1 or > 8 ||
+            changes.Select(change => change.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != changes.Count ||
+            changes.Any(change => string.IsNullOrWhiteSpace(change.After) || change.After.Contains('\0') ||
+                ProjectExport.ContainsPotentialSecret(change.After) || !IsEditablePath(change.Path, templateId)))
+            throw new StudioValidationException("The reviewed changes contain unsupported paths or unsafe content.");
+
+        await applyGate.WaitAsync(cancellationToken);
+        try
+        {
+            var directory = GetDirectory(id);
+            if (!Directory.Exists(directory))
+                throw new DirectoryNotFoundException("Workspace not found.");
+
+            var original = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var file in List(id).Where(file => file.Path != "Generated.slnx"))
+            {
+                var content = await ReadAsync(id, file.Path, cancellationToken);
+                original.Add(file.Path, content.Content);
+            }
+            var validatedChanges = new List<ReviewedWorkspaceChange>(changes.Count);
+            foreach (var change in changes)
+            {
+                var existingPath = original.Keys.FirstOrDefault(path =>
+                    string.Equals(path, change.Path, StringComparison.OrdinalIgnoreCase));
+                if (change.Before is null)
+                {
+                    if (existingPath is not null)
+                        throw new StudioValidationException(
+                            $"'{change.Path}' now exists. Reload the workspace before applying changes.");
+                }
+                else if (existingPath is null || original[existingPath] != change.Before)
+                    throw new StudioValidationException(
+                        $"'{change.Path}' changed since this proposal was created. Reload the workspace and ask again.");
+                validatedChanges.Add(change with { Path = existingPath ?? change.Path });
+            }
+
+            var updated = new Dictionary<string, string>(original, StringComparer.Ordinal);
+            foreach (var change in validatedChanges)
+                updated[change.Path] = change.After;
+            var complete = updated.OrderBy(item => item.Key, StringComparer.Ordinal)
+                .Select(item => new GeneratedFile(item.Key, item.Value)).ToArray();
+            ValidateFiles(complete, templateId);
+
+            var written = new List<string>();
+            try
+            {
+                foreach (var change in validatedChanges)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var path = SafePaths.Resolve(directory, change.Path);
+                    var parent = Path.GetDirectoryName(path)!;
+                    Directory.CreateDirectory(parent);
+                    SafePaths.RejectLinks(parent);
+                    SafePaths.RejectLinks(path);
+                    if (!original.ContainsKey(change.Path) && File.Exists(path))
+                        throw new StudioValidationException("A proposed new file already exists; reload the workspace before applying changes.");
+                    var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                    try
+                    {
+                        await File.WriteAllTextAsync(path: temporary, contents: change.After,
+                            encoding: new UTF8Encoding(false), cancellationToken);
+                        SafePaths.RejectLinks(path);
+                        SafePaths.RejectLinks(temporary);
+                        File.Move(temporary, path, overwrite: original.ContainsKey(change.Path));
+                        written.Add(change.Path);
+                    }
+                    finally
+                    {
+                        if (File.Exists(temporary)) File.Delete(temporary);
+                    }
+                }
+
+                foreach (var change in validatedChanges)
+                    if ((await ReadAsync(id, change.Path, cancellationToken)).Content != change.After)
+                        throw new IOException("An approved workspace change did not persist exactly.");
+                if (!commit(complete))
+                    throw new StudioValidationException(
+                        "Mission history changed before this edit could be committed; workspace changes were rolled back.");
+                return complete;
+            }
+            catch
+            {
+                foreach (var path in written.AsEnumerable().Reverse())
+                {
+                    var fullPath = SafePaths.Resolve(directory, path);
+                    SafePaths.RejectLinks(fullPath);
+                    if (original.TryGetValue(path, out var previous))
+                    {
+                        var rollback = fullPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+                        await File.WriteAllTextAsync(rollback, previous, new UTF8Encoding(false), CancellationToken.None);
+                        SafePaths.RejectLinks(fullPath);
+                        SafePaths.RejectLinks(rollback);
+                        File.Move(rollback, fullPath, overwrite: true);
+                    }
+                    else if (File.Exists(fullPath))
+                        File.Delete(fullPath);
+                }
+                throw;
+            }
+        }
+        finally
+        {
+            applyGate.Release();
+        }
+    }
+
     public async Task ReplaceFullStackFilesAsync(Guid id, ManualRevisionRole role, IReadOnlyList<GeneratedFile> files,
         CancellationToken cancellationToken)
     {
@@ -340,5 +468,28 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 if (File.Exists(temporary)) File.Delete(temporary);
             }
         }
+    }
+
+    private static bool IsEditablePath(string path, string? templateId)
+    {
+        try
+        {
+            SafePaths.ValidateRelative(path);
+        }
+        catch (StudioValidationException)
+        {
+            return false;
+        }
+        if (path == "Generated.slnx")
+            return false;
+        return templateId switch
+        {
+            FullStackTemplate.Id => FullStackTemplate.IsEditable(path),
+            ReactTemplate.Id => ReactTemplate.IsEditable(path),
+            TwitchTemplate.Id => TwitchTemplate.IsEditable(path),
+            DiscordTemplate.Id => false,
+            null => true,
+            _ => false
+        };
     }
 }

@@ -281,4 +281,51 @@ public sealed class StudioMissionTests
         Assert.Throws<StudioCapacityException>(() => store.Submit(new("Second")));
         Assert.Single(store.List());
     }
+
+    [Fact]
+    public async Task ArchiveRestorePersistResultsAndWorkspaceWithoutFreeingCapacity()
+    {
+        using var fixture = new StudioFixture();
+        var options = fixture.Options with { MaxMissions = 1 };
+        using var store = new MissionStore(options, fixture.Platform, fixture.Registry, fixture.Workspaces);
+        var mission = store.Submit(new("Keep this result"));
+        fixture.Workspaces.Create(mission.Id);
+        await fixture.Workspaces.WriteAsync(mission.Id,
+        [
+            new GeneratedFile("src/App/App.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk.Web\"><PropertyGroup><TargetFramework>net10.0</TargetFramework></PropertyGroup></Project>"),
+            new GeneratedFile("src/App/Program.cs", "retained source"),
+            new GeneratedFile("tests/App.Tests/App.Tests.csproj",
+                "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0</TargetFramework><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><ProjectReference Include=\"../../src/App/App.csproj\" /><PackageReference Include=\"xunit\" Version=\"2.9.3\" /><PackageReference Include=\"xunit.runner.visualstudio\" Version=\"3.1.4\" /><PackageReference Include=\"Microsoft.NET.Test.Sdk\" Version=\"17.14.1\" /></ItemGroup></Project>"),
+            new GeneratedFile("tests/App.Tests/UnitTests.cs", "public sealed class UnitTests { }"),
+            new GeneratedFile("README.md", "retained workspace")
+        ], default);
+        store.Update(mission.Id, current => current with
+        {
+            Status = MissionStatus.Completed,
+            Response = "retained answer",
+            HasWorkspace = true
+        });
+        var completedAt = store.Get(mission.Id)!.CompletedAt;
+        Assert.NotNull(completedAt);
+
+        Assert.True(store.Archive(mission.Id));
+        var archived = store.Get(mission.Id)!;
+        Assert.True(archived.Archived);
+        Assert.NotNull(archived.ArchivedAt);
+        Assert.Equal(completedAt, archived.CompletedAt);
+        Assert.Equal("retained answer", archived.Response);
+        Assert.Throws<StudioCapacityException>(() => store.Submit(new("Capacity remains bounded")));
+
+        using var restarted = new MissionStore(options, fixture.Platform, fixture.Registry, fixture.Workspaces);
+        Assert.True(restarted.Get(mission.Id)!.Archived);
+        Assert.Equal(completedAt, restarted.Get(mission.Id)!.CompletedAt);
+        Assert.Contains("archived", restarted.Get(mission.Id)!.Events.Last().Message);
+        Assert.True(restarted.Restore(mission.Id));
+        var restored = restarted.Get(mission.Id)!;
+        Assert.False(restored.Archived);
+        Assert.Null(restored.ArchivedAt);
+        Assert.Equal("retained answer", restored.Response);
+        Assert.Equal("retained source", (await fixture.Workspaces.ReadAsync(mission.Id, "src/App/Program.cs", default)).Content);
+    }
 }

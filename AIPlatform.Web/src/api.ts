@@ -1,4 +1,4 @@
-import type { Agent, AgentConfiguration, CreateMission, ExecutionPlan, FileContent, LocalModels, Mission, Model, ProjectAnalysis, RevisionComparison, Sandbox, WorkspaceFile } from './types'
+import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft, CustomAgentWorkspace, ExecutionPlan, FileContent, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, WorkspaceFile } from './types'
 import { fetchApi } from './desktop/transport'
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -35,7 +35,73 @@ export const api = {
   },
   agents: (signal?: AbortSignal) => request<Agent[]>('/agents', { signal }),
   models: (signal?: AbortSignal) => request<Model[]>('/models', { signal }),
+  customAgents: (signal?: AbortSignal) => request<CustomAgent[]>('/custom-agents', { signal }),
+  customAgentModels: (signal?: AbortSignal) => request<string[]>('/custom-agents/models', { signal }),
+  createCustomAgent: (draft: CustomAgentDraft) => request<CustomAgent>('/custom-agents',
+    { method: 'POST', body: JSON.stringify(draft) }),
+  updateCustomAgent: (id: string, draft: CustomAgentDraft) => request<CustomAgent>(
+    `/custom-agents/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(draft) }),
+  duplicateCustomAgent: (id: string) => request<CustomAgent>(
+    `/custom-agents/${encodeURIComponent(id)}/duplicate`, { method: 'POST' }),
+  deleteCustomAgent: async (id: string) => {
+    const response = await fetchApi(`/custom-agents/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression refusée (HTTP ${response.status}).`)
+  },
+  customAgentConversations: (id: string) =>
+    request<CustomAgentConversationSummary[]>(`/custom-agents/${encodeURIComponent(id)}/conversations`),
+  createCustomAgentConversation: (id: string) =>
+    request<CustomAgentConversation>(`/custom-agents/${encodeURIComponent(id)}/conversations`, { method: 'POST' }),
+  customAgentConversation: (agentId: string, conversationId: string) =>
+    request<CustomAgentConversation>(
+      `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}`),
+  setCustomAgentWorkspace: (
+    agentId: string, conversationId: string, workspace: CustomAgentWorkspace | null,
+  ) => request<CustomAgentConversation>(
+    `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}/workspace`,
+    { method: 'POST', body: JSON.stringify({ workspace }) }),
+  sendCustomAgentMessage: (
+    agentId: string, conversationId: string, message: string, signal?: AbortSignal,
+    externalFiles?: { path: string; content: string }[],
+  ) =>
+    request<CustomAgentConversation>(
+      `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}/messages`,
+      { method: 'POST', body: JSON.stringify({ message, externalFiles }), signal }),
+  decideCustomAgentProposal: (
+    agentId: string, conversationId: string, proposalId: string, approved: boolean,
+  ) => request<CustomAgentConversation>(
+    `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}/proposals/${encodeURIComponent(proposalId)}/decision`,
+    { method: 'POST', body: JSON.stringify({ approved }) }),
+  deleteCustomAgentConversation: async (agentId: string, conversationId: string) => {
+    const response = await fetchApi(
+      `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}`,
+      { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression de la conversation refusée (HTTP ${response.status}).`)
+  },
   missions: (signal?: AbortSignal) => request<Mission[]>('/missions', { signal }),
+  missionCapacity: (signal?: AbortSignal) => request<MissionCapacity>('/missions/capacity', { signal }),
+  archiveMission: (id: string) => request<Mission>(`/missions/${encodeURIComponent(id)}/archive`, { method: 'POST' }),
+  restoreMission: (id: string) => request<Mission>(`/missions/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
+  twitchSettings: () => request<TwitchSettings>('/twitch/settings'),
+  saveTwitchSettings: (clientId: string) => request<TwitchSettings>('/twitch/settings',
+    { method: 'PUT', body: JSON.stringify({ clientId }) }),
+  twitchBots: () => request<TwitchBot[]>('/twitch/bots'),
+  createTwitchBot: (name: string, channel: string) => request<TwitchBot>('/twitch/bots',
+    { method: 'POST', body: JSON.stringify({ name, channel }) }),
+  updateTwitchBot: (id: string, name: string, channel: string, commands: TwitchCommand[]) =>
+    request<TwitchBot>(`/twitch/bots/${encodeURIComponent(id)}`,
+      { method: 'PUT', body: JSON.stringify({ name, channel, commands }) }),
+  deleteTwitchBot: async (id: string) => {
+    const response = await fetchApi(`/twitch/bots/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression refusée (HTTP ${response.status}). Arrêtez d’abord le bot.`)
+  },
+  beginTwitchConnect: (id: string) => request<TwitchDeviceAuthorization>(
+    `/twitch/bots/${encodeURIComponent(id)}/connect`, { method: 'POST' }),
+  pollTwitchConnect: (id: string) => request<TwitchConnectResult>(
+    `/twitch/bots/${encodeURIComponent(id)}/connect/poll`, { method: 'POST' }),
+  startTwitchBot: (id: string) => request<TwitchBot>(`/twitch/bots/${encodeURIComponent(id)}/start`, { method: 'POST' }),
+  stopTwitchBot: (id: string) => request<TwitchBot>(`/twitch/bots/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
+  testTwitchCommand: (id: string, input: string) => request<TwitchCommandTestResult>(
+    `/twitch/bots/${encodeURIComponent(id)}/commands/test`, { method: 'POST', body: JSON.stringify({ input }) }),
   localModels: (signal?: AbortSignal) => request<LocalModels>('/models/local', { signal }),
   sandbox: (signal?: AbortSignal) => request<Sandbox>('/sandbox', { signal }),
   create: (input: CreateMission) => request<Mission>('/missions', { method: 'POST', body: JSON.stringify(input) }),

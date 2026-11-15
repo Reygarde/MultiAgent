@@ -271,6 +271,10 @@ public sealed class WorkflowApiTests
             inner.WriteAsync(id, files, token, templateId);
         public IReadOnlyList<WorkspaceFile> List(Guid id) => inner.List(id);
         public Task<WorkspaceContent> ReadAsync(Guid id, string path, CancellationToken token) => inner.ReadAsync(id, path, token);
+        public Task<IReadOnlyList<GeneratedFile>> ApplyReviewedChangesAsync(
+            Guid id, string? templateId, IReadOnlyList<ReviewedWorkspaceChange> changes,
+            Func<IReadOnlyList<GeneratedFile>, bool> commit, CancellationToken token) =>
+            inner.ApplyReviewedChangesAsync(id, templateId, changes, commit, token);
         public string GetDirectory(Guid id) => inner.GetDirectory(id);
         public async Task ReplaceFullStackFilesAsync(Guid id, ManualRevisionRole role, IReadOnlyList<GeneratedFile> files, CancellationToken token)
         {

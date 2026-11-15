@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Channels;
@@ -93,7 +95,9 @@ public sealed class MissionStore : IMissionService, IDisposable
         lock (sync)
         {
             if (missions.Count >= options.MaxMissions)
-                throw new StudioCapacityException("The persisted mission limit has been reached. Archive data while the server is stopped.");
+                throw new StudioCapacityException(
+                    $"The persisted mission limit ({options.MaxMissions}) is reached; archived missions count toward it. " +
+                    "Archiving preserves data and does not free capacity. Increase Studio:MaxMissions (maximum 10000) in settings and restart Studio.");
             var now = DateTimeOffset.UtcNow;
             var snapshot = new MissionSnapshot(
                 Guid.NewGuid(), submission.Task.Trim(), submission.Kind, submission.AgentId,
@@ -539,6 +543,30 @@ public sealed class MissionStore : IMissionService, IDisposable
         }
     }
 
+    public bool Archive(Guid id)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var mission) || !mission.IsTerminal || mission.Archived || mission.Deleted)
+                return false;
+            Update(id, current => current with { Archived = true, ArchivedAt = DateTimeOffset.UtcNow });
+            AddEvent(id, "Mission", StepStatus.Succeeded, "Mission archived by explicit user request; results and workspace preserved.");
+            return true;
+        }
+    }
+
+    public bool Restore(Guid id)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var mission) || !mission.Archived || mission.Deleted)
+                return false;
+            Update(id, current => current with { Archived = false, ArchivedAt = null });
+            AddEvent(id, "Mission", StepStatus.Succeeded, "Mission restored from archive; results and workspace preserved.");
+            return true;
+        }
+    }
+
     public CancellationToken Cancellation(Guid id)
     {
         lock (sync)
@@ -550,7 +578,14 @@ public sealed class MissionStore : IMissionService, IDisposable
         lock (sync)
         {
             var previous = missions[id];
-            var next = update(previous) with { UpdatedAt = DateTimeOffset.UtcNow };
+            var updatedAt = DateTimeOffset.UtcNow;
+            var next = update(previous) with { UpdatedAt = updatedAt };
+            next = next with
+            {
+                CompletedAt = next.IsTerminal
+                    ? previous.CompletedAt ?? (!previous.IsTerminal ? updatedAt : null)
+                    : null
+            };
             if ((next.Status is MissionStatus.Completed or MissionStatus.GeneratedUnverified or MissionStatus.Verified) &&
                 cancellations.TryGetValue(id, out var cancellation))
                 cancellation.Token.ThrowIfCancellationRequested();
@@ -573,6 +608,67 @@ public sealed class MissionStore : IMissionService, IDisposable
             Save(next);
             missions[id] = next;
             return next;
+        }
+    }
+
+    public bool RecordWorkspaceEdit(Guid id, DateTimeOffset expectedUpdatedAt, Guid agentId, Guid conversationId,
+        Guid proposalId, IReadOnlyList<string> changedPaths, IReadOnlyList<GeneratedFile> files)
+    {
+        lock (sync)
+        {
+            if (!missions.TryGetValue(id, out var current) || current.UpdatedAt != expectedUpdatedAt ||
+                !current.HasWorkspace || current.Deleted || current.Archived || current.SandboxApproved ||
+                current.Status is MissionStatus.Queued or MissionStatus.Running ||
+                current.Workflow is not { } flow || changedPaths.Count is < 1 or > 8 ||
+                changedPaths.Any(string.IsNullOrWhiteSpace) || files.Count == 0)
+                return false;
+
+            var version = flow.Version + 1;
+            var now = DateTimeOffset.UtcNow;
+            var stableFiles = files.OrderBy(file => file.Path, StringComparer.Ordinal).ToArray();
+            var fingerprint = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(stableFiles)));
+            var revision = new ProjectRevision(version, now,
+                "Human-approved custom-agent change; no commands were executed.", fingerprint, stableFiles);
+            var steps = flow.Steps.Select(step => step.Status is WorkflowStatus.Pending or WorkflowStatus.Running or
+                WorkflowStatus.WaitingForApproval
+                    ? step with { Status = WorkflowStatus.Skipped, Output = "Superseded by an approved workspace edit." }
+                    : step).ToList();
+            var editor = flow.Agents.FirstOrDefault(agent => agent.Role == "Orchestrator")?.Id ??
+                flow.Agents.FirstOrDefault()?.Id;
+            if (editor is null)
+                return false;
+            steps.Add(new($"custom-agent-edit-{version}", "ManualRevision", editor, [], WorkflowStatus.Completed,
+                1, now, Input: $"Custom agent {agentId:N}; user approved proposal {proposalId:N}.",
+                Output: $"Changed {changedPaths.Count} file(s). No build or test was run."));
+            WorkflowGraph.Validate(steps);
+
+            if (cancellations.Remove(id, out var previousCancellation))
+                previousCancellation.Dispose();
+            cancellations[id] = new();
+            var eventMessage = $"User-approved custom-agent proposal {proposalId:N} changed: " +
+                string.Join(", ", changedPaths.Order(StringComparer.Ordinal));
+            Update(id, mission => mission with
+            {
+                Status = MissionStatus.GeneratedUnverified,
+                SandboxApproved = false,
+                ApprovalFingerprint = null,
+                Error = null,
+                Response = null,
+                Events = mission.Events.Append(new(mission.Events.Count + 1, now, "CustomAgentEdit",
+                    StepStatus.Succeeded, eventMessage)).ToArray(),
+                Workflow = flow with
+                {
+                    Version = version,
+                    Steps = steps,
+                    Review = new ReviewReport(
+                        "Manual changes were approved by the user; no automated review, build, or tests were run.", []),
+                    Draft = stableFiles,
+                    Proposal = null,
+                    Revisions = [.. flow.Revisions ?? [], revision],
+                    FinalReport = "Workspace modified by a user-approved custom-agent proposal. Validation was not run."
+                }
+            });
+            return true;
         }
     }
 

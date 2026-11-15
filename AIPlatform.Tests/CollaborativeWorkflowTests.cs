@@ -769,6 +769,24 @@ public sealed class CollaborativeWorkflowTests
     }
 
     [Fact]
+    public async Task ProjectDeletionReconcilesMissingWorkspaceAndPreservesMissionAudit()
+    {
+        using var fixture = new WorkflowFixture();
+        var mission = fixture.Store.Submit(new("Create Calculator", MissionKind.Project));
+        await fixture.Processor.ProcessAsync(mission.Id, default);
+        var plan = await fixture.Plans.GetAsync(mission.Id, default);
+        fixture.Store.DecideApproval(mission.Id, false, plan.Fingerprint);
+        var workspace = fixture.Workspaces.GetDirectory(mission.Id);
+        Directory.Delete(workspace, recursive: true);
+
+        Assert.True(fixture.Store.DeleteProject(mission.Id));
+        var deleted = fixture.Store.Get(mission.Id)!;
+        Assert.True(deleted.Deleted);
+        Assert.False(deleted.HasWorkspace);
+        Assert.NotEmpty(deleted.Events);
+    }
+
+    [Fact]
     public void ConfigurationPersistsAndCannotGrantShellOrCrossRoleTools()
     {
         using var fixture = new WorkflowFixture();

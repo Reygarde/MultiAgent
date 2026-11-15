@@ -29,12 +29,14 @@ public sealed record MissionSnapshot(
     bool HasWorkspace, int CorrectionAttempts, IReadOnlyList<MissionEvent> Events,
     IReadOnlyList<VerificationResult> Verification, string? ApprovalFingerprint = null,
     MissionWorkflow? Workflow = null, string? ProjectName = null, string? ProjectDescription = null,
-    bool Deleted = false, string? TemplateId = null)
+    bool Deleted = false, string? TemplateId = null, bool Archived = false, DateTimeOffset? ArchivedAt = null,
+    DateTimeOffset? CompletedAt = null)
 {
     public bool IsTerminal => Status is not (MissionStatus.Queued or MissionStatus.Running or MissionStatus.AwaitingApproval);
 }
 
 public sealed record GeneratedFile(string Path, string Content);
+public sealed record ReviewedWorkspaceChange(string Path, string? Before, string After);
 // For corrections, Files contains replacements only; omitted files are preserved.
 public sealed record ProjectManifest(string Summary, IReadOnlyList<GeneratedFile> Files);
 public sealed record ExecutionPlanFile(string Path, string Sha256);
@@ -74,6 +76,10 @@ public interface IMissionService
     bool PrepareRevalidation(Guid id, DateTimeOffset expectedUpdatedAt, ExecutionPlan plan);
     bool RenameProject(Guid id, string name, string description);
     bool DeleteProject(Guid id);
+    bool Archive(Guid id);
+    bool Restore(Guid id);
+    bool RecordWorkspaceEdit(Guid id, DateTimeOffset expectedUpdatedAt, Guid agentId, Guid conversationId,
+        Guid proposalId, IReadOnlyList<string> changedPaths, IReadOnlyList<GeneratedFile> files);
 }
 
 public interface IWorkspaceStore
@@ -84,6 +90,9 @@ public interface IWorkspaceStore
     Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken cancellationToken, string? templateId = null);
     IReadOnlyList<WorkspaceFile> List(Guid id);
     Task<WorkspaceContent> ReadAsync(Guid id, string path, CancellationToken cancellationToken);
+    Task<IReadOnlyList<GeneratedFile>> ApplyReviewedChangesAsync(
+        Guid id, string? templateId, IReadOnlyList<ReviewedWorkspaceChange> changes,
+        Func<IReadOnlyList<GeneratedFile>, bool> commit, CancellationToken cancellationToken);
     Task ReplaceFullStackFilesAsync(Guid id, ManualRevisionRole role, IReadOnlyList<GeneratedFile> files, CancellationToken cancellationToken);
     string GetDirectory(Guid id);
 }

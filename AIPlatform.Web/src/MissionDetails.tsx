@@ -1,8 +1,9 @@
-import { Check, Circle, Clock3, LoaderCircle, ShieldAlert, Square, X } from 'lucide-react'
+import { ArrowRight, Check, Circle, Clock3, FolderOpen, LoaderCircle, ShieldAlert, Square, X } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { api, errorMessage } from './api'
 import { isActive, statusLabels, stepLabels, stepStatusLabels } from './types'
 import type { ExecutionPlan, Mission, MissionEvent, RevisionComparison, StepStatus } from './types'
+import { formatDateTime, formatMissionDuration, formatTime, missionFinishedAt, missionTitle } from './missionPresentation'
 
 export function StatusBadge({ mission }: { mission: Mission }) {
   return <span className={`badge status-${mission.status}`}>{isActive(mission) && <span className="status-dot" />}{statusLabels[mission.status]}</span>
@@ -16,16 +17,27 @@ function StepIcon({ status }: { status: StepStatus | 'Archived' }) {
   return <Circle size={13} />
 }
 
-export function MissionDetails({ mission, cancel, busy, refresh }: {
+export function MissionDetails({ mission, cancel, busy, refresh, openProject }: {
   mission: Mission; cancel: (id: string) => void; busy: boolean; refresh: () => Promise<unknown>
+  openProject?: (id: string) => void
 }) {
   const [resumeError, setResumeError] = useState<string | null>(null)
   const [resuming, setResuming] = useState(false)
   const canRevalidate = mission.status === 'GeneratedUnverified' && mission.templateId === 'fullstack-react-dotnet' &&
     mission.workflow?.review != null && !mission.workflow.review.findings.some(finding => finding.severity === 'Error')
+  const finishedAt = missionFinishedAt(mission)
+  const duration = formatMissionDuration(mission.createdAt, finishedAt)
   return <section className="panel mission-details">
-    <div className="panel-heading"><h2><Clock3 size={16} /> Exécution réelle</h2><StatusBadge mission={mission} /></div>
-    <p className="mission-id">{mission.id}</p>
+    <div className="panel-heading mission-detail-heading"><h2><Clock3 size={16} /> {missionTitle(mission)}</h2><StatusBadge mission={mission} /></div>
+    <div className="mission-dates">
+      <span>Créée <strong>{formatDateTime(mission.createdAt) ?? 'date inconnue'}</strong></span>
+      {finishedAt && <span>Terminée <strong>{formatDateTime(finishedAt) ?? 'date inconnue'}</strong></span>}
+      {duration && <span>Durée totale <strong>{duration}</strong></span>}
+      {mission.hasWorkspace && openProject && <button className="text-button" onClick={() => openProject(mission.id)}>
+        <FolderOpen size={14} /> Ouvrir le projet associé <ArrowRight size={14} />
+      </button>}
+    </div>
+    <details className="technical-logs"><summary>Identifiant technique de la mission</summary><code>{mission.id}</code></details>
     {mission.templateId === 'discord-bot-dotnet' && <p>Template : Discord Bot v1 · Discord.Net.WebSocket 3.20.2 · xUnit 2.9.3</p>}
     {mission.templateId === 'twitch-bot-dotnet' && <p>Template : Twitch Bot v1 · .NET 10 · EventSub + Helix.
       Aucune dépendance applicative ; xUnit 2.9.3, runner 3.1.4, Test SDK 17.14.1.
@@ -50,7 +62,7 @@ export function MissionDetails({ mission, cancel, busy, refresh }: {
       <Approval key={`${mission.id}:${mission.workflow?.version ?? 'legacy'}`} id={mission.id} refresh={refresh} />}
     {mission.workflow && <section aria-label="Workflow collaboratif">
       <h3>Workflow · version {mission.workflow.version}</h3>
-      <p className="mission-id">{mission.workflow.workflowId}</p>
+      <details className="technical-logs"><summary>Identifiant du workflow</summary><code>{mission.workflow.workflowId}</code></details>
       {mission.workflow.review && <details className="technical-logs">
         <summary>Rapport du ReviewAgent</summary>
         <p>{mission.workflow.review.summary}</p>
@@ -118,7 +130,7 @@ export function MissionDetails({ mission, cancel, busy, refresh }: {
 
 interface TimelineItem {
   id: string; kind: string; status: StepStatus | 'Archived'; label: string
-  version?: number | null; timestamp?: string | null; duration?: number | null
+  message?: string | null; version?: number | null; timestamp?: string | null; duration?: number | null
 }
 
 function Chronology({ mission }: { mission: Mission }) {
@@ -134,6 +146,7 @@ function Chronology({ mission }: { mission: Mission }) {
     return { id: `event-${event.sequence}`, kind: event.step, status: archived ? 'Archived' : event.status,
       label: archived ? activityAfterQueue ? 'Attente passée · activité enregistrée ensuite'
         : 'Historique · clôture non enregistrée' : stepStatusLabels[event.status],
+      message: event.message.length > 180 ? `${event.message.slice(0, 177)}…` : event.message,
       timestamp: event.timestamp, duration: event.durationMilliseconds }
   }
   function list(items: TimelineItem[], name: string) {
@@ -141,16 +154,15 @@ function Chronology({ mission }: { mission: Mission }) {
       <span className="step-icon"><StepIcon status={item.status} /></span>
       <div><strong>{stepLabels[item.kind] ?? item.kind}
         {item.version != null && ` · v${item.version}`}</strong><span>{item.label}</span>
-        <span className="muted">{item.id}{mission.workflow && item.version == null &&
-          (item.kind === 'Queue' ? ' · attente/reprise hors étapes versionnées' : ' · version non enregistrée')}</span></div>
+        {item.message && <span className="timeline-result">{item.message}</span>}</div>
       <time>{item.duration != null ? `${(item.duration / 1000).toFixed(1)} s`
-        : item.timestamp ? new Date(item.timestamp).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '—'}</time>
+        : formatTime(item.timestamp) ?? ''}</time>
     </li>)}</ol>
   }
   if (!mission.workflow) {
-    const latest = new Map(mission.events.map(event => [event.step, event]))
     return <section aria-label="Chronologie"><h3>Chronologie</h3>
-      {list([...latest.values()].map(eventItem), 'Étapes de la mission')}</section>
+      {mission.events.length ? list(mission.events.map(eventItem), 'Étapes de la mission')
+        : <p className="muted">Aucun événement enregistré.</p>}</section>
   }
   const workflow = mission.workflow
   const items: TimelineItem[] = workflow.steps.map(step => {
@@ -165,7 +177,9 @@ function Chronology({ mission }: { mission: Mission }) {
       : step.status === 'Pending' ? 'Non exécuté · en attente'
       : step.kind === 'Approval' && step.status === 'Completed' ? 'Autorisation accordée'
       : stepStatusLabels[status]
+    const result = step.error ?? step.output ?? null
     return { id: step.id, kind: step.kind, version: step.version, status, label,
+      message: result ? result.length > 180 ? `${result.slice(0, 177)}…` : result : null,
       timestamp: step.startedAt, duration: step.durationMilliseconds }
   })
   const queueEvents = mission.events.filter(event => event.step === 'Queue').map(eventItem)
