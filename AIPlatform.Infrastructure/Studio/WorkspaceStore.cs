@@ -7,6 +7,9 @@ namespace AIPlatform.Infrastructure.Studio;
 
 public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
 {
+    private static readonly HashSet<string> GeneratedOutputDirectories = new(
+        ["bin", "obj", "node_modules", ".git", ".vs", ".idea", "dist", "coverage", "target"],
+        StringComparer.OrdinalIgnoreCase);
     private readonly string root = Path.Combine(SafePaths.ValidateStorageDirectory(options.DataDirectory), "workspaces");
     private readonly SemaphoreSlim applyGate = new(1, 1);
 
@@ -45,28 +48,34 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         if ((attributes & FileAttributes.Directory) == 0)
             throw new IOException("The workspace path is not a directory.");
 
-        var files = List(id);
-        foreach (var file in files)
-        {
-            var fullPath = Path.Combine(path, file.Path.Replace('/', Path.DirectorySeparatorChar));
-            SafePaths.RejectLinks(fullPath);
-            File.Delete(fullPath);
-        }
-        RemoveEmpty(path);
-        static void RemoveEmpty(string directory)
+        DeleteContents(path);
+
+        static void DeleteContents(string directory)
         {
             SafePaths.RejectLinks(directory);
-            foreach (var child in Directory.EnumerateDirectories(directory))
-                RemoveEmpty(child);
-            Directory.Delete(directory, recursive: false);
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                SafePaths.RejectLinks(entry);
+                if (Directory.Exists(entry))
+                {
+                    DeleteContents(entry);
+                    Directory.Delete(entry, recursive: false);
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+            }
         }
+        Directory.Delete(path, recursive: false);
     }
 
     public void ValidateFiles(
         IReadOnlyList<GeneratedFile> files, string? templateId = null, bool allowPartialTemplate = false)
     {
         if (templateId is not null && templateId != DiscordTemplate.Id && templateId != ReactTemplate.Id &&
-            templateId != TwitchTemplate.Id && templateId != FullStackTemplate.Id)
+            templateId != TwitchTemplate.Id && templateId != FullStackTemplate.Id &&
+            templateId != AgentReactTemplate.Id && templateId != AgentDotNetTemplate.Id)
             throw new StudioValidationException("Unknown project template.");
         if (files.Count is < 3 || files.Count > options.MaxFiles)
             throw new StudioValidationException("The project file count exceeds configured limits.");
@@ -79,7 +88,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 throw new StudioValidationException("Duplicate paths or empty/binary contents are not allowed.");
             var size = Encoding.UTF8.GetByteCount(file.Content);
             total += size;
-            var trustedLockfile = templateId == ReactTemplate.Id && file.Path == "package-lock.json" ||
+            var trustedLockfile = templateId is ReactTemplate.Id or AgentReactTemplate.Id &&
+                    file.Path == "package-lock.json" ||
                 templateId == FullStackTemplate.Id && file.Path == "frontend/package-lock.json";
             if (size > (trustedLockfile ? ReactTemplate.MaxLockfileBytes : options.MaxFileBytes) ||
                 total > Math.Min(options.MaxProjectBytes, templateId == FullStackTemplate.Id
@@ -99,6 +109,11 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 file.Content.Contains("@ts-nocheck", StringComparison.Ordinal) ||
                 file.Content.Contains("@ts-ignore", StringComparison.Ordinal)))
                 throw new StudioValidationException("Generated React sources must not disable type checking.");
+            return;
+        }
+        if (templateId == AgentReactTemplate.Id)
+        {
+            AgentReactTemplate.Validate(files);
             return;
         }
         if (templateId == FullStackTemplate.Id)
@@ -265,7 +280,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             SafePaths.RejectLinks(path);
             await File.WriteAllTextAsync(path, file.Content, new UTF8Encoding(false), cancellationToken);
         }
-        if (templateId == ReactTemplate.Id)
+        if (templateId is ReactTemplate.Id or AgentReactTemplate.Id)
         {
             var staleSolution = Path.Combine(directory, "Generated.slnx");
             SafePaths.RejectLinks(staleSolution);
@@ -304,7 +319,10 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             {
                 SafePaths.RejectLinks(path);
                 if (Directory.Exists(path))
-                    Scan(path);
+                {
+                    if (!GeneratedOutputDirectories.Contains(Path.GetFileName(path)))
+                        Scan(path);
+                }
                 else
                 {
                     if (result.Count > options.MaxFiles)
@@ -336,8 +354,11 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         ArgumentNullException.ThrowIfNull(commit);
         if (changes.Count is < 1 or > 8 ||
             changes.Select(change => change.Path).Distinct(StringComparer.OrdinalIgnoreCase).Count() != changes.Count ||
-            changes.Any(change => string.IsNullOrWhiteSpace(change.After) || change.After.Contains('\0') ||
-                ProjectExport.ContainsPotentialSecret(change.After) || !IsEditablePath(change.Path, templateId)))
+            changes.Any(change => change.Before is null && change.After is null ||
+                change.Before is not null && change.Before.Contains('\0')) ||
+            changes.Any(change => change.After is { } content &&
+                (string.IsNullOrWhiteSpace(content) || content.Contains('\0') ||
+                 ProjectExport.ContainsPotentialSecret(content)) || !IsEditablePath(change.Path, templateId)))
             throw new StudioValidationException("The reviewed changes contain unsupported paths or unsafe content.");
 
         await applyGate.WaitAsync(cancellationToken);
@@ -372,7 +393,12 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
 
             var updated = new Dictionary<string, string>(original, StringComparer.Ordinal);
             foreach (var change in validatedChanges)
-                updated[change.Path] = change.After;
+            {
+                if (change.After is null)
+                    updated.Remove(change.Path);
+                else
+                    updated[change.Path] = change.After;
+            }
             var complete = updated.OrderBy(item => item.Key, StringComparer.Ordinal)
                 .Select(item => new GeneratedFile(item.Key, item.Value)).ToArray();
             ValidateFiles(complete, templateId);
@@ -393,11 +419,16 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                     var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
                     try
                     {
-                        await File.WriteAllTextAsync(path: temporary, contents: change.After,
-                            encoding: new UTF8Encoding(false), cancellationToken);
-                        SafePaths.RejectLinks(path);
-                        SafePaths.RejectLinks(temporary);
-                        File.Move(temporary, path, overwrite: original.ContainsKey(change.Path));
+                        if (change.After is null)
+                            File.Delete(path);
+                        else
+                        {
+                            await File.WriteAllTextAsync(path: temporary, contents: change.After,
+                                encoding: new UTF8Encoding(false), cancellationToken);
+                            SafePaths.RejectLinks(path);
+                            SafePaths.RejectLinks(temporary);
+                            File.Move(temporary, path, overwrite: original.ContainsKey(change.Path));
+                        }
                         written.Add(change.Path);
                     }
                     finally
@@ -407,7 +438,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 }
 
                 foreach (var change in validatedChanges)
-                    if ((await ReadAsync(id, change.Path, cancellationToken)).Content != change.After)
+                    if (change.After is not null &&
+                        (await ReadAsync(id, change.Path, cancellationToken)).Content != change.After)
                         throw new IOException("An approved workspace change did not persist exactly.");
                 if (!commit(complete))
                     throw new StudioValidationException(
@@ -486,6 +518,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         {
             FullStackTemplate.Id => FullStackTemplate.IsEditable(path),
             ReactTemplate.Id => ReactTemplate.IsEditable(path),
+            AgentReactTemplate.Id => AgentReactTemplate.IsEditable(path),
+            AgentDotNetTemplate.Id => true,
             TwitchTemplate.Id => TwitchTemplate.IsEditable(path),
             DiscordTemplate.Id => false,
             null => true,

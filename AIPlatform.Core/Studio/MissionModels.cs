@@ -5,6 +5,7 @@ using System.Text.Json;
 namespace AIPlatform.Core.Studio;
 
 public enum MissionKind { Chat, Project }
+public enum CustomAgentProjectType { React, DotNet }
 public enum MissionStatus { Queued, Running, Completed, GeneratedUnverified, Failed, Cancelled, AwaitingApproval, BuildFailed, TestsFailed, Verified }
 public enum StepStatus { Running, Succeeded, Failed, Unavailable, Skipped, Cancelled }
 
@@ -36,7 +37,7 @@ public sealed record MissionSnapshot(
 }
 
 public sealed record GeneratedFile(string Path, string Content);
-public sealed record ReviewedWorkspaceChange(string Path, string? Before, string After);
+public sealed record ReviewedWorkspaceChange(string Path, string? Before, string? After);
 // For corrections, Files contains replacements only; omitted files are preserved.
 public sealed record ProjectManifest(string Summary, IReadOnlyList<GeneratedFile> Files);
 public sealed record ExecutionPlanFile(string Path, string Sha256);
@@ -68,6 +69,8 @@ public sealed record LocalModelsSnapshot(bool Available, string? Error, IReadOnl
 public interface IMissionService
 {
     MissionSnapshot Submit(MissionSubmission submission);
+    Task<MissionSnapshot> CreateCustomAgentProjectAsync(
+        string? name, CustomAgentProjectType projectType, CancellationToken cancellationToken);
     IReadOnlyList<MissionSnapshot> List();
     MissionSnapshot? Get(Guid id);
     bool Cancel(Guid id);

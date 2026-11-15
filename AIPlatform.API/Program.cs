@@ -91,6 +91,11 @@ builder.Services.AddSingleton<ICustomAgentStore, CustomAgentStore>();
 builder.Services.AddSingleton<IOllamaModelCatalog>(services => new OllamaModelCatalog(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"),
     services.GetRequiredService<OllamaOptions>()));
+builder.Services.AddSingleton(services => new LocalCommandExecutor(
+    services.GetRequiredService<IWorkspaceStore>(), studio, desktop.Enabled));
+builder.Services.AddSingleton<ILocalCommandExecutor>(services =>
+    services.GetRequiredService<LocalCommandExecutor>());
+builder.Services.AddHostedService(services => services.GetRequiredService<LocalCommandExecutor>());
 builder.Services.AddSingleton<ICustomAgentService, CustomAgentService>();
 builder.Services.AddSingleton<IWorkspaceStore, WorkspaceStore>();
 builder.Services.AddSingleton<IProjectExport, ProjectExport>();

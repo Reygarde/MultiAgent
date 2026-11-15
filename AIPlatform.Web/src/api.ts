@@ -1,4 +1,4 @@
-import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft, CustomAgentWorkspace, ExecutionPlan, FileContent, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, WorkspaceFile } from './types'
+import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft, CustomAgentProjectType, CustomAgentTeam, CustomAgentTeamMember, CustomAgentWorkspace, CustomAgentWorkspaceFile, ExecutionPlan, FileContent, LocalApplication, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, WorkspaceFile } from './types'
 import { fetchApi } from './desktop/transport'
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -71,12 +71,69 @@ export const api = {
   ) => request<CustomAgentConversation>(
     `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}/proposals/${encodeURIComponent(proposalId)}/decision`,
     { method: 'POST', body: JSON.stringify({ approved }) }),
+  recordExternalProposalOutcome: (
+    agentId: string, conversationId: string, proposalId: string, backupId: string, restored: boolean,
+  ) => request<CustomAgentConversation>(
+    `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}/proposals/${encodeURIComponent(proposalId)}/native-outcome`,
+    { method: 'POST', body: JSON.stringify({ backupId, restored }) }),
   deleteCustomAgentConversation: async (agentId: string, conversationId: string) => {
     const response = await fetchApi(
       `/custom-agents/${encodeURIComponent(agentId)}/conversations/${encodeURIComponent(conversationId)}`,
       { method: 'DELETE' })
     if (!response.ok) throw new Error(`Suppression de la conversation refusée (HTTP ${response.status}).`)
   },
+  customAgentTeams: () => request<CustomAgentTeam[]>('/custom-agent-teams'),
+  saveCustomAgentTeam: (name: string, members: CustomAgentTeamMember[], id?: string) =>
+    request<CustomAgentTeam>(id ? `/custom-agent-teams/${encodeURIComponent(id)}` : '/custom-agent-teams',
+      { method: id ? 'PUT' : 'POST', body: JSON.stringify({ name, members }) }),
+  deleteCustomAgentTeam: async (id: string) => {
+    const response = await fetchApi(`/custom-agent-teams/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression de l’équipe refusée (HTTP ${response.status}).`)
+  },
+  createCustomAgentProject: (teamId: string, name: string, projectType: CustomAgentProjectType) =>
+    request<Mission>(`/custom-agent-teams/${encodeURIComponent(teamId)}/projects`,
+      { method: 'POST', body: JSON.stringify({ name, projectType }) }),
+  localApplication: (workspaceId: string, signal?: AbortSignal) =>
+    request<LocalApplication>(`/studio/projects/${encodeURIComponent(workspaceId)}/local-application`, { signal }),
+  startLocalApplication: (workspaceId: string) =>
+    request<LocalApplication>(`/studio/projects/${encodeURIComponent(workspaceId)}/local-application/start`,
+      { method: 'POST', body: JSON.stringify({ executionAuthorized: true }) }),
+  stopLocalApplication: (workspaceId: string) =>
+    request<LocalApplication>(`/studio/projects/${encodeURIComponent(workspaceId)}/local-application/stop`,
+      { method: 'POST' }),
+  customAgentTeamRuns: (teamId: string, signal?: AbortSignal) =>
+    request<CustomAgentCollaborationRun[]>(`/custom-agent-teams/${encodeURIComponent(teamId)}/runs`, { signal }),
+  customAgentTeamRun: (teamId: string, runId: string, signal?: AbortSignal) =>
+    request<CustomAgentCollaborationRun>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}`, { signal }),
+  startCustomAgentCollaboration: (
+    teamId: string, task: string, workspace: CustomAgentWorkspace | null,
+    externalFiles?: CustomAgentWorkspaceFile[], mode?: 'Supervised' | 'Autonomous',
+    workspaceAuthorized?: boolean, executionAuthorized?: boolean, signal?: AbortSignal,
+  ) => request<CustomAgentCollaborationRun>(`/custom-agent-teams/${encodeURIComponent(teamId)}/runs`,
+    { method: 'POST', body: JSON.stringify({
+      task, workspace, externalFiles, mode, workspaceAuthorized, executionAuthorized,
+    }), signal }),
+  cancelCustomAgentCollaboration: async (teamId: string, runId: string) => {
+    const response = await fetchApi(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: 'POST' })
+    if (!response.ok) throw new Error(`Annulation refusée (HTTP ${response.status}).`)
+  },
+  decideCustomAgentCollaboration: (
+    teamId: string, runId: string, approved: boolean,
+  ) => request<CustomAgentCollaborationRun>(
+    `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}/decision`,
+    { method: 'POST', body: JSON.stringify({ approved }) }),
+  restoreAutonomousCustomAgentRun: (teamId: string, runId: string) =>
+    request<CustomAgentCollaborationRun>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}/restore`,
+      { method: 'POST' }),
+  recordNativeCollaborationOutcome: (
+    teamId: string, runId: string, backupId: string, restored: boolean,
+  ) => request<CustomAgentCollaborationRun>(
+    `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}/native-outcome`,
+    { method: 'POST', body: JSON.stringify({ backupId, restored }) }),
   missions: (signal?: AbortSignal) => request<Mission[]>('/missions', { signal }),
   missionCapacity: (signal?: AbortSignal) => request<MissionCapacity>('/missions/capacity', { signal }),
   archiveMission: (id: string) => request<Mission>(`/missions/${encodeURIComponent(id)}/archive`, { method: 'POST' }),

@@ -80,6 +80,22 @@ public sealed class WorkspaceTests
             entry.FullName.Contains("credentials") || entry.FullName.Contains(".env") || entry.FullName.Contains("appsettings"));
     }
 
+    [Fact]
+    public async Task IgnoresGeneratedOutputDirectoriesAndDeletesThemWithTheWorkspace()
+    {
+        using var fixture = new StudioFixture();
+        var id = Guid.NewGuid();
+        fixture.Workspaces.Create(id);
+        await fixture.Workspaces.WriteAsync(id, StudioFixture.Manifest().Files, CancellationToken.None);
+        var outputDirectory = Path.Combine(fixture.Workspaces.GetDirectory(id), "node_modules", "package");
+        Directory.CreateDirectory(outputDirectory);
+        await File.WriteAllTextAsync(Path.Combine(outputDirectory, "index.js"), "generated output");
+
+        Assert.Equal(5, fixture.Workspaces.List(id).Count);
+        fixture.Workspaces.Delete(id);
+        Assert.False(Directory.Exists(fixture.Workspaces.GetDirectory(id)));
+    }
+
     [Theory]
     [InlineData("""class X { string password = "dummy-value"; }""")]
     [InlineData("""class X { string x = "ghp_abcdefghijklmnopqrstuvwxyz012345"; }""")]

@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod external_workspace;
+
 use serde::{Deserialize, Serialize};
 use std::{
     fs::{self, File, OpenOptions},
@@ -11,9 +13,15 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+use external_workspace::{
+    ExternalFileChange, ExternalFolderSelection, ExternalWorkspaceManager,
+};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::UI::Shell::ShellExecuteW;
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -276,8 +284,108 @@ async fn restart_backend(manager: tauri::State<'_, Arc<BackendManager>>) -> Resu
     tauri::async_runtime::spawn_blocking(move || manager.restart()).await.map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+fn open_local_application(url: String) -> Result<(), String> {
+    validate_local_application_url(&url)?;
+    #[cfg(windows)]
+    {
+        let operation: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+        let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if result as isize <= 32 {
+            return Err(format!("Windows could not open the local application (code {}).", result as isize));
+        }
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        Err("Opening local applications is supported only in AIPlatform Studio Desktop on Windows.".into())
+    }
+}
+
+fn validate_local_application_url(url: &str) -> Result<(), String> {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else {
+        return Err("Only an HTTP localhost address can be opened from Studio.".into());
+    };
+    if url.len() > 256 || url.chars().any(char::is_control) {
+        return Err("The local application address is invalid.".into());
+    }
+    let authority = rest.split('/').next().unwrap_or_default();
+    let suffix = &rest[authority.len()..];
+    if !matches!(suffix, "" | "/") {
+        return Err("The local application address must target its localhost origin.".into());
+    }
+    let Some((host, port)) = authority.rsplit_once(':') else {
+        return Err("The local application address must include its port.".into());
+    };
+    if !matches!(host, "localhost" | "127.0.0.1" | "[::1]") ||
+        !port.parse::<u16>().is_ok_and(|value| value != 0)
+    {
+        return Err("Studio can open only a verified localhost address.".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn select_external_workspace(
+    app: tauri::AppHandle,
+    workspaces: tauri::State<'_, ExternalWorkspaceManager>,
+) -> Result<Option<ExternalFolderSelection>, String> {
+    let Some(selection) = app.dialog().file().set_title("Autoriser un dossier pour l’agent")
+        .blocking_pick_folder() else {
+        return Ok(None);
+    };
+    let path = selection.into_path().map_err(|error| error.to_string())?;
+    workspaces.select_folder(path).map(Some)
+}
+
+#[tauri::command]
+fn enable_external_workspace_writes(
+    grant_id: String,
+    workspaces: tauri::State<'_, ExternalWorkspaceManager>,
+) -> Result<(), String> {
+    workspaces.enable_writes(&grant_id)
+}
+
+#[tauri::command]
+fn release_external_workspace(
+    grant_id: String,
+    workspaces: tauri::State<'_, ExternalWorkspaceManager>,
+) {
+    workspaces.release(&grant_id);
+}
+
+#[tauri::command]
+fn apply_external_workspace_proposal(
+    grant_id: String,
+    proposal_id: String,
+    changes: Vec<ExternalFileChange>,
+    workspaces: tauri::State<'_, ExternalWorkspaceManager>,
+) -> Result<String, String> {
+    workspaces.apply(&grant_id, &proposal_id, changes)
+}
+
+#[tauri::command]
+fn restore_external_workspace_proposal(
+    grant_id: String,
+    backup_id: String,
+    workspaces: tauri::State<'_, ExternalWorkspaceManager>,
+) -> Result<(), String> {
+    workspaces.restore(&grant_id, &backup_id)
+}
+
 fn main() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             if let Some(window) = app.get_webview_window("main") {
                 if let Err(error) = window.set_focus() { eprintln!("Cannot focus Studio: {error}"); }
@@ -286,6 +394,10 @@ fn main() {
         .setup(|app| {
             let manager = Arc::new(BackendManager::new(app.handle())?);
             app.manage(manager.clone());
+            let backups = app.path().app_data_dir()?.join("external-workspace-backups");
+            let external_workspaces = ExternalWorkspaceManager::new(backups)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+            app.manage(external_workspaces);
             tauri::WebviewWindowBuilder::from_config(app, &app.config().app.windows[0])?
                 .on_navigation(|url| {
                     url.scheme() == "tauri" && url.host_str() == Some("localhost") ||
@@ -305,7 +417,16 @@ fn main() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![backend_status, restart_backend])
+        .invoke_handler(tauri::generate_handler![
+            backend_status,
+            restart_backend,
+            open_local_application,
+            select_external_workspace,
+            enable_external_workspace_writes,
+            release_external_workspace,
+            apply_external_workspace_proposal,
+            restore_external_workspace_proposal
+        ])
         .build(tauri::generate_context!())
         .expect("Cannot initialize the native Studio application")
         .run(|app, event| {
@@ -327,5 +448,27 @@ mod tests {
             assert!(validate_ready(&ReadyMessage { url: url.into(), process_id: 42 }, 42).is_err());
         }
         assert!(validate_ready(&ReadyMessage { url: "http://127.0.0.1:45000".into(), process_id: 43 }, 42).is_err());
+    }
+
+    #[test]
+    fn browser_opening_accepts_only_local_http_origins() {
+        for url in [
+            "http://localhost:4175/",
+            "http://127.0.0.1:4175/",
+            "http://[::1]:4175/",
+            "https://localhost:5001",
+        ] {
+            assert!(validate_local_application_url(url).is_ok(), "{url}");
+        }
+        for url in [
+            "http://example.com:4175/",
+            "http://192.168.1.10:4175/",
+            "http://localhost:0/",
+            "http://localhost:4175/other",
+            "http://localhost:4175/?url=http://example.com",
+            "javascript:alert(1)",
+        ] {
+            assert!(validate_local_application_url(url).is_err(), "{url}");
+        }
     }
 }

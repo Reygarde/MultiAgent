@@ -6,6 +6,7 @@ using System.Text.Json.Serialization;
 using AIPlatform.API;
 using AIPlatform.Core;
 using AIPlatform.Core.Studio;
+using AIPlatform.Infrastructure.Studio;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
@@ -346,6 +347,52 @@ public sealed class StudioApiTests
         Assert.Single(await client.GetFromJsonAsync<CustomAgentResponse[]>("/api/custom-agents", JsonOptions) ?? []);
         Assert.Equal(systemAgents!.Select(item => item.Id),
             (await client.GetFromJsonAsync<AgentResponse[]>("/api/agents", JsonOptions))!.Select(item => item.Id));
+    }
+
+    [Fact]
+    public async Task CustomAgentTeamCreatesAStudioProjectWithoutStartingSystemGeneration()
+    {
+        using var fixture = new StudioFixture();
+        var provider = new FakeProvider((request, _) => Task.FromResult("unexpected generation"));
+        using var factory = Factory(fixture, provider, modelCatalog: new FakeOllamaModelCatalog());
+        using var client = factory.CreateClient();
+        var agents = new List<CustomAgentResponse>();
+        foreach (var role in new[] { "Planner", "Developer", "Reviewer" })
+        {
+            using var response = await client.PostAsJsonAsync("/api/custom-agents",
+                new { name = role, description = role, systemPrompt = $"{role} instructions.", modelName = "qwen3:4b" });
+            Assert.Equal(HttpStatusCode.Created, response.StatusCode);
+            agents.Add((await response.Content.ReadFromJsonAsync<CustomAgentResponse>(JsonOptions))!);
+        }
+
+        using var teamResponse = await client.PostAsJsonAsync("/api/custom-agent-teams", new
+        {
+            name = "React team",
+            members = new[]
+            {
+                new { agentId = agents[0].Id, role = "Planner", order = 0 },
+                new { agentId = agents[1].Id, role = "Developer", order = 1 },
+                new { agentId = agents[2].Id, role = "Reviewer", order = 2 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.Created, teamResponse.StatusCode);
+        var team = await teamResponse.Content.ReadFromJsonAsync<CustomAgentTeamResponse>(JsonOptions);
+
+        using var projectResponse = await client.PostAsJsonAsync(
+            $"/api/custom-agent-teams/{team!.Id}/projects",
+            new { name = "Task manager", projectType = "React" });
+
+        Assert.Equal(HttpStatusCode.Created, projectResponse.StatusCode);
+        Assert.StartsWith("/api/missions/", projectResponse.Headers.Location!.ToString());
+        var project = await projectResponse.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions);
+        Assert.Equal("Task manager", project!.ProjectName);
+        Assert.Equal(MissionStatus.Completed, project.Status);
+        Assert.True(project.HasWorkspace);
+        Assert.Equal(AgentReactTemplate.Id, project.TemplateId);
+        Assert.Contains("package.json", (await client.GetFromJsonAsync<WorkspaceFileResponse[]>(
+            $"/api/workspaces/{project.Id}/files", JsonOptions))!.Select(file => file.Path));
+        Assert.Single(await client.GetFromJsonAsync<MissionResponse[]>("/api/missions", JsonOptions) ?? []);
+        Assert.Empty(provider.Requests);
     }
 
     [Fact]

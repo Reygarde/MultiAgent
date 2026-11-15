@@ -35,6 +35,7 @@ export interface CustomAgentWorkspace {
   kind: CustomAgentWorkspaceKind
   workspaceId: string | null
   name: string
+  authorizationId?: string | null
 }
 
 export interface CustomAgentWorkspaceFile {
@@ -46,7 +47,8 @@ export interface CustomAgentFileChange {
   path: string
   summary: string
   before: string | null
-  after: string
+  after: string | null
+  operation: 'create' | 'modify' | 'delete'
 }
 
 export interface CustomAgentProposal {
@@ -57,6 +59,14 @@ export interface CustomAgentProposal {
   canApply: boolean
   applyReason: string | null
   workspace?: CustomAgentWorkspace | null
+  externalBackupId?: string | null
+  externalRestoredAt?: string | null
+}
+
+export interface NativeExternalFolderSelection {
+  grantId: string
+  name: string
+  files: CustomAgentWorkspaceFile[]
 }
 
 export interface CustomAgentConversationSummary {
@@ -83,6 +93,93 @@ export interface CustomAgentDraft {
   description: string
   systemPrompt: string
   modelName: string
+}
+
+export type CustomAgentTeamRole = 'Planner' | 'Developer' | 'Reviewer'
+
+export interface CustomAgentTeamMember {
+  agentId: string
+  role: CustomAgentTeamRole
+  order: number
+}
+
+export interface CustomAgentTeam {
+  id: string
+  name: string
+  members: CustomAgentTeamMember[]
+  createdAt: string
+  updatedAt: string
+}
+
+export interface CustomAgentContribution {
+  agentId: string
+  agentName: string
+  role: CustomAgentTeamRole
+  modelName: string
+  content: string
+  createdAt: string
+}
+
+export interface CustomAgentValidationDiagnostic {
+  path: string
+  code: string
+  message: string
+  severity: 'Error' | 'Warning'
+  relatedPath: string | null
+}
+
+export interface CustomAgentValidationAttempt {
+  number: number
+  status: 'Passed' | 'Warnings' | 'Errors' | 'Unavailable'
+  diagnostics: CustomAgentValidationDiagnostic[]
+}
+
+export interface CustomAgentValidationReport {
+  staticStatus: 'Passed' | 'Warnings' | 'Errors' | 'Unavailable'
+  compilationStatus: 'Unavailable' | 'Passed' | 'Failed' | 'TimedOut'
+  correctionAttempts: number
+  diagnostics: CustomAgentValidationDiagnostic[]
+  history: CustomAgentValidationAttempt[]
+}
+
+export interface CustomAgentCollaborationRun {
+  id: string
+  teamId: string
+  task: string
+  status: 'Queued' | 'Running' | 'AwaitingApproval' | 'Completed' | 'Applied' | 'Rejected' | 'Failed' | 'Cancelled' | 'Restored'
+  currentStep: string | null
+  workspace: CustomAgentWorkspace | null
+  createdAt: string
+  updatedAt: string
+  contributions: CustomAgentContribution[]
+  proposal: CustomAgentProposal | null
+  error: string | null
+  validation?: CustomAgentValidationReport | null
+  mode?: 'Supervised' | 'Autonomous'
+  appliedChanges?: CustomAgentFileChange[]
+  executionResults?: CustomAgentExecutionResult[]
+}
+
+export interface CustomAgentExecutionResult {
+  command: string
+  exitCode: number | null
+  timedOut: boolean
+  output: string
+  startedAt: string
+  completedAt: string
+}
+
+export type LocalApplicationStatus = 'Stopped' | 'Starting' | 'Running' | 'Stopping' | 'Error'
+
+export interface LocalApplication {
+  workspaceId: string
+  status: LocalApplicationStatus
+  url: string | null
+  command: string | null
+  output: string[]
+  error: string | null
+  processId: number | null
+  updatedAt: string
 }
 
 export interface AgentSettings {
@@ -241,6 +338,7 @@ export interface CreateMission {
   approveSandboxExecution: boolean
   templateId?: string | null
 }
+export type CustomAgentProjectType = 'React' | 'DotNet'
 
 export const isActive = (mission: Mission) =>
   mission.status === 'Queued' || mission.status === 'Running' || mission.status === 'AwaitingApproval'

@@ -25,6 +25,7 @@ public sealed class MissionStore : IMissionService, IDisposable
     private readonly IAgentRegistry registry;
     private readonly Channel<Guid> queue = Channel.CreateUnbounded<Guid>(
         new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
+    private int pendingProjectCreations;
 
     public MissionStore(StudioOptions options, PlatformConfiguration platform, IAgentRegistry registry,
         IWorkspaceStore? workspaces = null)
@@ -94,7 +95,7 @@ public sealed class MissionStore : IMissionService, IDisposable
 
         lock (sync)
         {
-            if (missions.Count >= options.MaxMissions)
+            if (missions.Count + pendingProjectCreations >= options.MaxMissions)
                 throw new StudioCapacityException(
                     $"The persisted mission limit ({options.MaxMissions}) is reached; archived missions count toward it. " +
                     "Archiving preserves data and does not free capacity. Increase Studio:MaxMissions (maximum 10000) in settings and restart Studio.");
@@ -126,6 +127,85 @@ public sealed class MissionStore : IMissionService, IDisposable
             if (!queue.Writer.TryWrite(snapshot.Id))
                 throw new InvalidOperationException("The mission worker queue is closed.");
             return snapshot;
+        }
+    }
+
+    public async Task<MissionSnapshot> CreateCustomAgentProjectAsync(
+        string? name, CustomAgentProjectType projectType, CancellationToken cancellationToken)
+    {
+        var projectName = name?.Trim() ?? "";
+        if (projectName.Length is < 1 or > 80 || projectName.Any(char.IsControl) ||
+            !Enum.IsDefined(projectType))
+            throw new StudioValidationException("Provide a project name of 1-80 characters and a supported project type.");
+        if (workspaces is null)
+            throw new InvalidOperationException("Workspace storage is required to create a Studio project.");
+
+        lock (sync)
+        {
+            if (missions.Count + pendingProjectCreations >= options.MaxMissions)
+                throw new StudioCapacityException(
+                    $"The persisted mission limit ({options.MaxMissions}) is reached; archived missions count toward it. " +
+                    "Archiving preserves data and does not free capacity. Increase Studio:MaxMissions in settings and restart Studio.");
+            pendingProjectCreations++;
+        }
+
+        var id = Guid.NewGuid();
+        var templateId = projectType switch
+        {
+            CustomAgentProjectType.React => AgentReactTemplate.Id,
+            CustomAgentProjectType.DotNet => AgentDotNetTemplate.Id,
+            _ => throw new StudioValidationException("Unsupported custom-agent project type.")
+        };
+        var starterFiles = projectType switch
+        {
+            CustomAgentProjectType.React => AgentReactTemplate.Files,
+            CustomAgentProjectType.DotNet => AgentDotNetTemplate.Files,
+            _ => throw new StudioValidationException("Unsupported custom-agent project type.")
+        };
+        var workspaceCreated = false;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            workspaces.Create(id);
+            workspaceCreated = true;
+            await workspaces.WriteAsync(id, starterFiles, cancellationToken, templateId);
+
+            var now = DateTimeOffset.UtcNow;
+            var workflowAgent = new AgentDefinition { Id = "CustomAgentTeam", Name = "Custom agent team", Role = "Orchestrator" };
+            var workflow = new MissionWorkflow(Guid.NewGuid(), id, [workflowAgent], [],
+                [new WorkflowStep("project-scaffold", "ManualRevision", workflowAgent.Id, [],
+                    WorkflowStatus.Completed, 1, now, Input: "Create a custom-agent project scaffold.",
+                    Output: "The trusted scaffold is ready; generated changes still require user approval.")],
+                Draft: starterFiles, Version: 0,
+                FinalReport: "Project scaffold created. No agent-generated changes have been applied.");
+            var mission = new MissionSnapshot(id, $"Agent project: {projectName}", MissionKind.Project, null,
+                false, MissionStatus.Completed, now, now, null, null, null, false,
+                "Project scaffold created; generated files remain subject to explicit approval.", null,
+                true, 0,
+                [new(1, now, "Project", StepStatus.Succeeded,
+                    $"{projectType} scaffold created. No agent-generated changes were applied.")], [],
+                Workflow: workflow, ProjectName: projectName,
+                ProjectDescription: $"{projectType} project created for custom-agent collaboration.",
+                TemplateId: templateId, CompletedAt: now);
+            cancellationToken.ThrowIfCancellationRequested();
+            lock (sync)
+            {
+                Save(mission);
+                missions.Add(id, mission);
+                cancellations.Add(id, new());
+            }
+            return mission;
+        }
+        catch
+        {
+            if (workspaceCreated)
+                workspaces.Delete(id);
+            throw;
+        }
+        finally
+        {
+            lock (sync)
+                pendingProjectCreations--;
         }
     }
 

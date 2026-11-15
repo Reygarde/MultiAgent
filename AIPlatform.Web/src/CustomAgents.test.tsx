@@ -1,9 +1,12 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { api } from './api'
 import { CustomAgents } from './CustomAgents'
-import type { CustomAgent, CustomAgentConversation, CustomAgentConversationSummary } from './types'
+import type {
+  CustomAgent, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, Mission,
+} from './types'
 
 vi.mock('./api', () => ({
   api: {
@@ -21,10 +24,26 @@ vi.mock('./api', () => ({
     customAgentConversation: vi.fn(),
     setCustomAgentWorkspace: vi.fn(),
     decideCustomAgentProposal: vi.fn(),
+    recordExternalProposalOutcome: vi.fn(),
     sendCustomAgentMessage: vi.fn(),
     deleteCustomAgentConversation: vi.fn(),
+    customAgentTeams: vi.fn(),
+    saveCustomAgentTeam: vi.fn(),
+    deleteCustomAgentTeam: vi.fn(),
+    customAgentTeamRuns: vi.fn(),
+    customAgentTeamRun: vi.fn(),
+    createCustomAgentProject: vi.fn(),
+    startCustomAgentCollaboration: vi.fn(),
+    cancelCustomAgentCollaboration: vi.fn(),
+    decideCustomAgentCollaboration: vi.fn(),
+    recordNativeCollaborationOutcome: vi.fn(),
   },
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Erreur',
+}))
+
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: vi.fn(),
+  isTauri: vi.fn(() => false),
 }))
 
 const agent: CustomAgent = {
@@ -45,6 +64,7 @@ const savedConversation: CustomAgentConversation = {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(isTauri).mockReturnValue(false)
   vi.mocked(api.customAgents).mockResolvedValue([])
   vi.mocked(api.customAgentModels).mockResolvedValue(['qwen2.5-coder:7b', 'qwen3:4b'])
   vi.mocked(api.missions).mockResolvedValue([])
@@ -64,6 +84,7 @@ beforeEach(() => {
     ...savedConversation, workspace,
   }))
   vi.mocked(api.decideCustomAgentProposal).mockResolvedValue(savedConversation)
+  vi.mocked(api.recordExternalProposalOutcome).mockResolvedValue(savedConversation)
   vi.mocked(api.sendCustomAgentMessage).mockResolvedValue({
     id: 'conversation-2', agentId: agent.id, title: 'Bonjour',
     createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:02:00Z',
@@ -73,6 +94,47 @@ beforeEach(() => {
     ],
   })
   vi.mocked(api.deleteCustomAgentConversation).mockResolvedValue(undefined)
+  vi.mocked(api.customAgentTeams).mockResolvedValue([])
+  vi.mocked(api.saveCustomAgentTeam).mockImplementation(async (name, members) => ({
+    id: 'team-1', name, members, createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z',
+  }))
+  vi.mocked(api.deleteCustomAgentTeam).mockResolvedValue(undefined)
+  vi.mocked(api.createCustomAgentProject).mockResolvedValue({
+    id: 'project-1', task: 'Agent project: Task manager', kind: 'Project', requestedAgent: null,
+    sandboxApproved: false, status: 'Completed', createdAt: '2026-11-15T10:00:00Z',
+    updatedAt: '2026-11-15T10:00:00Z', selectedAgent: null, selectedModel: null,
+    reason: null, usedFallback: false, response: null, error: null, hasWorkspace: true,
+    correctionAttempts: 0, events: [], verification: [], workflow: null, projectName: 'Task manager',
+    projectDescription: 'React project created for custom-agent collaboration.', deleted: false,
+    templateId: 'custom-agent-react', archived: false, archivedAt: null, completedAt: null,
+  } satisfies Mission)
+  vi.mocked(api.customAgentTeamRuns).mockResolvedValue([])
+  vi.mocked(api.customAgentTeamRun).mockImplementation(async (_teamId, runId) => ({
+    id: runId, teamId: 'team-1', task: 'Créer une page.', status: 'Completed', currentStep: null,
+    workspace: null, createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:01:00Z',
+    contributions: [
+      { agentId: 'agent-1', agentName: 'Planner', role: 'Planner', modelName: 'qwen3:4b', content: 'Plan terminé.', createdAt: '2026-11-15T10:00:10Z' },
+      { agentId: 'agent-2', agentName: 'Developer', role: 'Developer', modelName: 'qwen2.5-coder:7b', content: 'Code proposé.', createdAt: '2026-11-15T10:00:20Z' },
+      { agentId: 'agent-3', agentName: 'Reviewer', role: 'Reviewer', modelName: 'qwen3:4b', content: 'Revue terminée.', createdAt: '2026-11-15T10:00:30Z' },
+    ],
+    proposal: null, error: null,
+  }))
+  vi.mocked(api.startCustomAgentCollaboration).mockImplementation(async (teamId, task, workspace) => ({
+    id: 'run-1', teamId, task, status: 'Queued', currentStep: null, workspace,
+    createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z',
+    contributions: [], proposal: null, error: null,
+  }))
+  vi.mocked(api.cancelCustomAgentCollaboration).mockResolvedValue(undefined)
+  vi.mocked(api.decideCustomAgentCollaboration).mockImplementation(async (teamId, runId) => ({
+    id: runId, teamId, task: 'Créer une page.', status: 'Rejected', currentStep: null,
+    workspace: null, createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:01:00Z',
+    contributions: [], proposal: null, error: null,
+  }))
+  vi.mocked(api.recordNativeCollaborationOutcome).mockImplementation(async (teamId, runId) => ({
+    id: runId, teamId, task: 'Créer une page.', status: 'Applied', currentStep: null,
+    workspace: null, createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:01:00Z',
+    contributions: [], proposal: null, error: null,
+  }))
 })
 
 describe('CustomAgents', () => {
@@ -145,7 +207,7 @@ describe('CustomAgents', () => {
     Object.defineProperty(source, 'text', { value: async () => 'public class Example {}' })
     fireEvent.change(screen.getByLabelText('Choisir un dossier externe'), { target: { files: [source] } })
     await screen.findByText('sample · lecture seule')
-    expect(screen.getByText(/Le sélecteur WebView ne fournit pas de handle Windows/)).toBeVisible()
+    expect(screen.getByText(/L’écriture externe n’est disponible que dans AIPlatform Studio Desktop/)).toBeVisible()
     expect(screen.getByRole('textbox', { name: 'Votre message' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Envoyer' })).toBeDisabled()
     expect(api.sendCustomAgentMessage).not.toHaveBeenCalled()
@@ -158,6 +220,154 @@ describe('CustomAgents', () => {
     await waitFor(() => expect(api.sendCustomAgentMessage).toHaveBeenCalledWith(
       agent.id, 'conversation-2', 'Analyse ce fichier', expect.any(AbortSignal),
       [{ path: 'sample/src/Example.cs', content: 'public class Example {}' }]))
+  })
+
+  it('applies and restores an external proposal only through native desktop approval', async () => {
+    const user = userEvent.setup()
+    vi.mocked(isTauri).mockReturnValue(true)
+    vi.mocked(api.customAgents).mockResolvedValue([agent])
+    vi.mocked(api.setCustomAgentWorkspace).mockImplementation(async (_agentId, conversationId, selectedWorkspace) => ({
+      ...savedConversation, id: conversationId, messages: [], workspace: selectedWorkspace ?? undefined,
+    }))
+    const workspace: CustomAgentConversation['workspace'] = {
+      kind: 'External', workspaceId: null, name: 'sample', authorizationId: 'grant-1',
+    }
+    const files = [
+      { path: 'src/Example.cs', content: 'class Example { }' },
+      { path: 'src/Old.cs', content: 'class Old { }' },
+    ]
+    const change = {
+      path: 'src/Example.cs', summary: 'Ajouter une propriété.',
+      before: 'class Example { }', after: 'class Example { int Value; }', operation: 'modify' as const,
+    }
+    const createdChange = {
+      path: 'src/Features/Login.tsx', summary: 'Créer le composant de connexion.',
+      before: null, after: 'export function Login() { return null }', operation: 'create' as const,
+    }
+    const deletedChange = {
+      path: 'src/Old.cs', summary: 'Supprimer la classe obsolète.',
+      before: 'class Old { }', after: null, operation: 'delete' as const,
+    }
+    const pending: CustomAgentConversation = {
+      ...savedConversation, id: 'conversation-2', workspace,
+      messages: [{
+        role: 'assistant', content: 'Correction proposée.', createdAt: summary.updatedAt,
+        proposal: {
+          id: 'proposal-1', createdAt: summary.updatedAt, status: 'Pending',
+          changes: [change, createdChange, deletedChange],
+          canApply: false, applyReason: 'External folders are read-only.', workspace,
+        },
+      }],
+    }
+    const applied: CustomAgentConversation = {
+      ...pending,
+      messages: [{ ...pending.messages[0], proposal: {
+        ...pending.messages[0].proposal!, status: 'Applied', externalBackupId: '0123456789abcdef0123456789abcdef',
+      } }],
+    }
+    const restored: CustomAgentConversation = {
+      ...applied,
+      messages: [{ ...applied.messages[0], proposal: {
+        ...applied.messages[0].proposal!, externalRestoredAt: '2026-11-15T10:03:00Z',
+      } }],
+    }
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({ grantId: 'grant-1', name: 'sample', files })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce('0123456789abcdef0123456789abcdef')
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValue(undefined)
+    vi.mocked(api.sendCustomAgentMessage).mockResolvedValue(pending)
+    vi.mocked(api.recordExternalProposalOutcome)
+      .mockResolvedValueOnce(applied)
+      .mockResolvedValueOnce(restored)
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<CustomAgents />)
+    await user.click(await screen.findByRole('button', { name: /Assistant Développeur/ }))
+    await user.click(screen.getByRole('button', { name: 'Nouvelle conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Choisir un dossier Windows' }))
+    await screen.findByText('sample · dossier Windows autorisé pour cette session')
+    await user.click(screen.getByRole('button', { name: 'Autoriser les modifications pour cette session' }))
+    expect(await screen.findByText(/Modifications autorisées pour cette session/)).toBeVisible()
+
+    await user.click(screen.getByRole('checkbox', {
+      name: /J’autorise l’envoi de cet instantané à Ollama local/,
+    }))
+    await user.type(screen.getByRole('textbox', { name: 'Votre message' }), 'Corrige ce fichier')
+    await user.click(screen.getByRole('button', { name: 'Envoyer' }))
+    await screen.findByText('Proposition · Pending')
+    expect(screen.getByText(/3 opération\(s\)/)).toBeVisible()
+    expect(screen.getByText(/Création · src\/Features\/Login\.tsx/)).toBeVisible()
+    expect(screen.getByText(/Suppression · src\/Old\.cs/)).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Appliquer au dossier autorisé' }))
+    await screen.findByText('Proposition · Applied')
+    expect(api.recordExternalProposalOutcome).toHaveBeenNthCalledWith(
+      1, agent.id, 'conversation-2', 'proposal-1', '0123456789abcdef0123456789abcdef', false)
+    await user.click(screen.getByRole('button', { name: 'Restaurer les versions précédentes' }))
+    await screen.findByText(/Restauré le /)
+    expect(api.recordExternalProposalOutcome).toHaveBeenNthCalledWith(
+      2, agent.id, 'conversation-2', 'proposal-1', '0123456789abcdef0123456789abcdef', true)
+    expect(confirm).toHaveBeenCalledTimes(3)
+    expect(invoke).toHaveBeenCalledWith('apply_external_workspace_proposal', {
+      grantId: 'grant-1', proposalId: 'proposal-1',
+      changes: [change, createdChange, deletedChange].map(({ path, before, after, operation }) => ({
+        path, before, after, operation,
+      })),
+    })
+    confirm.mockRestore()
+  })
+
+  it('keeps proposals tied to the native folder selection that created them', async () => {
+    const user = userEvent.setup()
+    vi.mocked(isTauri).mockReturnValue(true)
+    vi.mocked(api.customAgents).mockResolvedValue([agent])
+    vi.mocked(api.setCustomAgentWorkspace).mockImplementation(async (_agentId, conversationId, selectedWorkspace) => ({
+      ...savedConversation, id: conversationId, messages: [], workspace: selectedWorkspace ?? undefined,
+    }))
+    const activeWorkspace: NonNullable<CustomAgentConversation['workspace']> = {
+      kind: 'External', workspaceId: null, name: 'sample', authorizationId: 'grant-1',
+    }
+    const staleProposal: CustomAgentConversation = {
+      ...savedConversation, id: 'conversation-2', workspace: activeWorkspace,
+      messages: [{
+        role: 'assistant', content: 'Correction proposée.', createdAt: summary.updatedAt,
+        proposal: {
+          id: 'proposal-old', createdAt: summary.updatedAt, status: 'Pending',
+          changes: [{
+            path: 'src/Example.cs', summary: 'Modifier la classe.',
+            before: 'class Example { }', after: 'class Example { int Value; }', operation: 'modify',
+          }],
+          canApply: false, applyReason: 'External folders are read-only.',
+          workspace: { ...activeWorkspace, authorizationId: 'previous-grant' },
+        },
+      }],
+    }
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        grantId: 'grant-1', name: 'sample',
+        files: [{ path: 'src/Example.cs', content: 'class Example { }' }],
+      })
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValue(undefined)
+    vi.mocked(api.sendCustomAgentMessage).mockResolvedValue(staleProposal)
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+
+    render(<CustomAgents />)
+    await user.click(await screen.findByRole('button', { name: /Assistant Développeur/ }))
+    await user.click(screen.getByRole('button', { name: 'Nouvelle conversation' }))
+    await user.click(screen.getByRole('button', { name: 'Choisir un dossier Windows' }))
+    await screen.findByText('sample · dossier Windows autorisé pour cette session')
+    await user.click(screen.getByRole('button', { name: 'Autoriser les modifications pour cette session' }))
+    await user.click(screen.getByRole('checkbox', {
+      name: /J’autorise l’envoi de cet instantané à Ollama local/,
+    }))
+    await user.type(screen.getByRole('textbox', { name: 'Votre message' }), 'Corrige ce fichier')
+    await user.click(screen.getByRole('button', { name: 'Envoyer' }))
+
+    await screen.findByText('Cette proposition appartient à une sélection antérieure; demandez-en une nouvelle.')
+    expect(screen.getByRole('button', { name: 'Appliquer au dossier autorisé' })).toBeDisabled()
+    expect(invoke).not.toHaveBeenCalledWith('apply_external_workspace_proposal', expect.anything())
   })
 
   it('loads history and confirms duplication, conversation deletion and agent deletion', async () => {
@@ -180,5 +390,90 @@ describe('CustomAgents', () => {
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining('tout son historique'))
     await waitFor(() => expect(api.deleteCustomAgent).toHaveBeenCalledWith('agent-2'))
     confirm.mockRestore()
+  })
+
+  it('creates a saved team and starts a collaboration with visible contributions', async () => {
+    const user = userEvent.setup()
+    const developer: CustomAgent = {
+      ...agent, id: 'agent-2', name: 'Développeur', modelName: 'qwen2.5-coder:7b',
+    }
+    const reviewer: CustomAgent = {
+      ...agent, id: 'agent-3', name: 'Réviseur', modelName: 'qwen3:4b',
+    }
+    vi.mocked(api.customAgents).mockResolvedValue([agent, developer, reviewer])
+    let completedRun: CustomAgentCollaborationRun | null = null
+    vi.mocked(api.startCustomAgentCollaboration).mockImplementation(async (teamId, task, workspace) => {
+      completedRun = {
+        id: 'run-1', teamId, task, status: 'Queued', currentStep: null, workspace,
+        createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z',
+        contributions: [], proposal: null, error: null,
+      }
+      return completedRun!
+    })
+    vi.mocked(api.customAgentTeamRun).mockImplementation(async () => ({
+      id: completedRun?.id ?? 'run-1', teamId: 'team-1', task: 'Créer une page.', status: 'Completed',
+      currentStep: null, workspace: null, createdAt: '2026-11-15T10:00:00Z',
+      updatedAt: '2026-11-15T10:01:00Z',
+      contributions: [
+        { agentId: 'agent-1', agentName: agent.name, role: 'Planner', modelName: 'qwen3:4b', content: 'Plan terminé.', createdAt: '2026-11-15T10:00:10Z' },
+        { agentId: 'agent-2', agentName: developer.name, role: 'Developer', modelName: developer.modelName, content: 'Code proposé.', createdAt: '2026-11-15T10:00:20Z' },
+        { agentId: 'agent-3', agentName: reviewer.name, role: 'Reviewer', modelName: reviewer.modelName, content: 'Revue terminée.', createdAt: '2026-11-15T10:00:30Z' },
+      ],
+      proposal: null, error: null,
+    }))
+
+    render(<CustomAgents />)
+    await user.click(await screen.findByRole('button', { name: 'Équipes' }))
+    await user.click(await screen.findByRole('button', { name: 'Nouvelle équipe' }))
+    await user.type(screen.getByRole('textbox', { name: 'Nom de l’équipe' }), 'Équipe React')
+    await user.selectOptions(screen.getByRole('combobox', { name: '1. Planificateur' }), agent.id)
+    await user.selectOptions(screen.getByRole('combobox', { name: '2. Développeur' }), developer.id)
+    await user.selectOptions(screen.getByRole('combobox', { name: '3. Réviseur' }), reviewer.id)
+    await user.click(screen.getByRole('button', { name: 'Enregistrer l’équipe' }))
+    await waitFor(() => expect(api.saveCustomAgentTeam).toHaveBeenCalledWith(
+      'Équipe React',
+      [
+        { agentId: agent.id, role: 'Planner', order: 0 },
+        { agentId: developer.id, role: 'Developer', order: 1 },
+        { agentId: reviewer.id, role: 'Reviewer', order: 2 },
+      ],
+      undefined,
+    ))
+    await user.type(screen.getByRole('textbox', { name: 'Demande' }), 'Créer une page.')
+    await user.click(screen.getByRole('button', { name: 'Lancer la collaboration' }))
+
+    expect(await screen.findByText('Plan terminé.')).toBeVisible()
+    expect(screen.getByText('Code proposé.')).toBeVisible()
+    expect(screen.getByText('Revue terminée.')).toBeVisible()
+    expect(api.startCustomAgentCollaboration).toHaveBeenCalledWith('team-1', 'Créer une page.', null, undefined)
+  })
+
+  it('creates a Studio project and starts its team run against that workspace', async () => {
+    const user = userEvent.setup()
+    const developer: CustomAgent = { ...agent, id: 'agent-2', name: 'Développeur' }
+    const reviewer: CustomAgent = { ...agent, id: 'agent-3', name: 'Réviseur' }
+    vi.mocked(api.customAgents).mockResolvedValue([agent, developer, reviewer])
+    render(<CustomAgents />)
+    await user.click(await screen.findByRole('button', { name: 'Équipes' }))
+    await user.click(await screen.findByRole('button', { name: 'Nouvelle équipe' }))
+    await user.type(screen.getByRole('textbox', { name: 'Nom de l’équipe' }), 'Équipe React')
+    await user.selectOptions(screen.getByRole('combobox', { name: '1. Planificateur' }), agent.id)
+    await user.selectOptions(screen.getByRole('combobox', { name: '2. Développeur' }), developer.id)
+    await user.selectOptions(screen.getByRole('combobox', { name: '3. Réviseur' }), reviewer.id)
+    await user.click(screen.getByRole('button', { name: 'Enregistrer l’équipe' }))
+    await waitFor(() => expect(api.saveCustomAgentTeam).toHaveBeenCalled())
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Projet Studio' }), '__new_project__')
+    await user.type(screen.getByRole('textbox', { name: 'Nom du projet' }), 'Task manager')
+    await user.click(screen.getByRole('button', { name: 'Créer le projet' }))
+    await waitFor(() => expect(api.createCustomAgentProject).toHaveBeenCalledWith(
+      'team-1', 'Task manager', 'React'))
+    expect(screen.getByRole('combobox', { name: 'Projet Studio' })).toHaveValue('project-1')
+
+    await user.type(screen.getByRole('textbox', { name: 'Demande' }), 'Créer les filtres de tâches.')
+    await user.click(screen.getByRole('button', { name: 'Lancer la collaboration' }))
+    await waitFor(() => expect(api.startCustomAgentCollaboration).toHaveBeenCalledWith(
+      'team-1', 'Créer les filtres de tâches.',
+      { kind: 'Studio', workspaceId: 'project-1', name: 'Task manager' }, undefined))
   })
 })

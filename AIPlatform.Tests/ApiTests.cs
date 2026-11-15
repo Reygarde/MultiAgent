@@ -35,6 +35,33 @@ public sealed class ApiTests
         Assert.True(paths.TryGetProperty("/api/agents", out _));
         Assert.True(paths.TryGetProperty("/api/models", out _));
         Assert.True(paths.TryGetProperty("/api/agents/run", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/runs", out _));
+    }
+
+    [Fact]
+    public async Task TeamEndpointRejectsInvalidRoleSequence()
+    {
+        using var factory = CreateFactory(new((_, _) => throw new InvalidOperationException("Must not call Ollama")));
+        using var client = factory.CreateClient();
+        using var response = await client.PostAsJsonAsync("/api/custom-agent-teams", new
+        {
+            name = "Invalid team",
+            members = Array.Empty<object>()
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Equal("application/problem+json", response.Content.Headers.ContentType!.MediaType);
+    }
+
+    [Fact]
+    public async Task NativeExternalProposalOutcomesAreForbiddenOutsideDesktop()
+    {
+        using var factory = CreateFactory(new((_, _) => throw new InvalidOperationException("Must not call Ollama")));
+        using var client = factory.CreateClient();
+        using var response = await client.PostAsJsonAsync(
+            "/api/custom-agents/00000000-0000-0000-0000-000000000001/conversations/00000000-0000-0000-0000-000000000002/proposals/00000000-0000-0000-0000-000000000003/native-outcome",
+            new { backupId = "0123456789abcdef0123456789abcdef", restored = false });
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]

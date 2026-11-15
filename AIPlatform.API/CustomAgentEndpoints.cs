@@ -1,4 +1,6 @@
 using AIPlatform.Core.Studio;
+using AIPlatform.API.Services;
+using AIPlatform.Infrastructure.Studio;
 using Microsoft.AspNetCore.Http.HttpResults;
 
 namespace AIPlatform.API;
@@ -168,6 +170,27 @@ public static class CustomAgentEndpoints
             .ProducesProblem(StatusCodes.Status400BadRequest)
             .ProducesProblem(StatusCodes.Status404NotFound);
 
+        app.MapPost("/api/custom-agents/{id:guid}/conversations/{conversationId:guid}/proposals/{proposalId:guid}/native-outcome",
+            async Task<Results<Ok<CustomAgentConversationResponse>, NotFound, ProblemHttpResult>> (
+                Guid id, Guid conversationId, Guid proposalId, RecordExternalProposalOutcomeRequest request,
+                ICustomAgentService agents, DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled)
+                return TypedResults.Problem(
+                    statusCode: StatusCodes.Status403Forbidden,
+                    title: "Native external-folder outcomes are available only in AIPlatform Studio Desktop.");
+            var conversation = await agents.RecordExternalProposalOutcomeAsync(
+                id, conversationId, proposalId, request.BackupId, request.Restored, token);
+            return conversation is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentConversationResponse.From(conversation));
+        }).WithName("RecordExternalCustomAgentProposalOutcome")
+            .WithSummary("Persist a completed native external-file apply or restore")
+            .WithDescription("Records only the result and recovery identifier. File access is performed exclusively by the Tauri desktop process.")
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status404NotFound);
+
         app.MapDelete("/api/custom-agents/{id:guid}/conversations/{conversationId:guid}",
             Results<NoContent, NotFound> (
                 Guid id, Guid conversationId, ICustomAgentService agents, CancellationToken token) =>
@@ -178,5 +201,228 @@ public static class CustomAgentEndpoints
                 : TypedResults.NotFound();
         }).WithName("DeleteCustomAgentConversation").WithSummary("Delete a custom-agent conversation")
             .WithDescription("The client must confirm before deleting conversation history.");
+
+        app.MapGet("/api/custom-agent-teams", (ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return TypedResults.Ok(agents.ListTeams().Select(CustomAgentTeamResponse.From).ToArray());
+        }).WithName("ListCustomAgentTeams").WithSummary("List saved custom-agent teams")
+            .WithDescription("Returns teams separately from system-agent mission workflows.");
+
+        app.MapPost("/api/custom-agent-teams",
+            async Task<Created<CustomAgentTeamResponse>> (
+                CustomAgentTeamRequest request, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var team = agents.SaveTeam(null, new(request.Name, request.Members))
+                ?? throw new InvalidOperationException("The new custom-agent team could not be saved.");
+            var response = CustomAgentTeamResponse.From(team);
+            return TypedResults.Created($"/api/custom-agent-teams/{team.Id}", response);
+        }).WithName("CreateCustomAgentTeam").WithSummary("Save a Planner, Developer, and Reviewer team")
+            .WithDescription("Each role uses the selected custom agent's own system instructions and installed Ollama model.")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPut("/api/custom-agent-teams/{id:guid}",
+            Results<Ok<CustomAgentTeamResponse>, NotFound> (
+                Guid id, CustomAgentTeamRequest request, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var team = agents.SaveTeam(id, new(request.Name, request.Members));
+            return team is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentTeamResponse.From(team));
+        }).WithName("UpdateCustomAgentTeam").WithSummary("Update a saved custom-agent team")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapDelete("/api/custom-agent-teams/{id:guid}",
+            Results<NoContent, NotFound> (Guid id, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return agents.DeleteTeam(id) ? TypedResults.NoContent() : TypedResults.NotFound();
+        }).WithName("DeleteCustomAgentTeam").WithSummary("Delete a saved custom-agent team")
+            .WithDescription("Existing collaboration run history remains in local storage.");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/projects",
+            async Task<Results<Created<MissionResponse>, NotFound>> (
+                Guid id, CreateCustomAgentProjectRequest request, ICustomAgentService agents,
+                IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!agents.ListTeams().Any(team => team.Id == id))
+                return TypedResults.NotFound();
+            if (!Enum.TryParse<CustomAgentProjectType>(request.ProjectType, true, out var projectType) ||
+                !Enum.IsDefined(projectType))
+                throw new StudioValidationException("Project type must be React or DotNet.");
+            var mission = await missions.CreateCustomAgentProjectAsync(request.Name, projectType, token);
+            return TypedResults.Created($"/api/missions/{mission.Id}", MissionResponse.From(mission));
+        }).WithName("CreateCustomAgentProject").WithSummary("Create a Studio project for a custom-agent team")
+            .WithDescription("Creates a trusted React/Vite or .NET 10 scaffold without queuing system agents or applying generated changes.")
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status429TooManyRequests);
+
+        app.MapGet("/api/studio/projects/{id:guid}/local-application",
+            IResult (Guid id, IMissionService missions, ILocalCommandExecutor commands, DesktopSession desktop) =>
+        {
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Local applications are available only in AIPlatform Studio Desktop on Windows.");
+            var mission = missions.Get(id);
+            if (mission is null || !TryGetLocalProjectType(mission, out var projectType))
+                return TypedResults.NotFound();
+            return TypedResults.Ok(LocalApplicationResponse.From(commands.GetApplication(id, projectType)));
+        }).WithName("GetStudioLocalApplication").WithSummary("Get the in-memory local application status")
+            .WithDescription("Reports only a server process owned by this Desktop backend; no server is restarted after a backend restart.");
+
+        app.MapPost("/api/studio/projects/{id:guid}/local-application/start",
+            async Task<IResult> (
+                Guid id, StartLocalApplicationRequest request, IMissionService missions,
+                ILocalCommandExecutor commands, DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Local applications are available only in AIPlatform Studio Desktop on Windows.");
+            var mission = missions.Get(id);
+            if (mission is null || !TryGetLocalProjectType(mission, out var projectType))
+                return TypedResults.NotFound();
+            if (!request.ExecutionAuthorized)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Explicit authorization to execute this trusted local project is required.");
+            var application = await commands.StartApplicationAsync(id, projectType, true, token);
+            return TypedResults.Ok(LocalApplicationResponse.From(application));
+        }).WithName("StartStudioLocalApplication").WithSummary("Start a trusted Studio development server")
+            .WithDescription("Starts only the fixed npm run dev or dotnet run command in the selected workspace. Project scripts can execute arbitrary local code; Job Objects and timeouts are process controls, not security isolation.")
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/studio/projects/{id:guid}/local-application/stop",
+            async Task<IResult> (
+                Guid id, IMissionService missions, ILocalCommandExecutor commands,
+                DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Local applications are available only in AIPlatform Studio Desktop on Windows.");
+            var mission = missions.Get(id);
+            if (mission is null || !TryGetLocalProjectType(mission, out var projectType))
+                return TypedResults.NotFound();
+            var application = await commands.StopApplicationAsync(id, token) ??
+                commands.GetApplication(id, projectType);
+            return TypedResults.Ok(LocalApplicationResponse.From(application));
+        }).WithName("StopStudioLocalApplication").WithSummary("Stop the owned local development server");
+
+        app.MapGet("/api/custom-agent-teams/{id:guid}/runs",
+            Results<Ok<CustomAgentCollaborationRunResponse[]>, NotFound> (
+                Guid id, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!agents.ListTeams().Any(team => team.Id == id))
+                return TypedResults.NotFound();
+            return TypedResults.Ok(agents.ListCollaborationRuns(id)
+                .Select(CustomAgentCollaborationRunResponse.From).ToArray());
+        }).WithName("ListCustomAgentCollaborationRuns").WithSummary("List saved collaboration runs");
+
+        app.MapGet("/api/custom-agent-teams/{id:guid}/runs/{runId:guid}",
+            Results<Ok<CustomAgentCollaborationRunResponse>, NotFound> (
+                Guid id, Guid runId, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var run = agents.GetCollaborationRun(id, runId);
+            return run is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentCollaborationRunResponse.From(run));
+        }).WithName("GetCustomAgentCollaborationRun").WithSummary("Get a collaboration run and its contributions");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/runs",
+            Results<Accepted<CustomAgentCollaborationRunResponse>, NotFound> (
+                Guid id, StartCustomAgentCollaborationRequest request,
+                ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (request.ExternalFiles?.Any(file => file is null) == true)
+                throw new StudioValidationException("External workspace snapshots cannot contain null files.");
+            var run = agents.StartCollaboration(id, request.Task, request.Workspace,
+                request.ExternalFiles?.Select(file => new CustomAgentWorkspaceFile(file.Path, file.Content)).ToArray(),
+                request.Mode, request.WorkspaceAuthorized, request.ExecutionAuthorized);
+            return run is null
+                ? TypedResults.NotFound()
+                : TypedResults.Accepted($"/api/custom-agent-teams/{id}/runs/{run.Id}",
+                    CustomAgentCollaborationRunResponse.From(run));
+        }).WithName("StartCustomAgentCollaboration").WithSummary("Start a sequential custom-agent collaboration")
+            .WithDescription("Uses the existing Planner, Developer, Reviewer workflow. Autonomous mode is restricted to Studio projects and Desktop local-execution consent.")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/runs/{runId:guid}/cancel",
+            Results<NoContent, NotFound, Conflict> (
+                Guid id, Guid runId, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var run = agents.GetCollaborationRun(id, runId);
+            if (run is null)
+                return TypedResults.NotFound();
+            return agents.CancelCollaboration(id, runId)
+                ? TypedResults.NoContent()
+                : TypedResults.Conflict();
+        }).WithName("CancelCustomAgentCollaboration").WithSummary("Cancel a queued or running collaboration");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/runs/{runId:guid}/decision",
+            async Task<Results<Ok<CustomAgentCollaborationRunResponse>, NotFound>> (
+                Guid id, Guid runId, DecideCustomAgentCollaborationRequest request,
+                ICustomAgentService agents, CancellationToken token) =>
+        {
+            var run = await agents.DecideCollaborationProposalAsync(id, runId, request.Approved, token);
+            return run is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentCollaborationRunResponse.From(run));
+        }).WithName("DecideCustomAgentCollaborationProposal")
+            .WithSummary("Apply or refuse a completed Studio collaboration proposal")
+            .WithDescription("Applying is restricted to Studio workspaces and revalidates the workspace before writing.")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/runs/{runId:guid}/restore",
+            async Task<Results<Ok<CustomAgentCollaborationRunResponse>, NotFound, ProblemHttpResult>> (
+                Guid id, Guid runId, ICustomAgentService agents, DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Autonomous restore is available only in AIPlatform Studio Desktop.");
+            var run = await agents.RestoreAutonomousChangesAsync(id, runId, token);
+            return run is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentCollaborationRunResponse.From(run));
+        }).WithName("RestoreAutonomousCustomAgentRun")
+            .WithSummary("Restore Studio files changed by an autonomous run")
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/runs/{runId:guid}/native-outcome",
+            async Task<Results<Ok<CustomAgentCollaborationRunResponse>, NotFound, ProblemHttpResult>> (
+                Guid id, Guid runId, RecordExternalProposalOutcomeRequest request,
+                ICustomAgentService agents, DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled)
+                return TypedResults.Problem(
+                    statusCode: StatusCodes.Status403Forbidden,
+                    title: "Native external-folder outcomes are available only in AIPlatform Studio Desktop.");
+            var run = await agents.RecordExternalCollaborationOutcomeAsync(
+                id, runId, request.BackupId, request.Restored, token);
+            return run is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentCollaborationRunResponse.From(run));
+        }).WithName("RecordNativeCustomAgentCollaborationOutcome")
+            .WithSummary("Persist an external-folder apply or restore performed by Tauri")
+            .WithDescription("The Tauri process performs all file access using its selected-folder authorization.")
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden);
+    }
+
+    private static bool TryGetLocalProjectType(MissionSnapshot mission, out CustomAgentProjectType projectType)
+    {
+        projectType = mission.TemplateId switch
+        {
+            AgentReactTemplate.Id => CustomAgentProjectType.React,
+            AgentDotNetTemplate.Id => CustomAgentProjectType.DotNet,
+            _ => (CustomAgentProjectType)(-1)
+        };
+        return mission.HasWorkspace && !mission.Deleted && !mission.Archived && Enum.IsDefined(projectType);
     }
 }

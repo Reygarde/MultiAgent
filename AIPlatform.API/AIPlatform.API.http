@@ -49,6 +49,18 @@ Content-Type: application/json
 ### Remplacer par l'identifiant retourne par POST /api/missions
 @missionId = 00000000-0000-0000-0000-000000000000
 
+### Creer les agents personnalises dans l'interface, puis remplacer cet identifiant
+@customTeamId = 00000000-0000-0000-0000-000000000000
+
+### Creer un projet React pour une equipe sans lancer le generateur systeme
+POST {{AIPlatform.API_HostAddress}}/api/custom-agent-teams/{{customTeamId}}/projects
+Content-Type: application/json
+
+{
+  "name": "Gestion de taches",
+  "projectType": "React"
+}
+
 ### Preview (Desktop uniquement) : remplacer le jeton et les identifiants
 @desktopToken = REPLACE_WITH_SESSION_TOKEN
 @previewId = 00000000-0000-0000-0000-000000000000
@@ -135,6 +147,26 @@ GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/analysis
 
 ### Export ZIP du projet inactif (refuse les secrets detectes)
 GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/export
+
+### Application locale (Desktop uniquement) : remplacer par l'identifiant d'un scaffold React/.NET custom-agent
+@studioProjectId = 00000000-0000-0000-0000-000000000000
+
+### Etat en memoire du serveur local
+GET {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/local-application
+Authorization: Bearer {{desktopToken}}
+
+### Demarrer apres verification que le projet est fiable
+POST {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/local-application/start
+Authorization: Bearer {{desktopToken}}
+Content-Type: application/json
+
+{
+  "executionAuthorized": true
+}
+
+### Arreter le serveur et son arbre de processus
+POST {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/local-application/stop
+Authorization: Bearer {{desktopToken}}
 
 ### Apercu texte d'un fichier valide
 GET {{AIPlatform.API_HostAddress}}/api/workspaces/{{missionId}}/file?path=src%2FApp%2FProgram.cs
@@ -245,6 +277,8 @@ Content-Type: application/json
 
 @customAgentId = 00000000-0000-0000-0000-000000000000
 @customConversationId = 00000000-0000-0000-0000-000000000000
+@customProposalId = 00000000-0000-0000-0000-000000000000
+@nativeBackupId = 00000000000000000000000000000000
 
 ### Lire un agent personnalise
 GET {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}
@@ -280,8 +314,63 @@ Content-Type: application/json
   "message": "Explique la différence entre une interface et une classe abstraite en C#."
 }
 
+### Desktop uniquement : enregistrer l'application native après approbation (remplacer le backup id retourné par Tauri)
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}/proposals/{{customProposalId}}/native-outcome
+Authorization: Bearer {{desktopToken}}
+Content-Type: application/json
+
+{
+  "backupId": "{{nativeBackupId}}",
+  "restored": false
+}
+
+### Desktop uniquement : enregistrer une restauration native
+POST {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}/proposals/{{customProposalId}}/native-outcome
+Authorization: Bearer {{desktopToken}}
+Content-Type: application/json
+
+{
+  "backupId": "{{nativeBackupId}}",
+  "restored": true
+}
+
 ### Supprimer une conversation (confirmation attendue dans l'interface)
 DELETE {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}/conversations/{{customConversationId}}
 
 ### Supprimer un agent et ses conversations (confirmation attendue dans l'interface)
 DELETE {{AIPlatform.API_HostAddress}}/api/custom-agents/{{customAgentId}}
+
+### Equipes d'agents personnalises
+GET {{AIPlatform.API_HostAddress}}/api/custom-agent-teams
+
+### Creer une equipe : remplacer les IDs par trois agents personnalises existants
+POST {{AIPlatform.API_HostAddress}}/api/custom-agent-teams
+Content-Type: application/json
+
+{
+  "name": "Equipe React",
+  "members": [
+    { "agentId": "00000000-0000-0000-0000-000000000001", "role": "Planner", "order": 0 },
+    { "agentId": "00000000-0000-0000-0000-000000000002", "role": "Developer", "order": 1 },
+    { "agentId": "00000000-0000-0000-0000-000000000003", "role": "Reviewer", "order": 2 }
+  ]
+}
+
+@customTeamId = 00000000-0000-0000-0000-000000000000
+
+### Demarrer une collaboration; aucun changement n'est applique automatiquement
+POST {{AIPlatform.API_HostAddress}}/api/custom-agent-teams/{{customTeamId}}/runs
+Content-Type: application/json
+
+{
+  "task": "Creer une page React.",
+  "workspace": null
+}
+
+@customRunId = 00000000-0000-0000-0000-000000000000
+
+### Suivre l'etat et les contributions de chaque agent
+GET {{AIPlatform.API_HostAddress}}/api/custom-agent-teams/{{customTeamId}}/runs/{{customRunId}}
+
+### Historique persiste de l'equipe
+GET {{AIPlatform.API_HostAddress}}/api/custom-agent-teams/{{customTeamId}}/runs

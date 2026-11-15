@@ -1,10 +1,13 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { Bot, Copy, FileText, FolderOpen, LoaderCircle, MessageSquarePlus, Pencil, Plus, Search, Send, Trash2 } from 'lucide-react'
 import { api, errorMessage } from './api'
 import { Markdown } from './Markdown'
+import { CustomAgentTeams } from './CustomAgentTeams'
 import type {
   CustomAgent, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft,
-  CustomAgentFileChange, CustomAgentWorkspace, CustomAgentWorkspaceFile, Mission, WorkspaceFile,
+  CustomAgentFileChange, CustomAgentProposal, CustomAgentWorkspace, CustomAgentWorkspaceFile, Mission,
+  NativeExternalFolderSelection, WorkspaceFile,
 } from './types'
 
 const emptyDraft: CustomAgentDraft = { name: '', description: '', systemPrompt: '', modelName: '' }
@@ -58,7 +61,8 @@ function formatDate(value: string) {
   return Number.isNaN(date.getTime()) ? 'Date indisponible' : date.toLocaleString('fr-FR')
 }
 
-export function CustomAgents() {
+export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProject?: (id: string) => void } = {}) {
+  const [activeView, setActiveView] = useState<'agents' | 'teams'>('agents')
   const [agents, setAgents] = useState<CustomAgent[]>([])
   const [models, setModels] = useState<string[]>([])
   const [projects, setProjects] = useState<Mission[]>([])
@@ -77,6 +81,8 @@ export function CustomAgents() {
   const [projectError, setProjectError] = useState<string | null>(null)
   const [externalFiles, setExternalFiles] = useState<CustomAgentWorkspaceFile[]>([])
   const [externalAuthorized, setExternalAuthorized] = useState(false)
+  const [nativeGrantId, setNativeGrantId] = useState<string | null>(null)
+  const [externalWriteAuthorized, setExternalWriteAuthorized] = useState(false)
   const [workspaceFileList, setWorkspaceFileList] = useState<WorkspaceFile[]>([])
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<CustomAgentWorkspaceFile[]>([])
   const [workspaceSearch, setWorkspaceSearch] = useState('')
@@ -87,12 +93,40 @@ export function CustomAgents() {
   const [decisionBusy, setDecisionBusy] = useState(false)
   const folderInput = useRef<HTMLInputElement>(null)
   const sendController = useRef<AbortController | null>(null)
+  const nativeGrantRef = useRef<string | null>(null)
   const sendingRef = useRef(false)
+  const desktopApp = isTauri()
   const selected = agents.find(agent => agent.id === selectedId) ?? null
   const activeWorkspace = conversation?.workspace ?? null
   const unavailableModel = Boolean(selected && !modelError && !models.includes(selected.modelName))
 
+  function canApplyExternalProposal(proposal: CustomAgentProposal) {
+    return desktopApp && activeWorkspace?.kind === 'External' && nativeGrantId !== null &&
+      proposal.workspace?.authorizationId === nativeGrantId && externalWriteAuthorized
+  }
+
+  function proposalApplyReason(proposal: CustomAgentProposal) {
+    if (proposal.workspace?.kind !== 'External') return proposal.applyReason
+    if (!desktopApp) return 'Écriture disponible uniquement dans l’application Desktop.'
+    if (!nativeGrantId) return 'Resélectionnez le dossier Windows.'
+    if (!externalWriteAuthorized) return 'Autorisez les modifications pour ce dossier.'
+    if (proposal.workspace.authorizationId !== nativeGrantId)
+      return 'Cette proposition appartient à une sélection antérieure; demandez-en une nouvelle.'
+    return proposal.applyReason
+  }
+
+  function releaseNativeGrant() {
+    const grantId = nativeGrantRef.current
+    nativeGrantRef.current = null
+    setNativeGrantId(null)
+    setExternalWriteAuthorized(false)
+    if (desktopApp && grantId)
+      void invoke('release_external_workspace', { grantId })
+        .catch(error => setWorkspaceError(errorMessage(error)))
+  }
+
   function resetWorkspaceBrowser() {
+    releaseNativeGrant()
     setExternalFiles([])
     setExternalAuthorized(false)
     setWorkspaceFileList([])
@@ -124,6 +158,10 @@ export function CustomAgents() {
     return () => {
       active = false
       sendController.current?.abort()
+      const grantId = nativeGrantRef.current
+      nativeGrantRef.current = null
+      if (grantId && isTauri())
+        void invoke('release_external_workspace', { grantId }).catch(() => undefined)
     }
   }, [])
 
@@ -265,6 +303,7 @@ export function CustomAgents() {
     try {
       const updated = await api.setCustomAgentWorkspace(selected.id, conversation.id, workspace)
       setConversation(updated)
+      releaseNativeGrant()
       setExternalFiles([])
       setExternalAuthorized(false)
       setWorkspaceFileList([])
@@ -279,6 +318,7 @@ export function CustomAgents() {
     const selectedFiles = Array.from(event.currentTarget.files ?? [])
     event.currentTarget.value = ''
     if (!selected || !conversation || selectedFiles.length === 0) return
+    releaseNativeGrant()
     setWorkspaceBusy(true)
     setWorkspaceError(null)
     setExternalFiles([])
@@ -324,6 +364,53 @@ export function CustomAgents() {
       setWorkspaceError(skipped > 0
         ? `${skipped} fichier(s) ignoré(s) selon les limites et règles de sécurité.`
         : null)
+    } catch (error) { setWorkspaceError(errorMessage(error)) }
+    finally { setWorkspaceBusy(false) }
+  }
+
+  async function chooseNativeFolder() {
+    if (!selected || !conversation || workspaceBusy || sending) return
+    setWorkspaceBusy(true)
+    setWorkspaceError(null)
+    try {
+      const selection = await invoke<NativeExternalFolderSelection | null>('select_external_workspace')
+      if (!selection) return
+      try {
+        const updated = await api.setCustomAgentWorkspace(selected.id, conversation.id, {
+          kind: 'External', workspaceId: null, name: selection.name,
+          authorizationId: selection.grantId,
+        })
+        releaseNativeGrant()
+        nativeGrantRef.current = selection.grantId
+        setNativeGrantId(selection.grantId)
+        setExternalWriteAuthorized(false)
+        setConversation(updated)
+        setExternalFiles(selection.files)
+        setExternalAuthorized(false)
+        setWorkspaceSnapshot(selection.files)
+        setWorkspaceFileList(selection.files.map(file => ({
+          path: file.path, size: new TextEncoder().encode(file.content).length,
+        })))
+        setSelectedFile(null)
+        setWorkspaceResults([])
+      } catch (error) {
+        await invoke('release_external_workspace', { grantId: selection.grantId })
+        throw error
+      }
+    } catch (error) { setWorkspaceError(errorMessage(error)) }
+    finally { setWorkspaceBusy(false) }
+  }
+
+  async function enableExternalWrites() {
+    if (!nativeGrantId || !desktopApp || workspaceBusy || sending) return
+    if (!window.confirm(
+      `Autoriser les modifications approuvées dans « ${activeWorkspace?.name} » pour cette session ?\n\nChaque diff demandera encore une confirmation. L’agent ne peut pas écrire directement.`))
+      return
+    setWorkspaceBusy(true)
+    setWorkspaceError(null)
+    try {
+      await invoke('enable_external_workspace_writes', { grantId: nativeGrantId })
+      setExternalWriteAuthorized(true)
     } catch (error) { setWorkspaceError(errorMessage(error)) }
     finally { setWorkspaceBusy(false) }
   }
@@ -384,21 +471,93 @@ export function CustomAgents() {
     finally { setWorkspaceBusy(false) }
   }
 
-  async function decideProposal(proposalId: string, changes: CustomAgentFileChange[], approved: boolean) {
+  async function decideProposal(
+    proposalId: string, changes: CustomAgentFileChange[], approved: boolean, authorizationId?: string | null,
+  ) {
     if (!selected || !conversation || decisionBusy) return
+    const external = activeWorkspace?.kind === 'External'
+    if (approved && external &&
+        (!desktopApp || !nativeGrantId || !externalWriteAuthorized)) {
+      setWorkspaceError(!desktopApp
+        ? 'L’écriture des dossiers externes est disponible uniquement dans AIPlatform Studio Desktop.'
+        : !nativeGrantId
+          ? 'Resélectionnez le dossier dans le sélecteur natif avant d’appliquer.'
+          : 'Autorisez d’abord les modifications pour ce dossier.')
+      return
+    }
+    if (approved && external && authorizationId !== nativeGrantId) {
+      setWorkspaceError('Cette proposition appartient à une autre sélection du dossier. Demandez une nouvelle proposition avant de l’appliquer.')
+      return
+    }
     if (approved && !window.confirm(
-      `Appliquer ${changes.length} modification(s) au projet Studio ?\n\n${changes.map(change => change.path).join('\n')}`))
+      `Appliquer ${changes.length} opération(s) ${external ? `au dossier « ${activeWorkspace.name} »` : 'au projet Studio'} ?\n\nUne sauvegarde sera créée avant l’écriture. Les suppressions seront également restaurables.\n\n${changes.map(change => `${change.operation.toUpperCase()} · ${change.path}`).join('\n')}`))
       return
     setDecisionBusy(true)
     setError(null)
     try {
-      const updated = await api.decideCustomAgentProposal(selected.id, conversation.id, proposalId, approved)
+      let updated: CustomAgentConversation
+      if (approved && external && nativeGrantId) {
+        const backupId = await invoke<string>('apply_external_workspace_proposal', {
+          grantId: nativeGrantId, proposalId,
+          changes: changes.map(change => ({
+            path: change.path, before: change.before, after: change.after, operation: change.operation,
+          })),
+        })
+        updated = await api.recordExternalProposalOutcome(
+          selected.id, conversation.id, proposalId, backupId, false)
+        const updatedFiles = externalFiles.filter(file =>
+          !changes.some(change => change.path === file.path && change.operation === 'delete'))
+        for (const change of changes) {
+          if (change.after === null || change.operation === 'delete') continue
+          const index = updatedFiles.findIndex(file => file.path === change.path)
+          if (index >= 0) updatedFiles[index] = { ...updatedFiles[index], content: change.after }
+          else updatedFiles.push({ path: change.path, content: change.after })
+        }
+        setExternalFiles(updatedFiles)
+        setWorkspaceSnapshot(updatedFiles)
+        setWorkspaceFileList(updatedFiles.map(file => ({
+          path: file.path, size: new TextEncoder().encode(file.content).length,
+        })))
+      } else {
+        updated = await api.decideCustomAgentProposal(selected.id, conversation.id, proposalId, approved)
+      }
       setConversation(updated)
       setConversations(current => [summaryOf(updated), ...current.filter(item => item.id !== updated.id)])
     } catch (error) { setError(errorMessage(error)) }
     finally { setDecisionBusy(false) }
   }
 
+  async function restoreExternalProposal(proposalId: string, backupId: string, changes: CustomAgentFileChange[]) {
+    if (!selected || !conversation || !nativeGrantId || !externalWriteAuthorized || decisionBusy) return
+    if (!window.confirm(
+      `Restaurer les versions précédentes de ${changes.length} fichier(s) dans « ${activeWorkspace?.name} » ?\n\nLa restauration est refusée si les fichiers ont changé depuis l’application.`))
+      return
+    setDecisionBusy(true)
+    setError(null)
+    try {
+      await invoke('restore_external_workspace_proposal', { grantId: nativeGrantId, backupId })
+      const updated = await api.recordExternalProposalOutcome(
+        selected.id, conversation.id, proposalId, backupId, true)
+      setConversation(updated)
+      setConversations(current => [summaryOf(updated), ...current.filter(item => item.id !== updated.id)])
+      const restoredFiles = externalFiles.map(file => {
+        const change = changes.find(item => item.path === file.path)
+        return change?.operation !== 'create' && change?.before !== null && change?.before !== undefined
+          ? { ...file, content: change.before } : file
+      }).filter(file => !changes.some(change => change.path === file.path && change.operation === 'create'))
+      for (const change of changes) {
+        if (change.operation === 'delete' && change.before !== null &&
+            !restoredFiles.some(file => file.path === change.path))
+          restoredFiles.push({ path: change.path, content: change.before })
+      }
+      setExternalFiles(restoredFiles)
+      setWorkspaceSnapshot(restoredFiles)
+      setWorkspaceFileList(restoredFiles.map(file => ({
+        path: file.path, size: new TextEncoder().encode(file.content).length,
+      })))
+    } catch (error) { setError(errorMessage(error)) }
+    finally { setDecisionBusy(false) }
+  }
   async function deleteConversation(item: CustomAgentConversationSummary) {
     if (!selected || !window.confirm(`Supprimer « ${item.title} » et ses messages ?`)) return
     setError(null)
@@ -444,15 +603,26 @@ export function CustomAgents() {
     <header className="panel-heading custom-agents-heading">
       <div><h2><Bot size={16} /> Agents personnalisés</h2>
         <p>Chat isolé par défaut. Un workspace explicitement choisi peut fournir un instantané de fichiers texte; aucune commande n’est exécutée.</p></div>
-      <button className="button primary" onClick={startCreate} disabled={saving || sending}>
-        <Plus size={14} /> Créer un agent</button>
+      <div className="custom-agent-actions">
+        <button className={`button ${activeView === 'agents' ? 'primary' : 'secondary'}`}
+          onClick={() => setActiveView('agents')}>Agents</button>
+        <button className={`button ${activeView === 'teams' ? 'primary' : 'secondary'}`}
+          onClick={() => setActiveView('teams')}>Équipes</button>
+        {activeView === 'agents' && <button className="button primary" onClick={startCreate} disabled={saving || sending}>
+          <Plus size={14} /> Créer un agent</button>}
+      </div>
     </header>
     {error && <div role="alert" className="notice danger">{error}</div>}
     {modelError && <div role="alert" className="notice warning">Liste Ollama indisponible : {modelError}
       <button className="text-button" disabled={modelsLoading} onClick={() => void retryModels()}>
         {modelsLoading ? 'Vérification…' : 'Réessayer'}</button>
     </div>}
-    {loading ? <div className="loading"><LoaderCircle size={16} /> Chargement des agents personnalisés…</div>
+    {activeView === 'teams'
+      ? <CustomAgentTeams agents={agents} projects={projects} desktopApp={desktopApp}
+        onProjectCreated={project => setProjects(current =>
+          [project, ...current.filter(item => item.id !== project.id)])}
+        onOpenProject={onOpenProject} />
+      : loading ? <div className="loading"><LoaderCircle size={16} /> Chargement des agents personnalisés…</div>
       : <div className="custom-agent-layout">
         <aside className="custom-agent-sidebar" aria-label="Agents personnalisés enregistrés">
           {agents.length === 0 && <div className="empty compact"><Bot size={22} />
@@ -504,10 +674,13 @@ export function CustomAgents() {
               <div className="custom-workspace-heading">
                 <div><strong>Workspace de la conversation</strong>
                   <span>{activeWorkspace
-                    ? `${activeWorkspace.name} · ${activeWorkspace.kind === 'External' ? 'lecture seule' : 'projet Studio'}`
+                    ? `${activeWorkspace.name} · ${activeWorkspace.kind === 'External'
+                      ? desktopApp && nativeGrantId ? 'dossier Windows autorisé pour cette session' : 'lecture seule'
+                      : 'projet Studio'}`
                     : 'Aucun · chat simple'}</span></div>
                 <span className="badge quiet">{activeWorkspace?.kind === 'External'
-                  ? 'Lecture seule' : activeWorkspace?.kind === 'Studio' ? 'Modifications avec approbation' : 'Sans fichiers'}</span>
+                  ? externalWriteAuthorized ? 'Écriture avec approbation' : 'Lecture seule'
+                  : activeWorkspace?.kind === 'Studio' ? 'Modifications avec approbation' : 'Sans fichiers'}</span>
               </div>
               <div className="custom-workspace-controls">
                 <label>Projet Studio
@@ -527,8 +700,8 @@ export function CustomAgents() {
                   </select>
                 </label>
                 <button className="button secondary" type="button" disabled={workspaceBusy || sending}
-                  onClick={() => folderInput.current?.click()}>
-                  <FolderOpen size={14} /> Choisir un dossier externe
+                  onClick={() => desktopApp ? void chooseNativeFolder() : folderInput.current?.click()}>
+                  <FolderOpen size={14} /> {desktopApp ? 'Choisir un dossier Windows' : 'Choisir un dossier externe'}
                 </button>
                 <input ref={element => {
                   folderInput.current = element
@@ -539,14 +712,24 @@ export function CustomAgents() {
               {projectError && <p role="alert" className="notice warning">
                 Liste des projets indisponible : {projectError}</p>}
               {activeWorkspace?.kind === 'External' && <>
-                <p className="muted small">L’application reçoit uniquement les fichiers texte admissibles sélectionnés.
-                  Le contexte est limité à 80 fichiers et 24 Ko. Le sélecteur WebView ne fournit pas de handle Windows permettant de vérifier les liens symboliques ou jonctions; l’écriture externe reste donc désactivée. Aucun chemin absolu n’est conservé.</p>
+                <p className="muted small">{desktopApp
+                  ? 'Le dossier a été sélectionné par le sélecteur Windows natif. Seuls les fichiers texte vérifiés (80 fichiers maximum, 24 Ko) sont transmis à Ollama; aucun chemin absolu ne quitte Tauri.'
+                  : 'Le navigateur transmet uniquement un instantané de fichiers texte (80 fichiers maximum, 24 Ko). L’écriture externe n’est disponible que dans AIPlatform Studio Desktop.'}</p>
+                {desktopApp && !nativeGrantId && <button className="button secondary" type="button"
+                  onClick={() => void chooseNativeFolder()} disabled={workspaceBusy || sending}>
+                  <FolderOpen size={14} /> Resélectionner le dossier Windows</button>}
+                {desktopApp && nativeGrantId && !externalWriteAuthorized && <button className="button secondary" type="button"
+                  onClick={() => void enableExternalWrites()} disabled={workspaceBusy || sending}>
+                  Autoriser les modifications pour cette session</button>}
+                {desktopApp && externalWriteAuthorized && <p className="notice warning">
+                  Modifications autorisées pour cette session. Chaque proposition exige encore une confirmation et crée une sauvegarde.</p>}
+                <p className="muted small">Vérification locale désactivée : l’exécuteur contrôlé disponible est réservé à Docker. Les commandes de build/test peuvent lancer du code du projet et Studio ne dispose pas ici d’un exécuteur local avec arrêt fiable de tous les processus enfants.</p>
                 <label className="workspace-consent">
                   <input type="checkbox" checked={externalAuthorized} disabled={!externalFiles.length || sending}
                     onChange={event => setExternalAuthorized(event.target.checked)} />
                   J’autorise l’envoi de cet instantané à Ollama local pour cette conversation.
                 </label>
-                {!externalFiles.length && <button className="button secondary" type="button"
+                {!desktopApp && !externalFiles.length && <button className="button secondary" type="button"
                   onClick={() => folderInput.current?.click()} disabled={workspaceBusy || sending}>
                   <FolderOpen size={14} /> Resélectionner le dossier
                 </button>}
@@ -584,7 +767,7 @@ export function CustomAgents() {
                     </details>}
                   </div>
                 </div>
-                <p className="muted small">Tests désactivés dans cette conversation : l’exécuteur existant est réservé aux missions approuvées dans Docker. Aucun shell local ou script de projet n’est lancé ici.</p>
+                <p className="muted small">Vérification locale désactivée : le seul exécuteur existant passe par Docker et n’est pas utilisé ici. Studio ne dispose pas encore d’un exécuteur local isolant les processus enfants; aucun build ni script du projet ne sera lancé.</p>
               </>}
               {activeWorkspace?.kind === 'External' && workspaceFileList.length > 0 && <>
                 <div className="custom-workspace-browser">
@@ -644,22 +827,41 @@ export function CustomAgents() {
                         : <p>{item.content}</p>}
                       {item.proposal && <section className="custom-agent-proposal">
                         <header><strong>Proposition · {item.proposal.status}</strong>
-                          <span>{item.proposal.changes.length} fichier(s)</span></header>
+                          <span>{item.proposal.changes.length} opération(s)</span></header>
                         {item.proposal.changes.map(change => <details key={change.path} className="proposal-change">
-                          <summary>{change.path} — {change.summary}</summary>
-                          <div><strong>Avant</strong><pre>{change.before ?? '(nouveau fichier)'}</pre></div>
-                          <div><strong>Après</strong><pre>{change.after}</pre></div>
+                          <summary>{change.operation === 'create' ? 'Création' : change.operation === 'delete'
+                            ? 'Suppression' : 'Modification'} · {change.path} — {change.summary}</summary>
+                          {change.operation !== 'create' && <div><strong>Avant</strong>
+                            <pre>{change.before ?? '(absent)'}</pre></div>}
+                          {change.operation !== 'delete' && <div><strong>Après</strong>
+                            <pre>{change.after ?? '(absent)'}</pre></div>}
                         </details>)}
                         {item.proposal.status === 'Pending' && <div className="custom-agent-actions">
-                          <button className="button primary" disabled={!item.proposal.canApply || decisionBusy || sending}
-                            onClick={() => void decideProposal(item.proposal!.id, item.proposal!.changes, true)}>
-                            {decisionBusy ? 'Application…' : 'Appliquer au projet Studio'}
+                          <button className="button primary" disabled={
+                            !(item.proposal.canApply || canApplyExternalProposal(item.proposal)) ||
+                            decisionBusy || sending}
+                            onClick={() => void decideProposal(item.proposal!.id, item.proposal!.changes, true,
+                              item.proposal!.workspace?.authorizationId)}>
+                            {decisionBusy ? 'Application…' : item.proposal.workspace?.kind === 'External'
+                              ? 'Appliquer au dossier autorisé' : 'Appliquer au projet Studio'}
                           </button>
-                          {!item.proposal.canApply && <span className="muted small">{item.proposal.applyReason}</span>}
+                          {!item.proposal.canApply && !canApplyExternalProposal(item.proposal) &&
+                            <span className="muted small">{proposalApplyReason(item.proposal)}</span>}
                           <button className="button secondary" disabled={decisionBusy || sending}
                             onClick={() => void decideProposal(item.proposal!.id, item.proposal!.changes, false)}>
                             Refuser</button>
                         </div>}
+                        {item.proposal.status === 'Applied' && item.proposal.workspace?.kind === 'External' &&
+                          item.proposal.externalBackupId && <div className="custom-agent-actions">
+                            {item.proposal.externalRestoredAt
+                              ? <span className="muted small">Restauré le {formatDate(item.proposal.externalRestoredAt)}</span>
+                              : nativeGrantId && externalWriteAuthorized && activeWorkspace?.kind === 'External'
+                                ? <button className="button secondary" disabled={decisionBusy || sending}
+                                  onClick={() => void restoreExternalProposal(item.proposal!.id,
+                                    item.proposal!.externalBackupId!, item.proposal!.changes)}>
+                                  Restaurer les versions précédentes</button>
+                                : <span className="muted small">Resélectionnez le dossier autorisé pour restaurer cette sauvegarde.</span>}
+                          </div>}
                       </section>}
                     </article>)}
                     {sending && <p className="loading" aria-live="polite"><LoaderCircle size={15} /> Génération de la réponse…</p>}

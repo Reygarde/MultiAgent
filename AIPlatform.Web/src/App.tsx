@@ -325,7 +325,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
           <p>{agent.description}</p><div className="tags">{agent.capabilities.map(capability => <span key={capability}>{capability}</span>)}</div>
           <p className="muted">Outils : {agent.allowedTools?.join(', ') || 'aucun'}</p>
           <div className="card-bottom"><Cpu size={14} /><span>{models.find(model => model.id === agent.modelId)?.name ?? agent.modelId}</span></div>
-        </article>)}</div><CustomAgents /></>}
+        </article>)}</div><CustomAgents onOpenProject={id => { setSelectedId(id); setPage('Projects') }} /></>}
 
         {page === 'Models' && <><ConfigurationEditor mode="models" saved={refreshCatalog} />{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
           <div className="cards-grid">{models.map(model => {
