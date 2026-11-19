@@ -5,7 +5,7 @@ using AIPlatform.Core.Studio;
 
 namespace AIPlatform.Infrastructure.Studio;
 
-public sealed partial class ProjectExport(IWorkspaceStore workspaces, StudioOptions options) : IProjectExport
+public sealed partial class ProjectExport(IWorkspaceStore workspaces, StudioOptions options, IMissionService? missions = null) : IProjectExport
 {
     public async Task<byte[]> CreateAsync(Guid workspaceId, CancellationToken cancellationToken)
     {
@@ -20,7 +20,7 @@ public sealed partial class ProjectExport(IWorkspaceStore workspaces, StudioOpti
             if (!ReactTemplate.IsTrustedLockfile(content.Path, content.Content) && ContainsPotentialSecret(content.Content))
                 throw new StudioValidationException("Export blocked: a possible credential was found in project sources. Remove it before exporting.");
             size += Encoding.UTF8.GetByteCount(content.Content);
-            if (size > options.MaxProjectBytes)
+            if (size > (missions?.Get(workspaceId)?.Sizing?.MaxProjectBytes ?? options.MaxProjectBytes))
                 throw new StudioValidationException("Export exceeds the configured project size limit.");
             files.Add(content);
         }

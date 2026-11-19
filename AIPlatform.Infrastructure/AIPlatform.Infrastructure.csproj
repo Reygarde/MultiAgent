@@ -5,6 +5,7 @@
     <ProjectReference Include="..\AIPlatform.Core\AIPlatform.Core.csproj" />
     <EmbeddedResource Include="..\sandbox\react\package.json" LogicalName="React.package.json" />
     <EmbeddedResource Include="..\sandbox\react\package-lock.json" LogicalName="React.package-lock.json" />
+    <EmbeddedResource Include="Studio\model-catalog.json" LogicalName="Studio.model-catalog.json" />
   </ItemGroup>
 
   <PropertyGroup>

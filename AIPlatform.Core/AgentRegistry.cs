@@ -42,7 +42,7 @@ public sealed class AgentRegistry : IAgentRegistry
         foreach (var model in Models)
         {
             if (string.IsNullOrWhiteSpace(model.Id) || string.IsNullOrWhiteSpace(model.Provider) ||
-                string.IsNullOrWhiteSpace(model.Name) || model.ContextSize < 256 ||
+                string.IsNullOrWhiteSpace(model.Name) || model.ContextSize is < 256 or > ModelContextLimits.Maximum ||
                 model.MaxOutputTokens < 1 || model.MaxOutputTokens >= model.ContextSize ||
                 !double.IsFinite(model.Temperature) || model.Temperature is < 0 or > 2)
                 throw new ArgumentException("Invalid model configuration.");

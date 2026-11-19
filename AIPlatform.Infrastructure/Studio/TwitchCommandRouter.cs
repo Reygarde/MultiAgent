@@ -8,7 +8,8 @@ public sealed class TwitchCommandRouter(TimeProvider time)
     private readonly Dictionary<(string Command, string Sender), long> lastUsed = [];
 
     public TwitchCommandTestResult Route(
-        IReadOnlyList<TwitchCommand> commands, string input, string senderId, bool consumeCooldown)
+        IReadOnlyList<TwitchCommand> commands, string input, string senderId, bool consumeCooldown,
+        bool isModerator = false)
     {
         var commandName = input.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
         if (commandName is null)
@@ -17,6 +18,8 @@ public sealed class TwitchCommandRouter(TimeProvider time)
             item.Enabled && string.Equals(item.Name, commandName, StringComparison.OrdinalIgnoreCase));
         if (command is null)
             return new(false, null);
+        if (command.ModeratorOnly && !isModerator)
+            return new(false, null, PermissionDenied: true);
 
         lock (sync)
         {

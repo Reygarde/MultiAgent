@@ -1,33 +1,129 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+
 namespace AIPlatform.Core.Studio;
 
 public enum WorkflowStatus { Pending, Running, Completed, Failed, WaitingForApproval, Cancelled, Skipped }
 
 public sealed record PlannedFile(string Path, string Purpose, IReadOnlyList<string> DependsOn);
+/// <summary>Human approval of a saved generation plan, never authorization to execute generated code.</summary>
+public sealed record WorkflowPlanApproval(int Version, string Fingerprint, bool? Approved = null,
+    DateTimeOffset? DecidedAt = null);
+public sealed record WorkflowPlanAmendment(int PreviousVersion, DateTimeOffset PreparedAt,
+    ProjectPlan PreviousPlan, IReadOnlyList<WorkflowCriterion> PreviousCriteria,
+    IReadOnlyList<ReactRequirementTrace> PreviousTrace, WorkflowPlanApproval PreviousApproval,
+    IReadOnlyList<WorkflowModelSequence> PreviousSelections, IReadOnlyList<GeneratedFile> PreviousDraft,
+    string DeveloperModel, ModelCompatibility Compatibility, IReadOnlyList<FailureDiagnostic> RetainedSourceDiagnostics);
 public sealed record ProjectPlan(string Name, string Description, IReadOnlyList<string> Decisions,
-    IReadOnlyList<PlannedFile> Files);
+    IReadOnlyList<PlannedFile> Files)
+{
+    public string? OriginalRequest { get; init; }
+    public IReadOnlyList<WorkflowCriterion>? AcceptanceCriteria { get; init; }
+    public IReadOnlyList<PlannedCriterionCoverage>? CriterionCoverage { get; init; }
+}
 public sealed record ReviewFinding(string Path, string Severity, string Message);
 public sealed record ReviewReport(string Summary, IReadOnlyList<ReviewFinding> Findings,
     string? Problem = null, IReadOnlyList<string>? ModifiedFiles = null, string? Justification = null,
-    IReadOnlyList<string>? Risks = null, string? PlanCompliance = null, string? Recommendation = null);
+    IReadOnlyList<string>? Risks = null, string? PlanCompliance = null, string? Recommendation = null)
+{
+    public IReadOnlyList<WorkflowCriterionReview>? CriterionReviews { get; init; }
+}
+public sealed record WorkflowCriterion(string Id, string Requirement);
+public sealed record ReactRequirementTrace(string Id, string OriginalText, string NormalizedText,
+    IReadOnlyList<string> Categories, IReadOnlyList<string> CriterionIds, string? Diagnostic = null);
+public sealed record ReactRequirementNormalization(IReadOnlyList<WorkflowCriterion> Criteria,
+    IReadOnlyList<ReactRequirementTrace> Trace);
+public sealed record PlannedCriterionCoverage(string CriterionId, IReadOnlyList<string> Paths, string Explanation);
+public sealed record WorkflowSourceEvidence(string Path, string Quote);
+public sealed record WorkflowCriterionReview(string CriterionId, string Verdict, string Explanation,
+    IReadOnlyList<WorkflowSourceEvidence> Evidence, string? Defect = null, string? Uncertainty = null);
+public sealed record WorkflowCriterionExecution(string CriterionId, string TestFile, string TestName,
+    int Attempt, int Version, string SourceFingerprint, string Provenance);
+/// <summary>A private Planner validation failure; values must not be copied into general logs.</summary>
+public sealed record PlannerValidationDiagnostic(string? CriterionId, string Rule, string Field,
+    string? Path, string Explanation);
+/// <summary>A diagnostic-only Planner result, never an approved or executable mission plan.</summary>
+public sealed record PlannerAttemptDiagnostic(Guid MissionId, Guid RunId, Guid AttemptId, int AttemptNumber,
+    string Model, DateTimeOffset CreatedAt, string Status, JsonElement? Plan,
+    IReadOnlyList<WorkflowCriterion> Criteria, IReadOnlyList<PlannerValidationDiagnostic> Errors,
+    bool RawTraceAvailable = false);
+/// <summary>A private Reviewer validation error, never a finding against application code.</summary>
+public sealed record ReviewerValidationDiagnostic(string? CriterionId, string Rule, string Field,
+    string? Path, string? Quote, string Explanation);
+/// <summary>A diagnostic-only model report bound to its exact review inputs, not an accepted review.</summary>
+public sealed record ReviewerAttemptDiagnostic(Guid MissionId, Guid RunId, Guid AttemptId, int AttemptNumber,
+    string StepId, string SourceFingerprint, string? RoutingPath, string Model, DateTimeOffset CreatedAt,
+    string Status, JsonElement? Report, IReadOnlyList<ReviewerValidationDiagnostic> Errors);
 public sealed record FailureDiagnostic(string Type, string? Project, string? File, int? Line, int? Column,
     string? Code, string Message);
 public sealed record DiagnosticReport(string Stage, string Command, int? ExitCode,
     IReadOnlyList<FailureDiagnostic> Items, string Excerpt);
 public sealed record ProjectRevision(int Version, DateTimeOffset CreatedAt, string Reason,
-    string Fingerprint, IReadOnlyList<GeneratedFile> Files, ExecutionPlan? ExecutionPlan = null);
+    string Fingerprint, IReadOnlyList<GeneratedFile> Files, ExecutionPlan? ExecutionPlan = null,
+    Guid? WorkspaceId = null, Guid? SourceValidationRunId = null);
 public sealed record CorrectionProposal(int Version, DateTimeOffset CreatedAt,
     IReadOnlyList<GeneratedFile> Files, ReviewReport? Review = null);
 public sealed record WorkflowStep(string Id, string Kind, string AgentId, IReadOnlyList<string> DependsOn,
     WorkflowStatus Status = WorkflowStatus.Pending, int Attempts = 0,
     DateTimeOffset? StartedAt = null, double? DurationMilliseconds = null,
     string? Input = null, string? Output = null, string? Error = null);
+public sealed record ReactSoftwareCorrection(Guid Id, string Trigger, string Reason,
+    IReadOnlyList<GeneratedFile> Original, IReadOnlyList<GeneratedFile> Candidate,
+    IReadOnlyList<LlmRequest> Calls, int ReviewerCapacity, IReadOnlyList<string> Decisions,
+    int CompletedGroups = 0, bool InFlight = false, bool Ready = false)
+{
+    public string? Failure { get; init; }
+}
 public sealed record MissionWorkflow(Guid WorkflowId, Guid MissionId, IReadOnlyList<AgentDefinition> Agents,
     IReadOnlyList<ModelDefinition> Models, IReadOnlyList<WorkflowStep> Steps,
     ProjectPlan? Plan = null, ReviewReport? Review = null,
     IReadOnlyList<GeneratedFile>? Draft = null, IReadOnlyList<ProjectRevision>? Revisions = null,
     int Version = 1, string? Diagnostics = null, string? FinalReport = null,
     IReadOnlyList<GeneratedFile>? Proposal = null, IReadOnlyList<string>? CorrectionPaths = null,
-    int? CorrectionLimit = null, IReadOnlyList<CorrectionProposal>? Proposals = null);
+    int? CorrectionLimit = null, IReadOnlyList<CorrectionProposal>? Proposals = null)
+{
+    public bool AutomaticReactCorrections { get; init; }
+    public long SoftwareCheckpointVersion { get; init; }
+    public string? PendingSoftwareAgentCall { get; init; }
+    public int PendingSoftwareReservationCount { get; init; }
+    public IReadOnlyList<ReactSoftwareCorrection> SoftwareCorrections { get; init; } = [];
+    public bool AutomaticModelSelection { get; init; }
+    public IReadOnlyList<WorkflowModelSequence> ModelSelections { get; init; } = [];
+    public IReadOnlyList<WorkflowModelInvocation> ModelInvocations { get; init; } = [];
+    public IReadOnlyList<WorkflowCriterion> AcceptanceCriteria { get; init; } = [];
+    public IReadOnlyList<ReactRequirementTrace> RequirementTrace { get; init; } = [];
+    public IReadOnlyList<WorkflowCriterionExecution> CriterionExecutions { get; init; } = [];
+    public bool RecordPlannerTrace { get; init; }
+    public bool RequirePlanApproval { get; init; }
+    public WorkflowPlanApproval? PlanApproval { get; init; }
+    public IReadOnlyList<WorkflowPlanAmendment> PlanAmendments { get; init; } = [];
+    public int PlannerGenerationLimit { get; init; }
+    public bool ReviewerCorrectionEnabled { get; init; }
+    public ReviewerCorrectionResumeState? ReviewerCorrectionResume { get; init; }
+    public IReadOnlyList<ExecutionPlanDifference>? ExecutionPlanDifferences { get; init; }
+
+    // Provider-side resource failures may roll back step counters, but must not reopen the hard call budget.
+    public int CountPlannerAttempts() => Math.Max(Steps.Single(step => step.Kind == "Plan").Attempts,
+        ModelInvocations.Count(item => item.Attempt.Role == "Planner"));
+}
+
+/// <summary>Stable routing chain for one agent/file or operation across corrections and resumption.</summary>
+public sealed record WorkflowModelSequence(string Key, string AgentId, ModelRoutingDecision Decision);
+/// <summary>One actual provider invocation or resource block, linked to the existing model quality record.</summary>
+public sealed record WorkflowModelInvocation(string StepId, string Sequence, CustomAgentModelAttempt Attempt);
+/// <summary>Durable state for a source-bound retry of an interrupted Reviewer report correction.</summary>
+public sealed record ReviewerCorrectionResumeState(Guid Id, string StepId, Guid RejectedAttemptId,
+    string SourceFingerprint, string OriginalFailure, string Status, DateTimeOffset RequestedAt);
+
+public static class WorkflowSourceFingerprint
+{
+    public static string Compute(MissionSnapshot mission)
+    {
+        var flow = mission.Workflow ?? throw new StudioValidationException("Mission workflow is missing.");
+        return Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
+        { flow.Version, mission.Task, flow.AcceptanceCriteria, flow.Plan, flow.Draft })));
+    }
+}
 
 public static class WorkflowGraph
 {

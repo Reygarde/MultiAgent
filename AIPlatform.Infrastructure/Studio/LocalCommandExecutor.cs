@@ -45,10 +45,13 @@ public interface ILocalCommandExecutor
         Guid workspaceId, CustomAgentProjectType projectType, bool executionAuthorized,
         CancellationToken cancellationToken);
     Task<LocalApplicationSnapshot?> StopApplicationAsync(Guid workspaceId, CancellationToken cancellationToken);
+    Task<LocalCommandResult> RunBrowserHelperAsync(
+        Guid authorizationId, Guid workspaceId, string input, CancellationToken cancellationToken);
 }
 
 public sealed class LocalCommandExecutor(
-    IWorkspaceStore workspaces, StudioOptions options, bool desktopEnabled) : ILocalCommandExecutor, IHostedService
+    IWorkspaceStore workspaces, StudioOptions options, bool desktopEnabled,
+    StudioBrowserTestOptions? browserTestOptions = null) : ILocalCommandExecutor, IHostedService
 {
     private const int MaxOutputCharacters = 12000;
     private const int MaxServerOutputLines = 100;
@@ -92,38 +95,86 @@ public sealed class LocalCommandExecutor(
     {
         if (!Available)
             throw new StudioValidationException("Local command execution is available only in AIPlatform Studio Desktop on Windows.");
-        lock (sync)
-        {
-            if (!authorizations.TryGetValue(authorizationId, out var authorizedWorkspace) ||
-                authorizedWorkspace != workspaceId)
-                throw new StudioValidationException("Local execution was not authorized for this Studio workspace.");
-        }
+        EnsureAuthorized(authorizationId, workspaceId);
 
         var (executable, arguments, display) = GetCommand(projectType, command);
+        var directory = workspaces.GetDirectory(workspaceId);
+        if (!Directory.Exists(directory))
+            throw new DirectoryNotFoundException("The selected Studio workspace does not exist.");
+        var commandDirectory = projectType == CustomAgentProjectType.FullStack &&
+            command is LocalCommandKind.NpmInstall or LocalCommandKind.NpmBuild or LocalCommandKind.NpmTest
+            ? Path.Combine(directory, "frontend") : directory;
+        if (!Directory.Exists(commandDirectory))
+            throw new DirectoryNotFoundException("The full-stack frontend directory does not exist.");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = executable,
+            Arguments = arguments,
+            WorkingDirectory = commandDirectory,
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+        if (projectType is CustomAgentProjectType.React or CustomAgentProjectType.FullStack)
+        {
+            startInfo.StandardOutputEncoding = Encoding.UTF8;
+            startInfo.StandardErrorEncoding = Encoding.UTF8;
+        }
+        startInfo.Environment["CI"] = "true";
+        return await RunProcessAsync(startInfo, display, cancellationToken);
+    }
+
+    public async Task<LocalCommandResult> RunBrowserHelperAsync(
+        Guid authorizationId, Guid workspaceId, string input, CancellationToken cancellationToken)
+    {
+        if (!Available)
+            throw new StudioValidationException("Browser tests are available only in AIPlatform Studio Desktop on Windows.");
+        EnsureAuthorized(authorizationId, workspaceId);
+        if (input.Length > 20_000)
+            throw new StudioValidationException("The browser test plan exceeds its size limit.");
+        if (browserTestOptions is null ||
+            !Path.IsPathFullyQualified(browserTestOptions.NodeExecutable) ||
+            !Path.IsPathFullyQualified(browserTestOptions.HelperFile) ||
+            !File.Exists(browserTestOptions.NodeExecutable) || !File.Exists(browserTestOptions.HelperFile))
+            throw new StudioValidationException(
+                "The trusted Playwright runtime is unavailable. Reinstall AIPlatform Studio or its browser-test dependencies.");
+        SafePaths.RejectLinks(browserTestOptions.NodeExecutable);
+        SafePaths.RejectLinks(browserTestOptions.HelperFile);
         var directory = workspaces.GetDirectory(workspaceId);
         if (!Directory.Exists(directory))
             throw new DirectoryNotFoundException("The selected Studio workspace does not exist.");
 
         var startInfo = new ProcessStartInfo
         {
-            FileName = executable,
-            Arguments = arguments,
-            WorkingDirectory = directory,
+            FileName = browserTestOptions.NodeExecutable,
+            WorkingDirectory = Path.GetDirectoryName(browserTestOptions.HelperFile)!,
             UseShellExecute = false,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true
         };
+        startInfo.ArgumentList.Add(browserTestOptions.HelperFile);
+        startInfo.Environment.Clear();
+        foreach (var name in new[] { "SystemRoot", "WINDIR", "ProgramFiles", "ProgramFiles(x86)",
+                     "LOCALAPPDATA", "APPDATA", "USERPROFILE", "TEMP", "TMP", "PATH" })
+            if (Environment.GetEnvironmentVariable(name) is { } value)
+                startInfo.Environment[name] = value;
         startInfo.Environment["CI"] = "true";
-        return await RunProcessAsync(startInfo, display, cancellationToken);
+        startInfo.Environment["PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD"] = "1";
+        return await RunProcessAsync(startInfo, "node studio-browser-tests.mjs", cancellationToken,
+            input, TimeSpan.FromSeconds(120));
     }
 
     public LocalApplicationSnapshot GetApplication(Guid workspaceId, CustomAgentProjectType projectType)
     {
         if (applications.TryGetValue(workspaceId, out var existing))
             return existing.Snapshot;
-        var (_, _, command) = GetCommand(
-            projectType, projectType == CustomAgentProjectType.React ? LocalCommandKind.NpmRunDev : LocalCommandKind.DotNetRun);
+        var (_, _, command) = GetCommand(projectType, projectType is CustomAgentProjectType.React or CustomAgentProjectType.FullStack
+            ? LocalCommandKind.NpmRunDev : LocalCommandKind.DotNetRun);
         return new(workspaceId, "Stopped", null, command, [], null, null, DateTimeOffset.UtcNow);
     }
 
@@ -147,12 +198,60 @@ public sealed class LocalCommandExecutor(
         {
             CustomAgentProjectType.React => "package.json",
             CustomAgentProjectType.DotNet => "src/App/App.csproj",
+            CustomAgentProjectType.FullStack => "backend/src/App/App.csproj",
             _ => throw new StudioValidationException("The selected Studio project type is not supported.")
         };
         if (!files.Any(file => string.Equals(file.Path, requiredFile, StringComparison.OrdinalIgnoreCase)))
             throw new StudioValidationException($"The Studio project is missing its trusted launch file: {requiredFile}");
 
+        if (projectType == CustomAgentProjectType.FullStack)
+        {
+            if (!files.Any(file => file.Path == "frontend/package.json"))
+                throw new StudioValidationException("The Studio project is missing its trusted launch file: frontend/package.json");
+            return await StartFullStackAsync(workspaceId, directory, cancellationToken);
+        }
         var (display, startInfo) = CreateApplicationStartInfo(projectType, directory);
+        return await LaunchAsync(workspaceId, workspaceId, display, startInfo);
+    }
+
+    private static Guid BackendKey(Guid workspaceId)
+    {
+        var bytes = workspaceId.ToByteArray();
+        bytes[^1] ^= 0xFF;
+        return new Guid(bytes);
+    }
+
+    private async Task<LocalApplicationSnapshot> StartFullStackAsync(
+        Guid workspaceId, string directory, CancellationToken cancellationToken)
+    {
+        var dataDirectory = Path.Combine(Path.GetTempPath(), "AIPlatformStudio", "app-data", workspaceId.ToString("N"));
+        Directory.CreateDirectory(dataDirectory);
+        var backendKey = BackendKey(workspaceId);
+        var (backendDisplay, backendStart) = CreateApplicationStartInfo(CustomAgentProjectType.DotNet, directory);
+        backendStart.Arguments = backendStart.Arguments.Replace("src/App/App.csproj", "backend/src/App/App.csproj");
+        backendDisplay = backendDisplay.Replace("src/App/App.csproj", "backend/src/App/App.csproj");
+        backendStart.Environment["STUDIO_DATA_DIR"] = dataDirectory;
+        var backend = await LaunchAsync(backendKey, workspaceId, backendDisplay, backendStart);
+        var deadline = DateTimeOffset.UtcNow + ServerStartupTimeout;
+        while (backend.Status != "Running")
+        {
+            if (backend.Status is "Error" or "Stopped" || DateTimeOffset.UtcNow > deadline)
+            {
+                await StopApplicationAsync(workspaceId, CancellationToken.None);
+                throw new StudioValidationException("The backend API did not start: " + (backend.Error ?? backend.Status));
+            }
+            await Task.Delay(250, cancellationToken);
+            backend = applications[backendKey].Snapshot;
+        }
+        var (display, startInfo) = CreateApplicationStartInfo(
+            CustomAgentProjectType.React, Path.Combine(directory, "frontend"));
+        startInfo.Environment["STUDIO_API_URL"] = backend.Url!.TrimEnd('/');
+        return await LaunchAsync(workspaceId, workspaceId, display, startInfo);
+    }
+
+    private async Task<LocalApplicationSnapshot> LaunchAsync(
+        Guid key, Guid workspaceId, string display, ProcessStartInfo startInfo)
+    {
         var authorizationId = Authorize(workspaceId);
         LocalApplicationSession session;
         lock (applicationSync)
@@ -162,18 +261,18 @@ public sealed class LocalCommandExecutor(
                 Revoke(authorizationId);
                 throw new StudioValidationException("Studio is shutting down and cannot start another local application.");
             }
-            while (applications.TryGetValue(workspaceId, out var previous))
+            while (applications.TryGetValue(key, out var previous))
             {
                 if (!previous.IsCompleted)
                 {
                     Revoke(authorizationId);
                     return previous.Snapshot;
                 }
-                applications.TryRemove(new KeyValuePair<Guid, LocalApplicationSession>(workspaceId, previous));
+                applications.TryRemove(new KeyValuePair<Guid, LocalApplicationSession>(key, previous));
             }
             session = new LocalApplicationSession(
                 workspaceId, authorizationId, display, startInfo, Revoke);
-            applications[workspaceId] = session;
+            applications[key] = session;
         }
 
         try
@@ -192,6 +291,8 @@ public sealed class LocalCommandExecutor(
     public async Task<LocalApplicationSnapshot?> StopApplicationAsync(
         Guid workspaceId, CancellationToken cancellationToken)
     {
+        if (applications.TryGetValue(BackendKey(workspaceId), out var backend))
+            await backend.StopAsync(cancellationToken);
         if (!applications.TryGetValue(workspaceId, out var session))
             return null;
         await session.StopAsync(cancellationToken);
@@ -212,7 +313,8 @@ public sealed class LocalCommandExecutor(
     }
 
     internal async Task<LocalCommandResult> RunProcessAsync(
-        ProcessStartInfo startInfo, string display, CancellationToken cancellationToken)
+        ProcessStartInfo startInfo, string display, CancellationToken cancellationToken,
+        string? input = null, TimeSpan? processTimeout = null)
     {
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         var started = DateTimeOffset.UtcNow;
@@ -235,8 +337,11 @@ public sealed class LocalCommandExecutor(
         var outputLock = new object();
         var stdout = PumpAsync(process.StandardOutput, output, outputLock);
         var stderr = PumpAsync(process.StandardError, output, outputLock);
+        var stdin = input is null ? Task.CompletedTask : WriteInputAsync(process, input, cancellationToken);
+        if (input is null && startInfo.RedirectStandardInput)
+            process.StandardInput.Close();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(TimeSpan.FromSeconds(options.MissionTimeoutSeconds));
+        timeout.CancelAfter(processTimeout ?? TimeSpan.FromSeconds(options.MissionTimeoutSeconds));
         var timedOut = false;
         var cancelled = false;
         try
@@ -257,11 +362,38 @@ public sealed class LocalCommandExecutor(
                 process.Kill(entireProcessTree: true);
             cancelled = true;
         }
-        await Task.WhenAll(stdout, stderr);
+        await Task.WhenAll(stdout, stderr, stdin);
         if (cancelled)
             cancellationToken.ThrowIfCancellationRequested();
         return new(display, timedOut ? null : process.ExitCode, timedOut, output.ToString(),
             started, DateTimeOffset.UtcNow);
+    }
+
+    private void EnsureAuthorized(Guid authorizationId, Guid workspaceId)
+    {
+        lock (sync)
+        {
+            if (!authorizations.TryGetValue(authorizationId, out var authorizedWorkspace) ||
+                authorizedWorkspace != workspaceId)
+                throw new StudioValidationException("Local execution was not authorized for this Studio workspace.");
+        }
+    }
+
+    private static async Task WriteInputAsync(
+        Process process, string input, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await process.StandardInput.WriteLineAsync(input.AsMemory(), cancellationToken);
+            await process.StandardInput.FlushAsync(cancellationToken);
+        }
+        catch (IOException) when (process.HasExited)
+        {
+        }
+        finally
+        {
+            process.StandardInput.Close();
+        }
     }
 
     private static async Task PumpAsync(StreamReader reader, StringBuilder output, object sync)
@@ -297,6 +429,21 @@ public sealed class LocalCommandExecutor(
                     "npm run dev"),
                 _ => throw new StudioValidationException("That command is not supported for a React project.")
             };
+        if (projectType == CustomAgentProjectType.FullStack)
+            return command switch
+            {
+                LocalCommandKind.DotNetRestore => ("dotnet.exe", "restore backend/Backend.slnx --disable-parallel",
+                    "dotnet restore backend/Backend.slnx --disable-parallel"),
+                LocalCommandKind.DotNetBuild => ("dotnet.exe", "build backend/Backend.slnx --no-restore",
+                    "dotnet build backend/Backend.slnx --no-restore"),
+                LocalCommandKind.DotNetTest => ("dotnet.exe", "test backend/Backend.slnx --no-restore",
+                    "dotnet test backend/Backend.slnx --no-restore"),
+                LocalCommandKind.NpmInstall or LocalCommandKind.NpmBuild or LocalCommandKind.NpmTest =>
+                    GetCommand(CustomAgentProjectType.React, command),
+                LocalCommandKind.NpmRunDev or LocalCommandKind.DotNetRun => ("dotnet.exe", "run --project backend/src/App/App.csproj",
+                    "dotnet run (backend) + npm run dev (frontend)"),
+                _ => throw new StudioValidationException("That command is not supported for a full-stack project.")
+            };
         if (projectType == CustomAgentProjectType.DotNet)
             return command switch
             {
@@ -322,6 +469,7 @@ public sealed class LocalCommandExecutor(
             Arguments = arguments,
             WorkingDirectory = directory,
             UseShellExecute = false,
+            RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             CreateNoWindow = true
@@ -655,6 +803,14 @@ public sealed class LocalCommandExecutor(
         {
             if (Interlocked.Exchange(ref cleanupStarted, 1) != 0)
                 return;
+            lock (stateSync)
+            {
+                if (status == "Stopping")
+                {
+                    status = "Stopped";
+                    updatedAt = DateTimeOffset.UtcNow;
+                }
+            }
             job?.Dispose();
             process.Dispose();
             stopping.Dispose();

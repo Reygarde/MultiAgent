@@ -31,6 +31,7 @@ vi.mock('./api', () => ({
     saveCustomAgentTeam: vi.fn(),
     deleteCustomAgentTeam: vi.fn(),
     customAgentTeamRuns: vi.fn(),
+    customAgentDevelopmentPlans: vi.fn(),
     customAgentTeamRun: vi.fn(),
     createCustomAgentProject: vi.fn(),
     startCustomAgentCollaboration: vi.fn(),
@@ -75,6 +76,7 @@ beforeEach(() => {
   vi.mocked(api.duplicateCustomAgent).mockResolvedValue({ ...agent, id: 'agent-2', name: 'Assistant Développeur (copie)' })
   vi.mocked(api.deleteCustomAgent).mockResolvedValue(undefined)
   vi.mocked(api.customAgentConversations).mockResolvedValue([])
+  vi.mocked(api.customAgentDevelopmentPlans).mockResolvedValue([])
   vi.mocked(api.createCustomAgentConversation).mockResolvedValue({
     id: 'conversation-2', agentId: agent.id, title: 'Nouvelle conversation',
     createdAt: '2026-11-15T10:00:00Z', updatedAt: '2026-11-15T10:00:00Z', messages: [],
@@ -138,6 +140,23 @@ beforeEach(() => {
 })
 
 describe('CustomAgents', () => {
+  it('preserves ordered fallbacks and generation settings when explicitly enabling automatic mode', async () => {
+    const user = userEvent.setup()
+    const configured = { ...agent, fallbackModels: ['qwen3:4b'],
+      generation: { contextSize: 8192, maxOutputTokens: 1024, temperature: 0.1 } }
+    vi.mocked(api.customAgents).mockResolvedValue([configured])
+    render(<CustomAgents />)
+    await user.click(await screen.findByRole('button', { name: /Assistant Développeur/ }))
+    await user.click(screen.getByRole('button', { name: /Modifier/ }))
+    expect(screen.getByLabelText('Mode de sélection')).toHaveValue('manual')
+    await user.selectOptions(screen.getByLabelText('Mode de sélection'), 'automatic')
+    await user.click(screen.getByRole('button', { name: 'Enregistrer' }))
+    await waitFor(() => expect(api.updateCustomAgent).toHaveBeenCalledWith(agent.id, expect.objectContaining({
+      automaticModelSelection: true, modelName: agent.modelName, fallbackModels: ['qwen3:4b'],
+      generation: configured.generation,
+    })))
+  })
+
   it('creates an agent with an installed model and chats in a persisted conversation', async () => {
     const user = userEvent.setup()
     render(<CustomAgents />)
@@ -433,11 +452,11 @@ describe('CustomAgents', () => {
     await waitFor(() => expect(api.saveCustomAgentTeam).toHaveBeenCalledWith(
       'Équipe React',
       [
-        { agentId: agent.id, role: 'Planner', order: 0 },
-        { agentId: developer.id, role: 'Developer', order: 1 },
-        { agentId: reviewer.id, role: 'Reviewer', order: 2 },
+        { agentId: agent.id, role: 'Planner', order: 0, fallbackModels: null },
+        { agentId: developer.id, role: 'Developer', order: 1, fallbackModels: null },
+        { agentId: reviewer.id, role: 'Reviewer', order: 2, fallbackModels: null },
       ],
-      undefined,
+      undefined, false, false,
     ))
     await user.type(screen.getByRole('textbox', { name: 'Demande' }), 'Créer une page.')
     await user.click(screen.getByRole('button', { name: 'Lancer la collaboration' }))

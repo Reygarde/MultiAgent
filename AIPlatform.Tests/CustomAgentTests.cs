@@ -8,6 +8,37 @@ namespace AIPlatform.Tests;
 
 public sealed class CustomAgentTests
 {
+    [Theory]
+    [InlineData(65536)]
+    [InlineData(262144)]
+    public async Task PersistsExplicitLargeContextWithoutChangingLegacyAgentDefaults(int context)
+    {
+        var directory = NewDirectory();
+        try
+        {
+            var options = new StudioOptions { DataDirectory = directory };
+            var store = new CustomAgentStore(options);
+            var provider = new FakeProvider((_, _) => throw new InvalidOperationException("No generation permitted."));
+            var service = Service(store, provider, new FakeOllamaModelCatalog());
+            var legacy = await service.CreateAgentAsync(
+                new("Legacy", "", "Work.", "qwen2.5-coder:7b"), default);
+            var draft = new CustomAgentDraft("Future", "", "Work.", "qwen2.5-coder:7b",
+                Generation: new(context, 3072));
+            var future = await service.CreateAgentAsync(draft, default);
+            var restarted = new CustomAgentStore(options);
+            Assert.Null(restarted.GetAgent(legacy.Id)!.Generation);
+            Assert.Equal(new(context, 3072), restarted.GetAgent(future.Id)!.Generation);
+            await Assert.ThrowsAsync<StudioValidationException>(() =>
+                service.CreateAgentAsync(draft with { Generation = new(ModelContextLimits.Maximum + 1, 3072) }, default));
+            Assert.Empty(provider.Requests);
+            Assert.Equal(2, restarted.ListAgents().Count);
+        }
+        finally
+        {
+            if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task PersistsAgentAndConversationAcrossStoreInstances()
     {
@@ -628,12 +659,23 @@ public sealed class CustomAgentTests
             var team = await CreateTeamAsync(service);
             var run = new CustomAgentCollaborationRun(Guid.NewGuid(), team.Id, "An interrupted task.",
                 "Running", "Developer", null, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, []);
+            var previous = new CustomAgentModelAttempt(Guid.NewGuid(), run.Id,
+                team.Members.Single(member => member.Role == "Developer").AgentId, "Developer",
+                "qwen2.5-coder:7b", "Configured model.", DateTimeOffset.UtcNow, true,
+                ["qwen2.5-coder:7b", "qwen3.5:9b"], "Failed", "Generation");
+            run = run with { ModelAttempts = [previous, previous with
+                { Id = Guid.NewGuid(), Outcome = "Running", FailureKind = null }] };
             store.AddCollaborationRun(run);
 
             var recovered = service.GetCollaborationRun(team.Id, run.Id)!;
             Assert.Equal("Cancelled", recovered.Status);
             Assert.Null(recovered.Proposal);
             Assert.Contains("n’a pas été relancée", recovered.Error);
+            Assert.Null(recovered.CurrentStep);
+            Assert.Equal(JsonSerializer.Serialize(previous), JsonSerializer.Serialize(recovered.ModelAttempts![0]));
+            Assert.Equal("Failed", recovered.ModelAttempts![1].Outcome);
+            Assert.Equal("Infrastructure", recovered.ModelAttempts![1].FailureKind);
+            Assert.Null(recovered.ModelAttempts![1].NextModel);
             Assert.Empty(new CustomAgentStore(new() { DataDirectory = directory })
                 .GetCollaborationRun(team.Id, run.Id)!.Contributions);
         }

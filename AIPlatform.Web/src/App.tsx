@@ -10,6 +10,7 @@ import { Projects } from './Projects'
 import { ConfigurationEditor } from './ConfigurationEditor'
 import { TwitchBots } from './TwitchBots'
 import { CustomAgents } from './CustomAgents'
+import { ModelLibrary } from './ModelLibrary'
 import type { Agent, LocalModels, Mission, MissionCapacity, MissionKind, Model, Sandbox } from './types'
 import { isActive } from './types'
 import { groupMissionsByDay, missionSearchText, missionTitle } from './missionPresentation'
@@ -18,7 +19,7 @@ const navigation = [
   { id: 'Workspace', label: 'Espace', icon: MessageSquare, subtitle: 'Votre espace de création' },
   { id: 'Twitch', label: 'Twitch', icon: Bot, subtitle: 'Bots Twitch configurables' },
   { id: 'Agents', label: 'Agents', icon: Bot, subtitle: 'Votre équipe spécialisée' },
-  { id: 'Models', label: 'Modèles', icon: Cpu, subtitle: 'Intelligence locale' },
+  { id: 'Models', label: 'Bibliothèque de modèles', icon: Cpu, subtitle: 'Intelligence locale' },
   { id: 'Projects', label: 'Projets', icon: FolderOpen, subtitle: 'Du prompt aux fichiers' },
   { id: 'Missions', label: 'Missions', icon: Workflow, subtitle: 'Chaque étape, en transparence' },
 ] as const
@@ -45,6 +46,12 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
   const [kind, setKind] = useState<MissionKind>('Chat')
   const [templateId, setTemplateId] = useState('')
   const [agentId, setAgentId] = useState('')
+  const [automaticModelSelection, setAutomaticModelSelection] = useState(false)
+  const [recordPlannerTrace, setRecordPlannerTrace] = useState(false)
+  const [requirePlanApproval, setRequirePlanApproval] = useState(false)
+  const [automaticReactCorrections, setAutomaticReactCorrections] = useState(false)
+  const [sizingProfileId, setSizingProfileId] = useState('')
+  const [maxTotalGenerations, setMaxTotalGenerations] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmRestart, setConfirmRestart] = useState(false)
   const [restartError, setRestartError] = useState<string | null>(null)
@@ -122,9 +129,21 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
     setBusy(true); setError(null)
     try {
       const mission = await api.create({ task, kind, agentId: agentId || null, approveSandboxExecution: false,
+        ...(maxTotalGenerations !== null ? { maxTotalGenerations: Number(maxTotalGenerations) } :
+          missionCapacity?.defaultMaxTotalGenerations != null ? { maxTotalGenerations: missionCapacity.defaultMaxTotalGenerations } : {}),
+        ...(kind === 'Project' && automaticModelSelection ? { automaticModelSelection: true } : {}),
+        ...(kind === 'Project' && requirePlanApproval ? { requirePlanApproval: true } : {}),
+        ...(kind === 'Project' && templateId === 'react-typescript-vite-v2' && automaticReactCorrections
+          ? { automaticReactCorrections: true } : {}),
+        ...(kind === 'Project' && templateId === 'react-typescript-vite-v2' && sizingProfileId
+          ? { sizingProfileId } : {}),
+        ...(kind === 'Project' && templateId === 'react-typescript-vite-v2' && recordPlannerTrace ? { recordPlannerTrace: true } : {}),
         ...(kind === 'Project' && templateId ? { templateId } : {}) })
       setMissions(previous => [mission, ...previous.filter(item => item.id !== mission.id)])
-      setSelectedId(mission.id); setMissionHistoryLoaded(true); setTask('')
+      setSelectedId(mission.id); setMissionHistoryLoaded(true); setTask(''); setAutomaticModelSelection(false); setRecordPlannerTrace(false)
+      setRequirePlanApproval(false)
+      setAutomaticReactCorrections(false)
+      setSizingProfileId('')
     } catch (error) { setError(errorMessage(error)) }
     finally { setBusy(false) }
   }
@@ -196,7 +215,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
           <p>Exécution locale · aucun cloud</p><div className="local-card-line"><Cpu size={13} /> Une mission IA active maximum</div></div>
-        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · 0.6.5</small></span><ShieldCheck size={16} /></div>
+        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · 0.6.6</small></span><ShieldCheck size={16} /></div>
       </div>
     </aside>
     <main>
@@ -272,29 +291,77 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
             </section>}
             <form className="composer panel" onSubmit={event => { event.preventDefault(); void submit() }}>
               <div className="composer-options"><label>Mode <select aria-label="Mode de mission" value={kind}
-                onChange={event => { setKind(event.target.value as MissionKind); setAgentId('') }}>
+                onChange={event => { setKind(event.target.value as MissionKind); setAgentId(''); setAutomaticModelSelection(false); setRecordPlannerTrace(false); setRequirePlanApproval(false) }}>
                 <option value="Chat">Conversation</option><option value="Project">Projet</option>
               </select></label>
                 {kind === 'Project' && <label>Template <select aria-label="Template du projet" value={templateId}
-                  onChange={event => { setTemplateId(event.target.value); setAgentId('') }}>
+                  onChange={event => { setTemplateId(event.target.value); setAgentId(''); setRecordPlannerTrace(false) }}>
                   <option value="">Projet .NET générique</option><option value="discord-bot-dotnet">Discord Bot</option>
-                  <option value="react-typescript-vite">React App</option>
+                  <option value="react-typescript-vite-v2">React App</option>
                   <option value="twitch-bot-dotnet">Twitch Bot</option>
                   <option value="fullstack-react-dotnet">Full-Stack App</option>
                 </select></label>}
                 <label>Agent <select aria-label="Sélection de l’agent" value={agentId} onChange={event => setAgentId(event.target.value)}>
                   <option value="">Automatique</option>{eligible.map(agent => <option key={agent.id} value={agent.id}>{agent.id}</option>)}
                 </select></label>
+                <label>Générations maximales <input type="number" min={1} max={1000} step={1}
+                  aria-label="Générations maximales"
+                  required={maxTotalGenerations !== null}
+                  value={maxTotalGenerations ?? missionCapacity?.defaultMaxTotalGenerations ?? ''}
+                  placeholder="Valeur du serveur"
+                  onChange={event => setMaxTotalGenerations(event.target.value)} /></label>
               </div>
+              <p className="muted">Plafond partagé entre tous les agents, fichiers, corrections et reprises.
+                Le nombre de fichiers dépend du plan ; ce budget ne garantit pas la fin de la mission.</p>
               <textarea id="mission-task" aria-label="Votre mission" placeholder="Décrivez ce que vous voulez créer, comprendre ou améliorer…"
                 value={task} onChange={event => setTask(event.target.value)} rows={3} />
               {kind === 'Project' && <div className="project-consent">
+                <label><input type="checkbox" checked={requirePlanApproval}
+                  onChange={event => setRequirePlanApproval(event.target.checked)} />
+                  Demander mon approbation après la planification</label>
+                <p>Pause après validation et sauvegarde du plan, avant Developer. Cette approbation n’autorise
+                  ni compilation, ni tests, ni exécution du code généré.</p>
+                <label><input type="checkbox" checked={automaticModelSelection}
+                  onChange={event => setAutomaticModelSelection(event.target.checked)} />
+                  Sélection automatique des modèles pour les missions</label>
+                <p>Choix heuristique par étape parmi les modèles installés, sans téléchargement.
+                  Désactivé : modèles configurés inchangés. Les autorisations restent obligatoires.</p>
                 {templateId === 'discord-bot-dotnet' && <p>Discord Bot v1 · Discord.Net.WebSocket 3.20.2 · xUnit 2.9.3 · tests hors ligne.</p>}
                 {templateId === 'twitch-bot-dotnet' && <p>Twitch Bot v1 · .NET 10 · EventSub + Helix · xUnit 2.9.3.
                   OAuth par environnement uniquement ; connexion Twitch séparée et manuelle.
                   Compilation et tests Release hors ligne après autorisation.</p>}
-                {templateId === 'react-typescript-vite' && <p>React App v1 · React 19.3.1 · TypeScript 5.9.3 · Vite 6.4.6 · Vitest 4.1.12.
-                  Dépendances et lockfile figés ; TypeScript, build et tests hors ligne après autorisation.</p>}
+                {templateId === 'react-typescript-vite-v2' && <><p>React App v2 · scaffold technique sans métier imposé.
+                  Les comportements fonctionnels deviennent des critères. Les introductions, titres, exigences transversales
+                  et contraintes techniques restent traçables sans créer de critères métier séparés.
+                  Dépendances et lockfile figés ; TypeScript, build et tests hors ligne après autorisation.
+                  Une revue statique ne prouve pas l’exécution des critères.</p>
+                  <label>Dimensionnement du projet
+                    <select value={sizingProfileId} onChange={event => setSizingProfileId(event.target.value)}>
+                      <option value="">Paramètres existants (inchangés)</option>
+                      {(missionCapacity?.sizingProfiles ?? []).map(profile =>
+                        <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+                    </select>
+                  </label>
+                  {(missionCapacity?.sizingProfiles ?? []).filter(profile => profile.id === sizingProfileId).map(profile =>
+                    <p key={profile.id}>{profile.maxPlannedFiles} fichiers proposés, {profile.maxFiles} avec scaffold ;
+                      {' '}{profile.maxFileBytes / 1024} Kio/fichier, {profile.maxProjectBytes / 1024} Kio/projet ;
+                      {' '}{profile.maxCriteria} critères, {profile.maxCorrections} corrections,
+                      {' '}{profile.maxRepairGroups} groupes de {profile.maxFilesPerRepairGroup} fichiers maximum ;
+                      {' '}{profile.missionTimeoutSeconds} s par passage du worker.</p>)}
+                  <p>Profil figé pour cette nouvelle mission. Budget, modèles, contexte, sortie, délais des agents
+                    et ressources Docker inchangés : à dimensionner séparément. Les préflights peuvent refuser la génération.</p>
+                  <label><input type="checkbox" checked={automaticReactCorrections}
+                    onChange={event => setAutomaticReactCorrections(event.target.checked)} />
+                    Corrections logicielles autonomes React v2</label>
+                  <p>AST, Developer et Reviewer enchaînés dans les limites persistées, sans exécuter le code sur l’hôte.
+                    Docker attend toujours votre autorisation pour chaque révision corrigée.</p>
+                  <label><input type="checkbox" checked={recordPlannerTrace}
+                    onChange={event => setRecordPlannerTrace(event.target.checked)} />
+                    Conserver les traces détaillées du Planner pour cette mission</label>
+                  <p>Décoché par défaut. Autorise la conservation locale privée des requêtes et réponses Ollama exactes,
+                    potentiellement sensibles ; consultation brute dans Desktop uniquement.
+                    Le résultat structuré est conservé séparément des plans approuvés, même en cas de rejet,
+                    dans les limites de taille et de rétention des diagnostics privés.</p></>}
                 {templateId === 'fullstack-react-dotnet' && <p>Full-Stack App v1 · ASP.NET Core .NET 10 · SQLite 10.0.15 · React/TypeScript.
                   Contrat OpenAPI partagé ; build Release/xUnit, TypeScript, Vite, Vitest et intégration HTTP isolée après autorisation.</p>}
                 <p><ShieldCheck size={14} /> Écriture autorisée uniquement dans un workspace dédié.</p>
@@ -327,7 +394,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
           <div className="card-bottom"><Cpu size={14} /><span>{models.find(model => model.id === agent.modelId)?.name ?? agent.modelId}</span></div>
         </article>)}</div><CustomAgents onOpenProject={id => { setSelectedId(id); setPage('Projects') }} /></>}
 
-        {page === 'Models' && <><ConfigurationEditor mode="models" saved={refreshCatalog} />{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
+        {page === 'Models' && <><ModelLibrary /><ConfigurationEditor mode="models" saved={refreshCatalog} />{!local?.available && <div className="notice warning">État local inconnu : {local?.error ?? 'télémétrie non disponible'}. Les modèles ci-dessous sont configurés, pas nécessairement installés.</div>}
           <div className="cards-grid">{models.map(model => {
             const state = local?.available ? local.models.find(item => item.name === model.name) : undefined
             return <article className="panel model-card" key={model.id}><div className="card-top"><span className="card-icon"><Cpu size={24} /></span><span className="badge quiet">{model.provider}</span></div>

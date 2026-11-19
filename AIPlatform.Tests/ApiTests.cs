@@ -37,6 +37,24 @@ public sealed class ApiTests
         Assert.True(paths.TryGetProperty("/api/agents/run", out _));
         Assert.True(paths.TryGetProperty("/api/custom-agent-teams", out _));
         Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/runs", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/development-plans", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/development-plans/{planId}", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/development-plans/{planId}/start", out _));
+        Assert.True(paths.TryGetProperty("/api/custom-agent-teams/{id}/development-plans/{planId}/retry", out _));
+    }
+
+    [Fact]
+    public async Task ModelMutationsRequireDesktopAuthorizationWithoutAnyOllamaCall()
+    {
+        using var factory = CreateFactory(new((_, _) => throw new InvalidOperationException("Must not call Ollama")));
+        using var client = factory.CreateClient();
+        foreach (var path in new[] { "/api/model-library/downloads", "/api/model-library/delete",
+                     "/api/model-library/downloads/00000000-0000-0000-0000-000000000001/cancel" })
+        {
+            using var response = await client.PostAsJsonAsync(path, new { name = "coder:7b", confirmed = true });
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Equal("application/problem+json", response.Content.Headers.ContentType!.MediaType);
+        }
     }
 
     [Fact]
@@ -61,6 +79,17 @@ public sealed class ApiTests
         using var response = await client.PostAsJsonAsync(
             "/api/custom-agents/00000000-0000-0000-0000-000000000001/conversations/00000000-0000-0000-0000-000000000002/proposals/00000000-0000-0000-0000-000000000003/native-outcome",
             new { backupId = "0123456789abcdef0123456789abcdef", restored = false });
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task DevelopmentPlanExecutionIsForbiddenOutsideDesktop()
+    {
+        using var factory = CreateFactory(new((_, _) => throw new InvalidOperationException("Must not call Ollama")));
+        using var client = factory.CreateClient();
+        using var response = await client.PostAsJsonAsync(
+            "/api/custom-agent-teams/00000000-0000-0000-0000-000000000001/development-plans/00000000-0000-0000-0000-000000000002/start",
+            new { workspaceAuthorized = true, executionAuthorized = true });
         Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 

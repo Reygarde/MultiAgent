@@ -15,7 +15,7 @@ public static partial class DiagnosticParser
         {
             var file = Relative(match.Groups["file"].Value);
             var project = Relative(match.Groups["project"].Value);
-            var frontend = templateId == ReactTemplate.Id ||
+            var frontend = templateId is ReactTemplate.Id or MissionReactTemplate.Id ||
                 templateId == FullStackTemplate.Id && result.Stage is ("TypeScript" or "FrontendBuild");
             var diagnostic = new FailureDiagnostic(frontend ? "TypeScript" : "Compiler",
                 frontend ? "frontend/tsconfig.json" : project, file,
@@ -27,9 +27,14 @@ public static partial class DiagnosticParser
         if (result.Stage is "Tests" or "BackendTests")
             AddTestFailures(result.Log, items, templateId == FullStackTemplate.Id
                 ? "backend/Api.Tests/Api.Tests.csproj" : "tests/App.Tests/App.Tests.csproj");
-        if (templateId == ReactTemplate.Id && result.Stage == "Tests" ||
+        if (templateId is (ReactTemplate.Id or MissionReactTemplate.Id) && result.Stage == "Tests" ||
             templateId == FullStackTemplate.Id && result.Stage is ("FrontendTests" or "Integration"))
-            AddVitestFailures(result.Log, items);
+            AddVitestFailures(result.Log, items, includeSuiteFailures: templateId == MissionReactTemplate.Id);
+        if (result.Stage == "Build" && templateId == MissionReactTemplate.Id)
+            foreach (Match match in VitePattern().Matches(result.Log).Take(20))
+                items.Add(new("Vite", null, Relative(match.Groups["file"].Value),
+                    Number(match.Groups["line"].Value), Number(match.Groups["column"].Value),
+                    null, match.Groups["message"].Value.Trim()));
         var log = result.Log;
         var marker = log.IndexOf("AIPLATFORM_TRX_BEGIN", StringComparison.Ordinal);
         if (marker >= 0) log = log[..marker];
@@ -40,7 +45,7 @@ public static partial class DiagnosticParser
                            line.Contains("Actual", StringComparison.OrdinalIgnoreCase))
             .Take(40));
         if (pertinent.Length == 0) pertinent = log;
-        var command = templateId == ReactTemplate.Id
+        var command = templateId is ReactTemplate.Id or MissionReactTemplate.Id
             ? result.Stage switch { "TypeScript" => "tsc --noEmit (offline)", "Build" => "vite build (offline)", _ => "vitest run (offline)" }
             : templateId == FullStackTemplate.Id ? FullStackBuildProfile.Command(result.Stage)
             : result.Stage == "Build" ? "dotnet build Generated.slnx (offline)" :
@@ -48,7 +53,7 @@ public static partial class DiagnosticParser
         return new(result.Stage, command, result.ExitCode, items, pertinent[..Math.Min(pertinent.Length, 4000)]);
     }
 
-    private static void AddVitestFailures(string log, List<FailureDiagnostic> items)
+    private static void AddVitestFailures(string log, List<FailureDiagnostic> items, bool includeSuiteFailures)
     {
         const string begin = "\nAIPLATFORM_VITEST_BEGIN\n";
         const string end = "\nAIPLATFORM_VITEST_END\n";
@@ -59,15 +64,31 @@ public static partial class DiagnosticParser
         {
             using var document = JsonDocument.Parse(log[(start + begin.Length)..finish]);
             foreach (var suite in document.RootElement.GetProperty("testResults").EnumerateArray())
-                foreach (var assertion in suite.GetProperty("assertionResults").EnumerateArray())
+            {
+                var file = suite.TryGetProperty("name", out var name) ? Relative(name.GetString() ?? "") : null;
+                var assertions = suite.GetProperty("assertionResults");
+                if (includeSuiteFailures && assertions.GetArrayLength() == 0 &&
+                    suite.TryGetProperty("message", out var suiteMessage) &&
+                    suiteMessage.GetString() is { Length: > 0 } failure &&
+                    suite.TryGetProperty("status", out var status) && status.GetString() == "failed")
+                {
+                    var location = VitestLocation().Match(failure);
+                    items.Add(new("VitestSuite", "package.json", file,
+                        location.Success ? Number(location.Groups["line"].Value) : null,
+                        location.Success ? Number(location.Groups["column"].Value) : null,
+                        null, failure[..Math.Min(failure.Length, 1000)]));
+                    if (items.Count >= 20) return;
+                }
+                foreach (var assertion in assertions.EnumerateArray())
                 {
                     if (assertion.GetProperty("status").GetString() != "failed") continue;
                     var message = assertion.GetProperty("fullName").GetString() + ": " +
                         string.Join("\n", assertion.GetProperty("failureMessages").EnumerateArray().Select(value => value.GetString()));
-                    items.Add(new("Vitest", "package.json", Relative(suite.GetProperty("name").GetString() ?? ""),
+                    items.Add(new("Vitest", "package.json", file,
                         null, null, null, message[..Math.Min(message.Length, 1000)]));
                     if (items.Count >= 20) return;
                 }
+            }
         }
         catch (Exception exception) when (exception is JsonException or KeyNotFoundException or InvalidOperationException)
         {
@@ -128,4 +149,8 @@ public static partial class DiagnosticParser
     private static partial Regex CompilerPattern();
     [GeneratedRegex(@"(?:in|dans)\s+(?<file>.+?):(?:line|ligne)\s+(?<line>\d+)", RegexOptions.CultureInvariant | RegexOptions.IgnoreCase)]
     private static partial Regex StackPattern();
+    [GeneratedRegex(@"(?m)^(?<file>(?:/work/)?src/[^:\r\n]+?)\s*\((?<line>\d+):(?<column>\d+)\):\s*(?<message>[^\r\n]+)", RegexOptions.CultureInvariant)]
+    private static partial Regex VitePattern();
+    [GeneratedRegex(@"(?:/work/)?src/[^:\r\n]+:(?<line>\d+):(?<column>\d+)", RegexOptions.CultureInvariant)]
+    private static partial Regex VitestLocation();
 }

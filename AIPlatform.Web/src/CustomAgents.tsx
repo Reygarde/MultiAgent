@@ -4,6 +4,9 @@ import { Bot, Copy, FileText, FolderOpen, LoaderCircle, MessageSquarePlus, Penci
 import { api, errorMessage } from './api'
 import { Markdown } from './Markdown'
 import { CustomAgentTeams } from './CustomAgentTeams'
+import { OllamaFallbackModels } from './OllamaFallbackModels'
+import { RoutingExplanation } from './ModelLibrary'
+import { maximumModelContext } from './types'
 import type {
   CustomAgent, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft,
   CustomAgentFileChange, CustomAgentProposal, CustomAgentWorkspace, CustomAgentWorkspaceFile, Mission,
@@ -226,6 +229,9 @@ export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProjec
     setDraft({
       name: selected.name, description: selected.description,
       systemPrompt: selected.systemPrompt, modelName: selected.modelName,
+      fallbackModels: selected.fallbackModels,
+      automaticModelSelection: selected.automaticModelSelection,
+      generation: selected.generation,
     })
     setError(null)
   }
@@ -618,7 +624,7 @@ export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProjec
         {modelsLoading ? 'Vérification…' : 'Réessayer'}</button>
     </div>}
     {activeView === 'teams'
-      ? <CustomAgentTeams agents={agents} projects={projects} desktopApp={desktopApp}
+      ? <CustomAgentTeams agents={agents} projects={projects} desktopApp={desktopApp} models={models}
         onProjectCreated={project => setProjects(current =>
           [project, ...current.filter(item => item.id !== project.id)])}
         onOpenProject={onOpenProject} />
@@ -646,6 +652,32 @@ export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProjec
                 <option value={draft.modelName} disabled>{draft.modelName} — indisponible</option>}
               {models.map(model => <option key={model} value={model}>{model}</option>)}
             </select></label>
+            <label>Mode de sélection<select value={draft.automaticModelSelection ? 'automatic' : 'manual'}
+              onChange={event => setDraft(current => ({ ...current, automaticModelSelection: event.target.value === 'automatic' }))}>
+              <option value="manual">Manuel — modèle principal et secours ordonnés</option>
+              <option value="automatic">Automatique — modèles installés admissibles</option>
+            </select></label>
+            <p className="muted small">En équipe, le mode automatique nécessite aussi l’activation explicite dans l’équipe.
+              Un agent manuel garde son modèle principal et ses secours.</p>
+            <label><input type="checkbox" checked={draft.generation != null} onChange={event =>
+              setDraft(current => ({ ...current, generation: event.target.checked ?
+                { contextSize: 4096, maxOutputTokens: 1024, temperature: 0.2 } : null }))} />
+              Personnaliser les paramètres de génération</label>
+            {draft.generation && <div className="settings-grid">
+              <label>Contexte (tokens)<input type="number" min={512} max={maximumModelContext} value={draft.generation.contextSize}
+                onChange={event => setDraft(current => ({ ...current, generation: { ...current.generation!,
+                  contextSize: Number(event.target.value) } }))} /></label>
+              <label>Sortie maximale (tokens)<input type="number" min={64} max={8192} value={draft.generation.maxOutputTokens}
+                onChange={event => setDraft(current => ({ ...current, generation: { ...current.generation!,
+                  maxOutputTokens: Number(event.target.value) } }))} /></label>
+              <label>Température<input type="number" min={0} max={2} step={0.1} value={draft.generation.temperature}
+                onChange={event => setDraft(current => ({ ...current, generation: { ...current.generation!,
+                  temperature: Number(event.target.value) } }))} /></label>
+            </div>}
+            <OllamaFallbackModels label="Modèles de secours de l’agent" value={draft.fallbackModels}
+              models={models} primary={draft.modelName}
+              onChange={fallbackModels => setDraft(current => ({ ...current, fallbackModels }))} />
+            <p className="muted small">Les secours sont utilisés par les équipes ayant explicitement activé l’escalade.</p>
             <label>Instructions système<textarea required rows={6} maxLength={8000} value={draft.systemPrompt}
               onChange={event => setDraft(current => ({ ...current, systemPrompt: event.target.value }))} /></label>
             {models.length === 0 && <p className="muted">Aucun modèle installé n’est disponible. Vérifiez Ollama avant d’enregistrer.</p>}
@@ -658,7 +690,8 @@ export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProjec
           </form> : selected ? <>
             <header className="custom-agent-detail-heading">
               <div><h3>{selected.name}</h3><p>{selected.description || 'Aucune description.'}</p>
-                <span className="badge quiet">{selected.modelName}{unavailableModel ? ' · indisponible' : ''}</span></div>
+                <span className="badge quiet">{selected.modelName}{unavailableModel ? ' · indisponible' : ''}</span>
+                <span className="badge quiet">{selected.automaticModelSelection ? 'Automatique' : 'Manuel'}</span></div>
               <div className="custom-agent-actions">
                 <button className="button secondary" onClick={startEdit} disabled={sending}><Pencil size={13} /> Modifier</button>
                 <button className="button secondary" onClick={() => void duplicateAgent(selected)} disabled={sending}>
@@ -823,6 +856,7 @@ export function CustomAgents({ onOpenProject = () => undefined }: { onOpenProjec
                     {conversation.messages.map((item, index) => <article key={`${item.createdAt}-${index}`}
                       className={`custom-chat-message ${item.role}`}>
                       <strong>{item.role === 'user' ? 'Vous' : selected.name}</strong>
+                      {item.routingDecision && <RoutingExplanation decision={item.routingDecision} />}
                       {item.role === 'assistant' ? <Markdown>{item.content}</Markdown>
                         : <p>{item.content}</p>}
                       {item.proposal && <section className="custom-agent-proposal">

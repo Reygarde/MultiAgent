@@ -210,7 +210,8 @@ it.each([
   expect(within(historical).getAllByText('Attente passée · activité enregistrée ensuite')).toHaveLength(2)
   expect(chronology.querySelectorAll('.step-Running')).toHaveLength(0)
   await userEvent.click(screen.getByText(`Journal technique · ${events.length} événements`))
-  for (const event of events) expect(screen.getByText(event.message, { exact: false })).toBeVisible()
+  const journal = screen.getByText(`Journal technique · ${events.length} événements`).closest('details')!
+  for (const event of events) expect(within(journal).getByText(event.message, { exact: false })).toBeVisible()
   expect(JSON.stringify(verified)).toBe(before)
   expect(api.approve).not.toHaveBeenCalled()
   expect(api.resume).not.toHaveBeenCalled()

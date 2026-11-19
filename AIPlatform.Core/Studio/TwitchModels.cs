@@ -1,6 +1,9 @@
+using System.Text.Json.Serialization;
+
 namespace AIPlatform.Core.Studio;
 
-public sealed record TwitchCommand(string Name, string Response, int CooldownSeconds = 5, bool Enabled = true);
+public sealed record TwitchCommand(string Name, string Response, int CooldownSeconds = 5, bool Enabled = true,
+    bool ModeratorOnly = false);
 public sealed record TwitchBotConfiguration(Guid Id, string Name, string Channel, IReadOnlyList<TwitchCommand> Commands);
 public sealed record TwitchBotEvent(DateTimeOffset Timestamp, string Kind, string Message);
 public sealed record TwitchBotView(TwitchBotConfiguration Configuration, string State, bool Authorized,
@@ -8,8 +11,45 @@ public sealed record TwitchBotView(TwitchBotConfiguration Configuration, string 
 public sealed record TwitchSettingsView(string ClientId, bool Configured);
 public sealed record TwitchDeviceAuthorization(string VerificationUri, string UserCode, int ExpiresIn, int Interval);
 public sealed record TwitchConnectResult(bool Pending, bool Authorized, string? AccountLogin, string? Message = null);
-public sealed record TwitchChatMessage(string Id, string SenderId, string Text);
-public sealed record TwitchCommandTestResult(bool Matched, string? Response, int CooldownRemainingSeconds = 0);
+public sealed record TwitchChatMessage(string Id, string SenderId, string Text, bool IsModerator = false);
+public sealed record TwitchCommandTestResult(bool Matched, string? Response, int CooldownRemainingSeconds = 0,
+    bool PermissionDenied = false);
+
+public sealed record TwitchSimulationEvent(string UserId, string Role, string Text, int AtSeconds);
+public sealed record TwitchSimulationStep(TwitchSimulationEvent Event, string Outcome, string? Response,
+    int CooldownRemainingSeconds);
+public sealed record TwitchSimulationResult(Guid BotId, IReadOnlyList<TwitchSimulationStep> Steps);
+
+public interface ITwitchSimulationService
+{
+    TwitchSimulationResult Simulate(Guid botId, IReadOnlyList<TwitchSimulationEvent> events,
+        CancellationToken cancellationToken);
+}
+
+public sealed record TwitchCommandOperation(
+    [property: JsonRequired] string Action, [property: JsonRequired] string Name,
+    [property: JsonRequired] string? Response, [property: JsonRequired] int? CooldownSeconds,
+    [property: JsonRequired] bool? Enabled, [property: JsonRequired] bool? ModeratorOnly);
+
+public sealed record TwitchCommandProposal(
+    Guid Id, Guid BotId, Guid TeamId, DateTimeOffset CreatedAt, string Request, string Status,
+    IReadOnlyList<TwitchCommandOperation> Operations, IReadOnlyList<string> Unsupported,
+    TwitchBotConfiguration Before, TwitchBotConfiguration After,
+    IReadOnlyList<TwitchCommandEvidence> Evidence, string? Error = null);
+
+public sealed record TwitchCommandEvidence(
+    string Command, string Criterion, string Expected, string Actual, bool Passed);
+
+public interface ITwitchCommandProposalService
+{
+    Task<TwitchCommandProposal> GenerateAsync(Guid botId, Guid teamId, string request,
+        CancellationToken cancellationToken);
+    TwitchCommandProposal Apply(Guid botId, Guid proposalId, bool approved, bool deleteApproved,
+        CancellationToken cancellationToken);
+    TwitchCommandProposal RestoreInterrupted(Guid botId, Guid proposalId, bool approved,
+        CancellationToken cancellationToken);
+    IReadOnlyList<TwitchCommandProposal> List(Guid botId);
+}
 
 public sealed record TwitchValidatedIdentity(
     string ClientId, string UserId, string Login, IReadOnlyList<string> Scopes, int ExpiresIn);

@@ -79,6 +79,61 @@ public sealed class ReactTemplateTests
         Assert.Equal(MissionStatus.Verified, fixture.Store.Get(mission.Id)!.Status);
     }
 
+    [Theory]
+    [InlineData(ReactTemplate.Id)]
+    [InlineData(MissionReactTemplate.Id)]
+    public async Task DisabledSandboxAllowsGenerationAndReviewWithoutAnyDockerCallsOrExecution(string templateId)
+    {
+        using var fixture = new WorkflowFixture(responseOverride: request => templateId == MissionReactTemplate.Id
+            ? MissionReactContractTests.Respond(request) : Respond(request));
+        var mission = fixture.Store.Submit(new("Create a React application", MissionKind.Project, TemplateId: templateId));
+        var process = new ReactProcess();
+        var options = new SandboxOptions { Enabled = false };
+        var plans = new ExecutionPlanService(fixture.Workspaces, options, fixture.Options, fixture.Store, process);
+        var sandbox = new DockerSandboxRunner(options, fixture.Workspaces, process, fixture.Store, plans);
+        var processor = new CollaborativeProcessor(fixture.Store,
+            new WorkflowAgents(new LlmProviderResolver([fixture.Provider]), fixture.Options),
+            fixture.Workspaces, plans, sandbox, fixture.Options);
+
+        await processor.ProcessAsync(mission.Id, default);
+
+        var current = fixture.Store.Get(mission.Id)!;
+        Assert.Equal(MissionStatus.GeneratedUnverified, current.Status);
+        Assert.Equal(5, fixture.Provider.Requests.Count);
+        Assert.All(current.Workflow!.Steps.Where(step => step.Kind is "Plan" or "Generate" or "Review"),
+            step => Assert.Equal(WorkflowStatus.Completed, step.Status));
+        Assert.False(current.SandboxApproved);
+        Assert.Null(current.ApprovalFingerprint);
+        Assert.Empty(current.Verification);
+        Assert.Contains("Sandbox disabled", current.Workflow.FinalReport);
+        Assert.Equal(ReactTemplate.Image, (await plans.GetAsync(mission.Id, default)).Image);
+        Assert.Empty(process.Calls);
+        Assert.Empty(fixture.Sandbox.Calls);
+        using var cancelled = new CancellationTokenSource();
+        cancelled.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => sandbox.GetAvailabilityAsync(cancelled.Token));
+        await Assert.ThrowsAsync<InvalidOperationException>(() => sandbox.RunAsync(mission.Id, "Build", default));
+        Assert.Empty(process.Calls);
+    }
+
+    [Fact]
+    public async Task ChangingSandboxActivationChangesFingerprintEvenWithoutAResolvedImage()
+    {
+        using var fixture = new WorkflowFixture();
+        var mission = fixture.Store.Submit(new("Create a React application", MissionKind.Project, TemplateId: ReactTemplate.Id));
+        fixture.Workspaces.Create(mission.Id);
+        await fixture.Workspaces.WriteAsync(mission.Id, ReactTemplate.Files, default, ReactTemplate.Id);
+        var process = new ReactProcess { ImageId = ReactTemplate.Image };
+        var disabled = await new ExecutionPlanService(fixture.Workspaces, new() { Enabled = false },
+            fixture.Options, fixture.Store, process).GetAsync(mission.Id, default);
+        Assert.Empty(process.Calls);
+        var enabled = await new ExecutionPlanService(fixture.Workspaces, new() { Enabled = true },
+            fixture.Options, fixture.Store, process).GetAsync(mission.Id, default);
+        Assert.Single(process.Calls);
+        Assert.Equal(disabled.Image, enabled.Image);
+        Assert.NotEqual(disabled.Fingerprint, enabled.Fingerprint);
+    }
+
     [Fact]
     public async Task TypeScriptFailureStopsBuildAndCorrectionPreservesTestsAndRequiresNewConsent()
     {

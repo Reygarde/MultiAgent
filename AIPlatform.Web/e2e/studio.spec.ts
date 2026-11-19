@@ -9,7 +9,15 @@ test('navigates Studio, sends a mission and explores the generated files', async
     let json: unknown
     if (path === '/api/agents') json = agents
     else if (path === '/api/models') json = models
+    else if (path === '/api/custom-agents' || path === '/api/custom-agent-teams') json = []
+    else if (path === '/api/custom-agents/models') json = ['custom:4b']
+    else if (path === '/api/missions/capacity') json = { count: submitted ? 1 : 0, limit: 200, remaining: submitted ? 199 : 200 }
     else if (path === '/api/models/local') json = { available: true, error: null, models: [{ name: 'custom:4b', installed: true, loaded: false, inUse: false }] }
+    else if (path === '/api/model-library/') json = {
+      models: [], loaded: [], ollamaError: null,
+      hardware: { totalRamBytes: null, availableRamBytes: null, freeDiskBytes: null, gpus: [], warnings: ['Matériel simulé'] },
+    }
+    else if (path === '/api/model-library/downloads') json = []
     else if (path === '/api/sandbox') json = { available: false, reason: 'Docker absent.' }
     else if (path === '/api/missions' && route.request().method() === 'POST') {
       expect(route.request().postDataJSON()).toMatchObject({ kind: 'Project', approveSandboxExecution: false })
@@ -24,19 +32,20 @@ test('navigates Studio, sends a mission and explores the generated files', async
   await page.goto('/')
   await expect(page.getByRole('heading', { name: 'Construisons la suite.' })).toBeVisible()
   await page.getByRole('button', { name: 'Créer un projet .NET' }).click()
-  await expect(page.getByRole('checkbox')).toHaveCount(0)
+  await expect(page.getByRole('checkbox', { name: 'Demander mon approbation après la planification' })).not.toBeChecked()
+  await expect(page.getByRole('checkbox', { name: 'Sélection automatique des modèles pour les missions' })).not.toBeChecked()
   await expect(page.getByText(/Après génération, consultez les fichiers/)).toBeVisible()
   await page.getByRole('button', { name: 'Envoyer la mission' }).click()
   await expect(page.getByText('Fichiers disponibles. Compilation et tests NON exécutés.')).toBeVisible()
   await page.getByRole('button', { name: 'Agents', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'CustomCoder' })).toBeVisible()
-  await page.getByRole('button', { name: 'Models', exact: true }).click()
-  await expect(page.getByText('Installé : oui')).toBeVisible()
-  await expect(page.getByText('Chargé : non')).toBeVisible()
-  await page.getByRole('button', { name: 'Projects', exact: true }).click()
+  await page.getByRole('button', { name: 'Bibliothèque de modèles', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Bibliothèque de modèles', level: 1 })).toBeVisible()
+  await expect(page.getByText('Matériel simulé')).toBeVisible()
+  await page.getByRole('button', { name: 'Projets', exact: true }).click()
   await expect(page.getByText('Console.WriteLine("Studio");')).toBeVisible()
   await page.getByRole('button', { name: 'Missions', exact: true }).click()
-  await expect(page.getByRole('heading', { name: 'Toutes les missions' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Missions', level: 2, exact: true })).toBeVisible()
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)
   expect(overflow).toBe(false)
 })
@@ -49,6 +58,7 @@ for (const approved of [true, false]) {
       let json: unknown
       if (path === '/api/agents') json = agents
       else if (path === '/api/models') json = models
+      else if (path === '/api/missions/capacity') json = { count: 1, limit: 200, remaining: 199 }
       else if (path === '/api/models/local') json = { available: true, error: null, models: [] }
       else if (path === '/api/sandbox') json = { available: true, reason: 'Offline image ready.' }
       else if (path === '/api/missions') json = [{ ...mission, status, verification: [] }]

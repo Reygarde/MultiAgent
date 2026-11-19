@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { api, errorMessage } from './api'
 import type { AgentConfiguration, AgentSettings } from './types'
+import { maximumModelContext } from './types'
 
 const tools: Record<string, string[]> = {
   Chat: [], Router: [], Planner: ['Plan'], Developer: ['GenerateFiles'],
@@ -78,7 +79,10 @@ export function ConfigurationEditor({ mode, saved }: { mode: 'agents' | 'models'
             <input value={model[field]} onChange={event => setConfig({ ...config,
               models: config.models.map((item, position) => position === index ? { ...item, [field]: event.target.value } : item) })} /></label>)}
           {(['contextSize', 'maxOutputTokens', 'temperature'] as const).map(field => <label key={field}>{field}
-            <input type="number" step={field === 'temperature' ? 0.1 : 1} value={model[field]} onChange={event => setConfig({ ...config,
+            <input type="number" step={field === 'temperature' ? 0.1 : 1}
+              min={field === 'contextSize' ? 2048 : field === 'maxOutputTokens' ? 256 : 0}
+              max={field === 'contextSize' ? maximumModelContext : field === 'maxOutputTokens' ? model.contextSize - 1 : 2}
+              value={model[field]} onChange={event => setConfig({ ...config,
               models: config.models.map((item, position) => position === index ? { ...item, [field]: Number(event.target.value) } : item) })} /></label>)}
         </fieldset>)}
         <button className="button secondary" onClick={() => setConfig({ ...config, models: [...config.models,

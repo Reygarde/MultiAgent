@@ -8,12 +8,12 @@ using AIPlatform.Infrastructure.Studio;
 using AIPlatform.API.Services;
 
 var builder = WebApplication.CreateBuilder(args);
+var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
 var desktop = new DesktopSession(builder.Environment.IsEnvironment("Desktop"),
     Environment.GetEnvironmentVariable("AIPLATFORM_DESKTOP_TOKEN"));
 if (desktop.Enabled)
 {
-    var settings = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "AIPlatformStudio", "settings.json");
+    var settings = Path.Combine(localAppData, "AIPlatformStudio", "settings.json");
     builder.Configuration.AddJsonFile(settings, optional: true, reloadOnChange: false);
     builder.WebHost.UseUrls("http://127.0.0.1:0").PreferHostingUrls(false);
     builder.WebHost.ConfigureKestrel(server =>
@@ -40,11 +40,9 @@ var studio = builder.Configuration.GetSection("Studio").Get<StudioOptions>() ?? 
 studio.Validate();
 studio = studio with
 {
-    DataDirectory = desktop.Enabled
-        ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "AIPlatformStudio", "StudioData")
-        : Path.GetFullPath(studio.DataDirectory, builder.Environment.ContentRootPath)
+    DataDirectory = StudioDataDirectory.Resolve(desktop.Enabled, studio.DataDirectory,
+        builder.Environment.ContentRootPath, localAppData)
 };
-SafePaths.ValidateStorageDirectory(studio.DataDirectory);
 var registry = new ConfigurableRegistry(configuration, studio);
 if (!studio.CollaborativeWorkflows && !registry.Agents.Any(agent => agent.Id == studio.DeveloperAgentId))
     throw new InvalidOperationException("The Studio developer agent must be a registered execution agent.");
@@ -53,6 +51,7 @@ sandboxOptions.Validate();
 var ollama = builder.Configuration.GetSection("Ollama").Get<OllamaOptions>()
     ?? throw new InvalidOperationException("The Ollama configuration is required.");
 ollama.Validate();
+var disableOllama = builder.Environment.IsDevelopment() && builder.Configuration.GetValue<bool>("StudioDevDisableOllama");
 if (registry.Models.Any(model => !string.Equals(model.Provider, "Ollama", StringComparison.OrdinalIgnoreCase)))
     throw new InvalidOperationException("Only the Ollama provider is registered in this MVP.");
 
@@ -61,14 +60,26 @@ builder.Services.AddSingleton(desktop);
 builder.Services.AddSingleton<IAgentRegistry>(registry);
 builder.Services.AddSingleton<IAgentConfigurationService>(registry);
 builder.Services.AddSingleton(ollama);
+builder.Services.AddSingleton<OllamaDiagnosticStore>();
+builder.Services.AddSingleton<OllamaModelOperations>();
+builder.Services.AddSingleton<IHardwareProbe, LocalHardwareProbe>();
+builder.Services.AddHttpClient("OllamaRegistry", client => client.Timeout = TimeSpan.FromSeconds(25))
+    .ConfigurePrimaryHttpMessageHandler(() => CreateOllamaHandler(disableOllama));
+builder.Services.AddSingleton(services => new ModelLibraryService(
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"),
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("OllamaRegistry"), ollama, studio,
+    services.GetRequiredService<IHardwareProbe>(), services.GetRequiredService<ICustomAgentStore>(),
+    services.GetRequiredService<IAgentRegistry>(), services.GetRequiredService<OllamaModelOperations>(),
+    services.GetRequiredService<ILogger<ModelLibraryService>>(), services.GetRequiredService<IMissionService>()));
+builder.Services.AddSingleton<LocalModelRouter>();
+builder.Services.AddSingleton<IModelLibraryService>(services => services.GetRequiredService<ModelLibraryService>());
+builder.Services.AddSingleton<IModelRouter>(services => services.GetRequiredService<LocalModelRouter>());
 builder.Services.AddHttpClient("Ollama", client => client.Timeout = Timeout.InfiniteTimeSpan)
-    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
-    {
-        AllowAutoRedirect = false,
-        UseProxy = false
-    });
+    .ConfigurePrimaryHttpMessageHandler(() => CreateOllamaHandler(disableOllama));
 builder.Services.AddSingleton<ILLMProvider>(services => new OllamaProvider(
-    services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"), ollama));
+    services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"), ollama,
+    services.GetRequiredService<OllamaDiagnosticStore>(), services.GetRequiredService<OllamaModelOperations>(),
+    services.GetRequiredService<IModelLibraryService>()));
 builder.Services.AddSingleton<ILLMProviderResolver, LlmProviderResolver>();
 builder.Services.AddSingleton<IAgentRouter, LlmAgentRouter>();
 builder.Services.AddSingleton<IMissionOrchestrator, MissionOrchestrator>();
@@ -86,41 +97,74 @@ builder.Services.AddHttpClient<ITwitchChatClient, TwitchChatClient>(client => cl
     .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { AllowAutoRedirect = false });
 builder.Services.AddSingleton<TwitchBotService>();
 builder.Services.AddSingleton<ITwitchBotService>(services => services.GetRequiredService<TwitchBotService>());
+builder.Services.AddSingleton<ITwitchSimulationService, TwitchSimulationService>();
+builder.Services.AddSingleton<ITwitchCommandProposalService, TwitchCommandProposalService>();
 builder.Services.AddHostedService(services => services.GetRequiredService<TwitchBotService>());
 builder.Services.AddSingleton<ICustomAgentStore, CustomAgentStore>();
 builder.Services.AddSingleton<IOllamaModelCatalog>(services => new OllamaModelCatalog(
     services.GetRequiredService<IHttpClientFactory>().CreateClient("Ollama"),
     services.GetRequiredService<OllamaOptions>()));
+var previewBrowserOptions = new PreviewBrowserOptions(
+    Path.Combine(
+        new DirectoryInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs"))
+            .ResolveLinkTarget(returnFinalTarget: true)?.FullName ??
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs"),
+        "node.exe"),
+    builder.Environment.IsDevelopment()
+        ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "AIPlatform.Web", "scripts", "preview-browser.mjs"))
+        : Path.Combine(AppContext.BaseDirectory, "preview-browser", "preview-browser.mjs"));
+var browserTestHelper = StudioBrowserTestOptions.ResolveHelperFile(builder.Environment.ContentRootPath);
+var studioBrowserTestOptions = new StudioBrowserTestOptions(
+    previewBrowserOptions.NodeExecutable, browserTestHelper);
+builder.Services.AddSingleton(new ReactSourceCheck(
+    previewBrowserOptions.NodeExecutable,
+    Path.Combine(Path.GetDirectoryName(browserTestHelper)!, "react-source-check.mjs")));
+builder.Services.AddSingleton<IReactSourceCheck>(services => services.GetRequiredService<ReactSourceCheck>());
+builder.Services.AddSingleton<IReactSourceRepair>(services => services.GetRequiredService<ReactSourceCheck>());
+builder.Services.AddSingleton<IReactDraftRepair, ReactDraftRepair>();
+builder.Services.AddSingleton(previewBrowserOptions);
+builder.Services.AddSingleton(studioBrowserTestOptions);
 builder.Services.AddSingleton(services => new LocalCommandExecutor(
-    services.GetRequiredService<IWorkspaceStore>(), studio, desktop.Enabled));
+    services.GetRequiredService<IWorkspaceStore>(), studio, desktop.Enabled, studioBrowserTestOptions));
 builder.Services.AddSingleton<ILocalCommandExecutor>(services =>
     services.GetRequiredService<LocalCommandExecutor>());
 builder.Services.AddHostedService(services => services.GetRequiredService<LocalCommandExecutor>());
+builder.Services.AddSingleton<IStudioBrowserTestRunner>(services => new StudioBrowserTestRunner(
+    services.GetRequiredService<IMissionService>(),
+    services.GetRequiredService<ILocalCommandExecutor>(),
+    studio,
+    studioBrowserTestOptions,
+    desktop.Enabled));
 builder.Services.AddSingleton<ICustomAgentService, CustomAgentService>();
-builder.Services.AddSingleton<IWorkspaceStore, WorkspaceStore>();
+builder.Services.AddSingleton<IWorkspaceStore>(services => new WorkspaceStore(services.GetRequiredService<StudioOptions>(),
+    id => services.GetRequiredService<MissionStore>().Get(id)?.Workflow?.Revisions?
+        .LastOrDefault(revision => revision.WorkspaceId.HasValue)?.WorkspaceId,
+    id => services.GetRequiredService<MissionStore>().Get(id)?.Sizing));
 builder.Services.AddSingleton<IProjectExport, ProjectExport>();
 builder.Services.AddSingleton<IProjectAnalyzer, ProjectAnalyzer>();
 builder.Services.AddSingleton<IWorkspaceAnalysis, WorkspaceAnalysis>();
 builder.Services.AddSingleton<IProjectGenerator, ProjectGenerator>();
 builder.Services.AddSingleton<IContainerProcess, ContainerProcess>();
-builder.Services.AddSingleton<ISandboxRunner, DockerSandboxRunner>();
+builder.Services.AddSingleton<DockerSandboxRunner>();
+builder.Services.AddSingleton<ISandboxRunner>(services => services.GetRequiredService<DockerSandboxRunner>());
+builder.Services.AddSingleton<ReactRevisionValidation>();
+builder.Services.AddSingleton<IReactRevisionValidation>(services => services.GetRequiredService<ReactRevisionValidation>());
+builder.Services.AddSingleton<IReactRevisionCorrection, ReactRevisionCorrection>();
+builder.Services.AddSingleton<IReactPlanAmendment, ReactPlanAmendment>();
 builder.Services.AddSingleton<IExecutionPlanService, ExecutionPlanService>();
+builder.Services.AddSingleton<ReviewerCorrectionResumeService>();
 builder.Services.AddSingleton<IManualRevisionService, ManualRevisionService>();
 builder.Services.AddSingleton<PreviewSourceVerifier>();
 builder.Services.AddSingleton<PreviewAuthorizationStore>();
 builder.Services.AddSingleton<DockerPreviewHttpTransport>();
 builder.Services.AddSingleton<PreviewProxy>();
-builder.Services.AddSingleton(new PreviewBrowserOptions(
-    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "nodejs", "node.exe"),
-    builder.Environment.IsDevelopment()
-        ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "AIPlatform.Web", "scripts", "preview-browser.mjs"))
-        : Path.Combine(AppContext.BaseDirectory, "preview-browser", "preview-browser.mjs")));
 builder.Services.AddSingleton<IControlledPreviewBrowser, ControlledPreviewBrowser>();
 builder.Services.AddSingleton<IPreviewRuntime, DockerPreviewAdapter>();
 builder.Services.AddSingleton<PreviewSessionManager>();
 builder.Services.AddHostedService<PreviewMaintenance>();
 builder.Services.AddSingleton<MissionProcessor>();
 builder.Services.AddSingleton<IWorkflowAgents, WorkflowAgents>();
+builder.Services.AddSingleton<WorkflowModelRouting>();
 builder.Services.AddSingleton<CollaborativeProcessor>();
 builder.Services.AddHostedService<MissionWorker>();
 builder.Services.AddSingleton<ILocalModelStatus>(services => new LocalModelStatus(
@@ -133,6 +177,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
     options.SerializerOptions.Converters.Add(new JsonStringEnumConverter()));
 
 var app = builder.Build();
+if (app.Environment.IsDevelopment())
+    app.Logger.LogInformation("Studio development data directory: {Directory}", studio.DataDirectory);
+app.Services.GetRequiredService<OllamaDiagnosticStore>().PruneExpired();
 app.UseExceptionHandler();
 app.UseStatusCodePages();
 if (desktop.Enabled)
@@ -164,7 +211,9 @@ if (app.Environment.IsDevelopment())
 app.MapAgents();
 app.MapCustomAgents();
 app.MapModels();
+app.MapModelLibrary();
 app.MapStudio();
+app.MapReactRevisionValidation();
 app.MapTwitch();
 app.MapPreview();
 app.MapGet("/api/health", (CancellationToken token) =>
@@ -185,4 +234,14 @@ if (desktop.Enabled)
 else
     app.Run();
 
+static HttpMessageHandler CreateOllamaHandler(bool disabled) => disabled
+    ? new DisabledOllamaHandler()
+    : new SocketsHttpHandler { AllowAutoRedirect = false, UseProxy = false };
+
 public partial class Program;
+
+file sealed class DisabledOllamaHandler : HttpMessageHandler
+{
+    protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+        Task.FromException<HttpResponseMessage>(new HttpRequestException("Ollama is disabled for this development launch."));
+}

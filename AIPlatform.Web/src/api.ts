@@ -1,5 +1,6 @@
-import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDraft, CustomAgentProjectType, CustomAgentTeam, CustomAgentTeamMember, CustomAgentWorkspace, CustomAgentWorkspaceFile, ExecutionPlan, FileContent, LocalApplication, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, WorkspaceFile } from './types'
+import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentBrowserScenario, CustomAgentBrowserTestReport, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDevelopmentPlan, CustomAgentDraft, CustomAgentProjectType, CustomAgentTeam, CustomAgentTeamMember, CustomAgentWorkspace, CustomAgentWorkspaceFile, ExecutionPlan, FileContent, LocalApplication, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, ReviewerCorrectionResumeEligibility, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandProposal, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, TwitchSimulationEvent, TwitchSimulationResult, WorkspaceFile } from './types'
 import { fetchApi } from './desktop/transport'
+import type { PlannerAttemptDiagnostic } from './types'
 
 export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetchApi(path, init)
@@ -18,12 +19,44 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  decidePlanApproval: async (id: string, approved: boolean, fingerprint: string) => {
+    const response = await fetchApi(`/missions/${encodeURIComponent(id)}/plan-approval`, {
+      method: 'POST', body: JSON.stringify({ approved, fingerprint }),
+    })
+    if (!response.ok) throw new Error(`Décision sur le plan refusée (HTTP ${response.status}). Actualisez le plan avant de réessayer.`)
+  },
+  plannerDiagnostics: (id: string) =>
+    request<PlannerAttemptDiagnostic[]>(`/missions/${encodeURIComponent(id)}/planner-diagnostics`, { cache: 'no-store' }),
+  plannerRawResponse: (id: string, attempt: string) =>
+    request<{ responseBody: string }>(
+      `/missions/${encodeURIComponent(id)}/planner-diagnostics/${encodeURIComponent(attempt)}/raw`, { cache: 'no-store' }),
+  deletePlannerDiagnostics: async (id: string) => {
+    const response = await fetchApi(`/missions/${encodeURIComponent(id)}/planner-diagnostics`, { method: 'DELETE' })
+    if (!response.ok) throw new Error(`Suppression des diagnostics refusée (HTTP ${response.status}).`)
+  },
   configuration: () => request<AgentConfiguration>('/agents/configuration'),
   saveConfiguration: (configuration: AgentConfiguration) => request<AgentConfiguration>('/agents/configuration',
     { method: 'PUT', body: JSON.stringify(configuration) }),
   resume: async (id: string) => {
     const response = await fetchApi(`/missions/${encodeURIComponent(id)}/resume`, { method: 'POST' })
     if (!response.ok) throw new Error(`Reprise refusée (HTTP ${response.status}).`)
+  },
+  reviewerCorrectionResumeEligibility: (id: string) =>
+    request<ReviewerCorrectionResumeEligibility>(
+      `/missions/${encodeURIComponent(id)}/reviewer-correction-resume`, { cache: 'no-store' }),
+  resumeReviewerCorrection: async (id: string) => {
+    const response = await fetchApi(
+      `/missions/${encodeURIComponent(id)}/reviewer-correction-resume`, { method: 'POST' })
+    if (!response.ok) {
+      let detail = `Reprise Reviewer refusée (HTTP ${response.status}).`
+      try {
+        const problem: { detail?: string; title?: string } = await response.json()
+        detail = problem.detail || problem.title || detail
+      } catch {
+        // Keep the HTTP failure when a proxy does not return Problem Details.
+      }
+      throw new Error(detail)
+    }
   },
   revalidate: (id: string) => request<ExecutionPlan>(`/missions/${encodeURIComponent(id)}/revalidate`,
     { method: 'POST' }),
@@ -83,9 +116,9 @@ export const api = {
     if (!response.ok) throw new Error(`Suppression de la conversation refusée (HTTP ${response.status}).`)
   },
   customAgentTeams: () => request<CustomAgentTeam[]>('/custom-agent-teams'),
-  saveCustomAgentTeam: (name: string, members: CustomAgentTeamMember[], id?: string) =>
+  saveCustomAgentTeam: (name: string, members: CustomAgentTeamMember[], id?: string, modelEscalationEnabled = false, automaticModelSelection = false) =>
     request<CustomAgentTeam>(id ? `/custom-agent-teams/${encodeURIComponent(id)}` : '/custom-agent-teams',
-      { method: id ? 'PUT' : 'POST', body: JSON.stringify({ name, members }) }),
+      { method: id ? 'PUT' : 'POST', body: JSON.stringify({ name, members, modelEscalationEnabled, automaticModelSelection }) }),
   deleteCustomAgentTeam: async (id: string) => {
     const response = await fetchApi(`/custom-agent-teams/${encodeURIComponent(id)}`, { method: 'DELETE' })
     if (!response.ok) throw new Error(`Suppression de l’équipe refusée (HTTP ${response.status}).`)
@@ -101,8 +134,68 @@ export const api = {
   stopLocalApplication: (workspaceId: string) =>
     request<LocalApplication>(`/studio/projects/${encodeURIComponent(workspaceId)}/local-application/stop`,
       { method: 'POST' }),
+  runStudioBrowserTests: (
+    workspaceId: string, input: {
+      executionAuthorized: boolean
+      teamId?: string
+      collaborationRunId?: string
+      scenarios?: CustomAgentBrowserScenario[]
+    }, signal?: AbortSignal,
+  ) => request<CustomAgentBrowserTestReport>(
+    `/studio/projects/${encodeURIComponent(workspaceId)}/browser-tests`,
+    { method: 'POST', body: JSON.stringify(input), signal }),
+  studioBrowserScreenshot: async (
+    workspaceId: string, testId: string, scenarioId: string, signal?: AbortSignal,
+  ) => {
+    const response = await fetchApi(
+      `/studio/projects/${encodeURIComponent(workspaceId)}/browser-tests/${encodeURIComponent(testId)}/scenarios/${encodeURIComponent(scenarioId)}/screenshot`,
+      { signal })
+    if (!response.ok) throw new Error(`Capture d’écran indisponible (HTTP ${response.status}).`)
+    return URL.createObjectURL(await response.blob())
+  },
   customAgentTeamRuns: (teamId: string, signal?: AbortSignal) =>
     request<CustomAgentCollaborationRun[]>(`/custom-agent-teams/${encodeURIComponent(teamId)}/runs`, { signal }),
+  customAgentDevelopmentPlans: (teamId: string, signal?: AbortSignal) =>
+    request<CustomAgentDevelopmentPlan[]>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans`, { signal }),
+  createCustomAgentDevelopmentPlan: (
+    teamId: string, goal: string, workspace: CustomAgentWorkspace,
+  ) => request<CustomAgentDevelopmentPlan>(
+    `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans`,
+    { method: 'POST', body: JSON.stringify({ goal, workspace }) }),
+  extendCustomAgentDevelopmentPlan: (teamId: string, planId: string, requestText: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/extend`,
+      { method: 'POST', body: JSON.stringify({ request: requestText }) }),
+  reviewDevelopmentCriterion: (
+    teamId: string, planId: string, taskId: string, index: number,
+    category: string, status: string, evidence: string | null,
+    runId: string | null, reportId: string | null, scenarioId: string | null,
+  ) => request<CustomAgentDevelopmentPlan>(
+    `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/tasks/${encodeURIComponent(taskId)}/criteria/${index}`,
+    { method: 'PUT', body: JSON.stringify({ category, status, evidence, runId, reportId, scenarioId }) }),
+  startCustomAgentDevelopmentPlan: (teamId: string, planId: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/start`,
+      { method: 'POST', body: JSON.stringify({ workspaceAuthorized: true, executionAuthorized: true }) }),
+  pauseCustomAgentDevelopmentPlan: (teamId: string, planId: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/pause`,
+      { method: 'POST' }),
+  resumeCustomAgentDevelopmentPlan: (teamId: string, planId: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/resume`,
+      { method: 'POST', body: JSON.stringify({ workspaceAuthorized: true, executionAuthorized: true }) }),
+  cancelCustomAgentDevelopmentPlan: (teamId: string, planId: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/cancel`,
+      { method: 'POST' }),
+  retryCustomAgentDevelopmentTask: (teamId: string, planId: string, taskId: string) =>
+    request<CustomAgentDevelopmentPlan>(
+      `/custom-agent-teams/${encodeURIComponent(teamId)}/development-plans/${encodeURIComponent(planId)}/retry`,
+      { method: 'POST', body: JSON.stringify({
+        taskId, workspaceAuthorized: true, executionAuthorized: true,
+      }) }),
   customAgentTeamRun: (teamId: string, runId: string, signal?: AbortSignal) =>
     request<CustomAgentCollaborationRun>(
       `/custom-agent-teams/${encodeURIComponent(teamId)}/runs/${encodeURIComponent(runId)}`, { signal }),
@@ -159,6 +252,19 @@ export const api = {
   stopTwitchBot: (id: string) => request<TwitchBot>(`/twitch/bots/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   testTwitchCommand: (id: string, input: string) => request<TwitchCommandTestResult>(
     `/twitch/bots/${encodeURIComponent(id)}/commands/test`, { method: 'POST', body: JSON.stringify({ input }) }),
+  simulateTwitch: (id: string, events: TwitchSimulationEvent[]) => request<TwitchSimulationResult>(
+    `/twitch/bots/${encodeURIComponent(id)}/simulation`, { method: 'POST', body: JSON.stringify({ events }) }),
+  twitchCommandProposals: (id: string) => request<TwitchCommandProposal[]>(
+    `/twitch/bots/${encodeURIComponent(id)}/command-proposals`),
+  generateTwitchCommandProposal: (id: string, teamId: string, requestText: string) => request<TwitchCommandProposal>(
+    `/twitch/bots/${encodeURIComponent(id)}/command-proposals`,
+    { method: 'POST', body: JSON.stringify({ teamId, request: requestText }) }),
+  applyTwitchCommandProposal: (id: string, proposalId: string, deleteApproved: boolean) => request<TwitchCommandProposal>(
+    `/twitch/bots/${encodeURIComponent(id)}/command-proposals/${encodeURIComponent(proposalId)}/apply`,
+    { method: 'POST', body: JSON.stringify({ approved: true, deleteApproved }) }),
+  restoreTwitchCommandProposal: (id: string, proposalId: string) => request<TwitchCommandProposal>(
+    `/twitch/bots/${encodeURIComponent(id)}/command-proposals/${encodeURIComponent(proposalId)}/restore`,
+    { method: 'POST', body: JSON.stringify({ approved: true }) }),
   localModels: (signal?: AbortSignal) => request<LocalModels>('/models/local', { signal }),
   sandbox: (signal?: AbortSignal) => request<Sandbox>('/sandbox', { signal }),
   create: (input: CreateMission) => request<Mission>('/missions', { method: 'POST', body: JSON.stringify(input) }),

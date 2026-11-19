@@ -59,7 +59,7 @@ public static class TwitchEndpoints
             var commands = request.Commands?.Select(command => command is null
                 ? throw new StudioValidationException("A command entry cannot be null.")
                 : new TwitchCommand(command.Name ?? "", command.Response ?? "",
-                    command.CooldownSeconds, command.Enabled)).ToArray()
+                    command.CooldownSeconds, command.Enabled, command.ModeratorOnly)).ToArray()
                 ?? throw new StudioValidationException("A commands list is required.");
             return TypedResults.Ok(TwitchBotResponse.From(
                 bots.Update(id, request.Name ?? "", request.Channel ?? "", commands)));
@@ -116,6 +116,60 @@ public static class TwitchEndpoints
         }).WithName("TestTwitchCommand").WithSummary("Test a chat command locally")
             .WithDescription("Runs the command matcher without connecting to Twitch or consuming its cooldown.")
             .ProducesProblem(400).ProducesProblem(404);
+
+        app.MapPost("/api/twitch/bots/{id:guid}/simulation",
+            (Guid id, TwitchSimulationRequest request, ITwitchSimulationService simulations, CancellationToken token) =>
+        {
+            if (request.Events is null || request.Events.Count is < 1 or > 100)
+                throw new StudioValidationException("A simulation requires between 1 and 100 chat messages.");
+            var events = request.Events.Select(item => item is null
+                ? throw new StudioValidationException("A simulation event cannot be null.")
+                : new TwitchSimulationEvent(item.UserId ?? "", item.Role ?? "", item.Text ?? "", item.AtSeconds))
+                .ToArray();
+            var result = simulations.Simulate(id, events, token);
+            return TypedResults.Ok(new TwitchSimulationResponse(result.BotId,
+                result.Steps.Select(step => new TwitchSimulationStepResponse(
+                    new TwitchSimulationEventRequest(step.Event.UserId, step.Event.Role, step.Event.Text,
+                        step.Event.AtSeconds), step.Outcome, step.Response, step.CooldownRemainingSeconds)).ToArray()));
+        }).WithName("SimulateTwitchBot").WithSummary("Simulate configured chat commands offline")
+            .WithDescription("Uses an isolated virtual clock and the production command router; does not read OAuth credentials or contact Twitch.")
+            .ProducesProblem(400).ProducesProblem(404);
+
+        app.MapGet("/api/twitch/bots/{id:guid}/command-proposals",
+            (Guid id, ITwitchCommandProposalService proposals, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            return TypedResults.Ok(proposals.List(id).Select(TwitchCommandProposalResponse.From).ToArray());
+        }).WithName("ListTwitchCommandProposals").WithSummary("List command proposals for one configured bot")
+            .WithDescription("Returns saved snapshots and simulation evidence; stale configuration results are marked outdated.")
+            .ProducesProblem(404);
+
+        app.MapPost("/api/twitch/bots/{id:guid}/command-proposals",
+            async Task<Ok<TwitchCommandProposalResponse>> (Guid id, CreateTwitchCommandProposalRequest request,
+                ITwitchCommandProposalService proposals, CancellationToken token) =>
+                TypedResults.Ok(TwitchCommandProposalResponse.From(
+                    await proposals.GenerateAsync(id, request.TeamId, request.Request ?? "", token))))
+            .WithName("GenerateTwitchCommandProposal").WithSummary("Generate a structured command proposal")
+            .WithDescription("Calls the selected team's local models; does not change the bot or execute generated code.")
+            .ProducesProblem(400).ProducesProblem(404).ProducesProblem(503);
+
+        app.MapPost("/api/twitch/bots/{id:guid}/command-proposals/{proposalId:guid}/apply",
+            (Guid id, Guid proposalId, ApplyTwitchCommandProposalRequest request,
+                ITwitchCommandProposalService proposals, CancellationToken token) =>
+                TypedResults.Ok(TwitchCommandProposalResponse.From(
+                    proposals.Apply(id, proposalId, request.Approved, request.DeleteApproved, token))))
+            .WithName("ApplyTwitchCommandProposal").WithSummary("Apply an explicitly approved command proposal")
+            .WithDescription("Requires a stopped and unchanged bot; tests changes offline and restores the snapshot on simulation failure.")
+            .ProducesProblem(400).ProducesProblem(404).ProducesProblem(409);
+
+        app.MapPost("/api/twitch/bots/{id:guid}/command-proposals/{proposalId:guid}/restore",
+            (Guid id, Guid proposalId, RestoreTwitchCommandProposalRequest request,
+                ITwitchCommandProposalService proposals, CancellationToken token) =>
+                TypedResults.Ok(TwitchCommandProposalResponse.From(
+                    proposals.RestoreInterrupted(id, proposalId, request.Approved, token))))
+            .WithName("RestoreInterruptedTwitchCommandProposal").WithSummary("Restore an interrupted bot configuration change")
+            .WithDescription("Restores only if the bot still matches the proposal snapshot, and never starts a Twitch connection.")
+            .ProducesProblem(400).ProducesProblem(404).ProducesProblem(409);
     }
 }
 
@@ -135,16 +189,64 @@ public sealed record CreateTwitchBotRequest(string? Name, string? Channel);
 public sealed record UpdateTwitchBotRequest(string? Name, string? Channel, IReadOnlyList<TwitchCommandRequest>? Commands);
 
 /// <summary>One configured text response and its cooldown.</summary>
-public sealed record TwitchCommandRequest(string? Name, string? Response, int CooldownSeconds, bool Enabled);
+public sealed record TwitchCommandRequest(string? Name, string? Response, int CooldownSeconds, bool Enabled,
+    bool ModeratorOnly = false);
 
 /// <summary>Request to test a command without contacting Twitch.</summary>
 public sealed record TestTwitchCommandRequest(string? Input);
 
 /// <summary>Command returned for a configured Twitch bot.</summary>
-public sealed record TwitchCommandResponse(string Name, string Response, int CooldownSeconds, bool Enabled)
+public sealed record TwitchCommandResponse(string Name, string Response, int CooldownSeconds, bool Enabled,
+    bool ModeratorOnly)
 {
     public static TwitchCommandResponse From(TwitchCommand command) =>
-        new(command.Name, command.Response, command.CooldownSeconds, command.Enabled);
+        new(command.Name, command.Response, command.CooldownSeconds, command.Enabled, command.ModeratorOnly);
+}
+
+/// <summary>One simulated chat message at a virtual time in seconds.</summary>
+public sealed record TwitchSimulationEventRequest(string? UserId, string? Role, string? Text, int AtSeconds);
+
+/// <summary>A bounded, independent offline sequence of chat messages.</summary>
+public sealed record TwitchSimulationRequest(IReadOnlyList<TwitchSimulationEventRequest>? Events);
+
+/// <summary>Actual command outcome and captured response for one simulated message.</summary>
+public sealed record TwitchSimulationStepResponse(TwitchSimulationEventRequest Event, string Outcome,
+    string? Response, int CooldownRemainingSeconds);
+
+/// <summary>Offline simulation results for one configured bot.</summary>
+public sealed record TwitchSimulationResponse(Guid BotId, IReadOnlyList<TwitchSimulationStepResponse> Steps);
+
+/// <summary>Natural-language request and existing agent team for a command proposal.</summary>
+public sealed record CreateTwitchCommandProposalRequest(Guid TeamId, string? Request);
+
+/// <summary>Explicit approval, including separate approval when commands are deleted.</summary>
+public sealed record ApplyTwitchCommandProposalRequest(bool Approved, bool DeleteApproved);
+
+/// <summary>Explicit approval to restore an interrupted configuration change.</summary>
+public sealed record RestoreTwitchCommandProposalRequest(bool Approved);
+
+/// <summary>One proposed structured command operation.</summary>
+public sealed record TwitchCommandOperationResponse(string Action, string Name, string? Response,
+    int? CooldownSeconds, bool? Enabled, bool? ModeratorOnly);
+
+/// <summary>Offline assertion associated with a specific command.</summary>
+public sealed record TwitchCommandEvidenceResponse(string Command, string Criterion, string Expected,
+    string Actual, bool Passed);
+
+/// <summary>Saved proposal, configuration snapshots and offline validation results.</summary>
+public sealed record TwitchCommandProposalResponse(Guid Id, Guid BotId, Guid TeamId, DateTimeOffset CreatedAt,
+    string Request, string Status, IReadOnlyList<TwitchCommandOperationResponse> Operations,
+    IReadOnlyList<string> Unsupported, IReadOnlyList<TwitchCommandResponse> Before,
+    IReadOnlyList<TwitchCommandResponse> After, IReadOnlyList<TwitchCommandEvidenceResponse> Evidence, string? Error)
+{
+    public static TwitchCommandProposalResponse From(TwitchCommandProposal proposal) => new(
+        proposal.Id, proposal.BotId, proposal.TeamId, proposal.CreatedAt, proposal.Request, proposal.Status,
+        proposal.Operations.Select(operation => new TwitchCommandOperationResponse(operation.Action, operation.Name,
+            operation.Response, operation.CooldownSeconds, operation.Enabled, operation.ModeratorOnly)).ToArray(),
+        proposal.Unsupported, proposal.Before.Commands.Select(TwitchCommandResponse.From).ToArray(),
+        proposal.After.Commands.Select(TwitchCommandResponse.From).ToArray(),
+        proposal.Evidence.Select(item => new TwitchCommandEvidenceResponse(
+            item.Command, item.Criterion, item.Expected, item.Actual, item.Passed)).ToArray(), proposal.Error);
 }
 
 /// <summary>Bot configuration, connection state and bounded event history without credentials.</summary>

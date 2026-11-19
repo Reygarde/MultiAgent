@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Activity, Bot, Check, CircleDot, LoaderCircle, Plus, Save, ShieldCheck, Square, Trash2 } from 'lucide-react'
 import { api, errorMessage } from './api'
-import type { TwitchBot, TwitchCommand, TwitchCommandTestResult, TwitchDeviceAuthorization, TwitchSettings } from './types'
+import type { CustomAgentTeam, TwitchBot, TwitchCommand, TwitchCommandProposal, TwitchCommandTestResult, TwitchDeviceAuthorization, TwitchSettings, TwitchSimulationEvent, TwitchSimulationResult } from './types'
 
 export function TwitchBots() {
   const [settings, setSettings] = useState<TwitchSettings | null>(null)
@@ -16,6 +16,16 @@ export function TwitchBots() {
   const [authorization, setAuthorization] = useState<TwitchDeviceAuthorization | null>(null)
   const [testInput, setTestInput] = useState('!hello')
   const [testResult, setTestResult] = useState<TwitchCommandTestResult | null>(null)
+  const [simulationMessage, setSimulationMessage] = useState('!hello')
+  const [simulationRole, setSimulationRole] = useState<'Viewer' | 'Moderator'>('Viewer')
+  const [repeatSimulation, setRepeatSimulation] = useState(false)
+  const [simulationDelay, setSimulationDelay] = useState(10)
+  const [simulationResult, setSimulationResult] = useState<TwitchSimulationResult | null>(null)
+  const [teams, setTeams] = useState<CustomAgentTeam[]>([])
+  const [teamId, setTeamId] = useState('')
+  const [commandRequest, setCommandRequest] = useState('')
+  const [proposals, setProposals] = useState<TwitchCommandProposal[]>([])
+  const [deleteApproved, setDeleteApproved] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -45,7 +55,18 @@ export function TwitchBots() {
 
   useEffect(() => {
     void load().catch(reason => setError(errorMessage(reason)))
+    void api.customAgentTeams().then(items => { setTeams(items); setTeamId(items[0]?.id ?? '') })
+      .catch(reason => setError(errorMessage(reason)))
   }, [])
+
+  useEffect(() => {
+    let active = true
+    setProposals([]); setDeleteApproved(false)
+    if (selectedId) void api.twitchCommandProposals(selectedId)
+      .then(items => { if (active) setProposals(items) })
+      .catch(reason => { if (active) setError(errorMessage(reason)) })
+    return () => { active = false }
+  }, [selectedId])
 
   useEffect(() => {
     if (!authorization || !selectedId) return
@@ -114,6 +135,7 @@ export function TwitchBots() {
       setBots(previous => [bot, ...previous])
       setSelectedId(bot.id)
       setDraft(bot)
+      setSimulationResult(null)
       setNewName(''); setNewChannel('')
       setNotice('Bot créé avec la commande de démonstration !hello.')
     } catch (reason) { setError(errorMessage(reason)) }
@@ -127,6 +149,8 @@ export function TwitchBots() {
       const bot = await api.updateTwitchBot(selected.id, name.trim(), channel.trim(), commands)
       setBots(previous => previous.map(item => item.id === bot.id ? bot : item))
       setDraft(bot)
+      setSimulationResult(null)
+      setProposals(await api.twitchCommandProposals(bot.id))
       setNotice('Configuration du bot enregistrée.')
     } catch (reason) { setError(errorMessage(reason)) }
     finally { setBusy(false) }
@@ -165,6 +189,57 @@ export function TwitchBots() {
     catch (reason) { setError(errorMessage(reason)) }
   }
 
+  async function simulate() {
+    if (!selected) return
+    setBusy(true); setError(null); setSimulationResult(null)
+    const first: TwitchSimulationEvent = { userId: 'simulated-viewer', role: simulationRole, text: simulationMessage, atSeconds: 0 }
+    const events = repeatSimulation ? [first, { ...first }, { ...first, atSeconds: simulationDelay }] : [first]
+    try { setSimulationResult(await api.simulateTwitch(selected.id, events)) }
+    catch (reason) { setError(errorMessage(reason)) }
+    finally { setBusy(false) }
+  }
+
+  async function generateProposal() {
+    if (!selected) return
+    setBusy(true); setError(null); setDeleteApproved(false)
+    try {
+      const proposal = await api.generateTwitchCommandProposal(selected.id, teamId, commandRequest)
+      setProposals(previous => [proposal, ...previous])
+    } catch (reason) { setError(errorMessage(reason)) }
+    finally { setBusy(false) }
+  }
+
+  async function applyProposal(proposal: TwitchCommandProposal) {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try {
+      await api.applyTwitchCommandProposal(selected.id, proposal.id, deleteApproved)
+      const [nextBots, history] = await Promise.all([api.twitchBots(), api.twitchCommandProposals(selected.id)])
+      setBots(nextBots); setProposals(history); setDeleteApproved(false)
+      const updated = nextBots.find(bot => bot.id === selected.id)
+      if (updated) setDraft(updated)
+      setNotice('Configuration appliquée et scénarios locaux vérifiés.')
+    } catch (reason) {
+      setError(errorMessage(reason))
+      try { setProposals(await api.twitchCommandProposals(selected.id)) }
+      catch (historyError) { setError(`${errorMessage(reason)} — Historique : ${errorMessage(historyError)}`) }
+    } finally { setBusy(false) }
+  }
+
+  async function restoreProposal(proposal: TwitchCommandProposal) {
+    if (!selected) return
+    setBusy(true); setError(null)
+    try {
+      await api.restoreTwitchCommandProposal(selected.id, proposal.id)
+      const [nextBots, history] = await Promise.all([api.twitchBots(), api.twitchCommandProposals(selected.id)])
+      setBots(nextBots); setProposals(history)
+      const updated = nextBots.find(bot => bot.id === selected.id)
+      if (updated) setDraft(updated)
+      setNotice('Configuration précédente restaurée.')
+    } catch (reason) { setError(errorMessage(reason)) }
+    finally { setBusy(false) }
+  }
+
   const updateCommand = (index: number, patch: Partial<TwitchCommand>) =>
     setCommands(previous => previous.map((command, i) => i === index ? { ...command, ...patch } : command))
   const stateLabel = (state: string) => ({
@@ -190,8 +265,8 @@ export function TwitchBots() {
     <div className="twitch-columns">
       <section className="panel twitch-bot-list">
         <div className="panel-heading"><h2><Bot size={16} /> Bots Twitch</h2><span className="count">{bots.length}</span></div>
-        {bots.map(bot => <button key={bot.id} className={`twitch-bot-item ${bot.id === selectedId ? 'selected' : ''}`}
-          onClick={() => { setSelectedId(bot.id); setDraft(bot); setAuthorization(null); setTestResult(null) }}>
+        {bots.map(bot => <button key={bot.id} className={`twitch-bot-item ${bot.id === selectedId ? 'selected' : ''}`} disabled={busy}
+          onClick={() => { setSelectedId(bot.id); setDraft(bot); setAuthorization(null); setTestResult(null); setSimulationResult(null) }}>
           <strong>{bot.name}</strong><small>#{bot.channel}</small>
           <span className={`badge ${bot.state === 'Connected' ? 'success' : bot.state === 'Error' ? 'warning' : 'quiet'}`}>
             <CircleDot size={11} /> {stateLabel(bot.state)}
@@ -232,6 +307,9 @@ export function TwitchBots() {
               value={command.cooldownSeconds} onChange={event => updateCommand(index, { cooldownSeconds: Number(event.target.value) })} disabled={isRunning} /></label>
             <label className="enabled"><input aria-label={`Activer commande ${index + 1}`} type="checkbox" checked={command.enabled}
               onChange={event => updateCommand(index, { enabled: event.target.checked })} disabled={isRunning} /> Active</label>
+            <label className="enabled"><input aria-label={`Modérateurs uniquement commande ${index + 1}`} type="checkbox"
+              checked={!!command.moderatorOnly} onChange={event => updateCommand(index, { moderatorOnly: event.target.checked })}
+              disabled={isRunning} /> Modérateurs</label>
             <button className="icon-button" aria-label={`Supprimer commande ${index + 1}`}
               disabled={isRunning} onClick={() => setCommands(previous => previous.filter((_, i) => i !== index))}><Trash2 size={14} /></button>
           </div>)}
@@ -262,6 +340,74 @@ export function TwitchBots() {
             </form>
             {testResult && <p role="status">{testResult.matched
               ? `Réponse : ${testResult.response}` : 'Aucune commande ne correspond.'}</p>}
+          </section>
+          <section className="twitch-local-test">
+            <h3>Simulation locale — aucune connexion Twitch</h3>
+            <p>Utilise la configuration enregistrée, sans toucher aux cooldowns du bot connecté.</p>
+            <form onSubmit={event => { event.preventDefault(); void simulate() }}>
+              <input aria-label="Message simulé" value={simulationMessage} maxLength={5000}
+                onChange={event => setSimulationMessage(event.target.value)} />
+              <select aria-label="Rôle simulé" value={simulationRole}
+                onChange={event => setSimulationRole(event.target.value === 'Moderator' ? 'Moderator' : 'Viewer')}>
+                <option value="Viewer">Spectateur</option><option value="Moderator">Modérateur</option>
+              </select>
+              <button className="button secondary" type="submit" disabled={busy || !simulationMessage.trim() || !!commandsChanged}>
+                Simuler
+              </button>
+            </form>
+            <label><input type="checkbox" checked={repeatSimulation} onChange={event => setRepeatSimulation(event.target.checked)} />
+              Tester le cooldown : répéter immédiatement puis après</label>
+            {repeatSimulation && <label> Secondes <input aria-label="Délai simulé en secondes" type="number" min={0} max={86400}
+              value={simulationDelay} onChange={event => setSimulationDelay(Number(event.target.value))} /></label>}
+            {commandsChanged && <p>Enregistrez les modifications avant la simulation.</p>}
+            {simulationResult?.botId === selected.id && !commandsChanged && <div role="status">{simulationResult.steps.map((step, index) =>
+              <p key={index}>À {step.event.atSeconds} s — {step.event.text} : {step.outcome === 'Responded'
+                ? `Réponse : ${step.response}` : step.outcome === 'PermissionDenied' ? 'Refus : modérateur requis'
+                  : step.outcome === 'Cooldown' ? `Cooldown : ${step.cooldownRemainingSeconds} s restantes`
+                    : 'Aucune commande ne correspond.'}</p>)}</div>}
+          </section>
+          <section className="twitch-local-test">
+            <h3>Proposer des commandes avec une équipe</h3>
+            <p>Les réponses sont du texte fixe. Aucun code généré n’est exécuté ; les modifications exigent votre accord.
+              Les simulations vérifient la configuration proposée, pas toutes les intentions de la demande.</p>
+            <label>Équipe <select aria-label="Équipe pour les commandes Twitch" value={teamId}
+              onChange={event => setTeamId(event.target.value)} disabled={busy}>
+              {!teams.length && <option value="">Aucune équipe disponible</option>}
+              {teams.map(team => <option key={team.id} value={team.id}>{team.name}</option>)}
+            </select></label>
+            <form onSubmit={event => { event.preventDefault(); void generateProposal() }}>
+              <input aria-label="Demande de commandes" value={commandRequest}
+                onChange={event => setCommandRequest(event.target.value)} maxLength={4000} />
+              <button className="button secondary" type="submit"
+                disabled={busy || !teamId || !commandRequest.trim() || !!commandsChanged}>Générer</button>
+            </form>
+            {proposals.map(proposal => <div key={proposal.id}>
+              <p><strong>{proposal.request}</strong> — {proposal.status}</p>
+              {proposal.operations.map(operation => <p key={operation.name}>
+                {operation.action} {operation.name} : {JSON.stringify(operation)}
+              </p>)}
+              {proposal.operations.map(operation => <p key={`diff-${operation.name}`}>
+                Avant : {JSON.stringify(proposal.before.find(command => command.name.toLowerCase() === operation.name.toLowerCase()) ?? null)}
+                {' → Après : '}{JSON.stringify(proposal.after.find(command => command.name.toLowerCase() === operation.name.toLowerCase()) ?? null)}
+              </p>)}
+              {proposal.unsupported.map((item, index) => <p key={index}>Non pris en charge : {item}</p>)}
+              {proposal.error && <p>Erreur : {proposal.error}</p>}
+              {proposal.status === 'Outdated' && <p>Preuves périmées : la configuration a changé.</p>}
+              {proposal.status === 'Interrupted' && <button className="button secondary"
+                disabled={busy || isRunning || !!commandsChanged}
+                onClick={() => void restoreProposal(proposal)}>Restaurer la configuration précédente</button>}
+              {proposal.evidence.map((item, index) => <p key={index}>
+                {proposal.status === 'Outdated' ? 'Périmé' : item.passed ? 'Vérifié' : 'Échoué'} — {item.command} : attendu {item.expected}, obtenu {item.actual}
+              </p>)}
+              {proposal.status === 'Proposed' && <>
+                {proposal.operations.some(operation => operation.action === 'delete') &&
+                  <label><input type="checkbox" checked={deleteApproved}
+                    onChange={event => setDeleteApproved(event.target.checked)} /> Autoriser explicitement les suppressions</label>}
+                <button className="button secondary" disabled={busy || isRunning || !!commandsChanged ||
+                  (proposal.operations.some(operation => operation.action === 'delete') && !deleteApproved)}
+                  onClick={() => void applyProposal(proposal)}>Approuver et appliquer</button>
+              </>}
+            </div>)}
           </section>
           <section className="twitch-events">
             <h3>Événements récents</h3>

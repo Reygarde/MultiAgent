@@ -5,7 +5,8 @@ using AIPlatform.Core.Studio;
 
 namespace AIPlatform.Infrastructure.Studio;
 
-public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
+public sealed class WorkspaceStore(StudioOptions options, Func<Guid, Guid?>? resolvePublishedWorkspace = null,
+    Func<Guid, ProjectSizingProfile?>? resolveSizing = null) : IWorkspaceStore
 {
     private static readonly HashSet<string> GeneratedOutputDirectories = new(
         ["bin", "obj", "node_modules", ".git", ".vs", ".idea", "dist", "coverage", "target"],
@@ -24,7 +25,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
 
     public string GetDirectory(Guid id)
     {
-        var path = Path.Combine(root, id.ToString("N"));
+        var path = Path.Combine(root, (resolvePublishedWorkspace?.Invoke(id) ?? id).ToString("N"));
         SafePaths.RejectLinks(path);
         return path;
     }
@@ -71,13 +72,20 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
     }
 
     public void ValidateFiles(
-        IReadOnlyList<GeneratedFile> files, string? templateId = null, bool allowPartialTemplate = false)
+        IReadOnlyList<GeneratedFile> files, string? templateId = null, bool allowPartialTemplate = false,
+        ProjectSizingProfile? sizing = null)
     {
+        sizing?.Validate();
+        if (sizing is not null && templateId != MissionReactTemplate.Id)
+            throw new StudioValidationException("Sizing profiles are limited to React v2 workspaces.");
+        var limits = sizing?.Apply(options) ?? options;
         if (templateId is not null && templateId != DiscordTemplate.Id && templateId != ReactTemplate.Id &&
+            templateId != MissionReactTemplate.Id &&
             templateId != TwitchTemplate.Id && templateId != FullStackTemplate.Id &&
-            templateId != AgentReactTemplate.Id && templateId != AgentDotNetTemplate.Id)
+            templateId != AgentReactTemplate.Id && templateId != AgentDotNetTemplate.Id &&
+            templateId != AgentFullStackTemplate.Id)
             throw new StudioValidationException("Unknown project template.");
-        if (files.Count is < 3 || files.Count > options.MaxFiles)
+        if (files.Count is < 3 || files.Count > limits.MaxFiles)
             throw new StudioValidationException("The project file count exceeds configured limits.");
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var total = 0;
@@ -88,12 +96,12 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 throw new StudioValidationException("Duplicate paths or empty/binary contents are not allowed.");
             var size = Encoding.UTF8.GetByteCount(file.Content);
             total += size;
-            var trustedLockfile = templateId is ReactTemplate.Id or AgentReactTemplate.Id &&
+            var trustedLockfile = templateId is ReactTemplate.Id or MissionReactTemplate.Id or AgentReactTemplate.Id &&
                     file.Path == "package-lock.json" ||
-                templateId == FullStackTemplate.Id && file.Path == "frontend/package-lock.json";
-            if (size > (trustedLockfile ? ReactTemplate.MaxLockfileBytes : options.MaxFileBytes) ||
-                total > Math.Min(options.MaxProjectBytes, templateId == FullStackTemplate.Id
-                    ? FullStackTemplate.MaxProjectBytes : options.MaxProjectBytes))
+                templateId is FullStackTemplate.Id or AgentFullStackTemplate.Id && file.Path == "frontend/package-lock.json";
+            if (size > (trustedLockfile ? ReactTemplate.MaxLockfileBytes : limits.MaxFileBytes) ||
+                total > Math.Min(limits.MaxProjectBytes, templateId == FullStackTemplate.Id
+                    ? FullStackTemplate.MaxProjectBytes : limits.MaxProjectBytes))
                 throw new StudioValidationException("Generated project size exceeds configured limits.");
             if (templateId is not null && !ReactTemplate.IsTrustedLockfile(file.Path, file.Content) &&
                 !FullStackTemplate.IsTrustedLockfile(file.Path, file.Content) &&
@@ -101,6 +109,11 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 throw new StudioValidationException("A possible credential was detected in project file: " + file.Path);
             if (file.Path.EndsWith(".csproj", StringComparison.Ordinal))
                 ValidateProject(file, templateId);
+        }
+        if (templateId == MissionReactTemplate.Id)
+        {
+            MissionReactTemplate.Validate(files);
+            return;
         }
         if (templateId == ReactTemplate.Id)
         {
@@ -114,6 +127,11 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         if (templateId == AgentReactTemplate.Id)
         {
             AgentReactTemplate.Validate(files);
+            return;
+        }
+        if (templateId == AgentFullStackTemplate.Id)
+        {
+            AgentFullStackTemplate.Validate(files);
             return;
         }
         if (templateId == FullStackTemplate.Id)
@@ -139,6 +157,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
 
     private static void ValidateProject(GeneratedFile file, string? templateId)
     {
+        var projectPath = templateId == AgentFullStackTemplate.Id && file.Path.StartsWith("backend/", StringComparison.Ordinal)
+            ? file.Path["backend/".Length..] : file.Path;
         try
         {
             using var reader = XmlReader.Create(new StringReader(file.Content), new XmlReaderSettings
@@ -185,6 +205,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                             ["xunit.runner.visualstudio"] = "3.1.4",
                             ["Microsoft.NET.Test.Sdk"] = "17.14.1"
                         };
+                        if (templateId == AgentFullStackTemplate.Id)
+                            allowed["Microsoft.AspNetCore.Mvc.Testing"] = "10.0.15";
                         if (templateId == FullStackTemplate.Id && file.Path == "backend/Api/Api.csproj")
                         {
                             allowed.Clear();
@@ -208,7 +230,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                         var isAllowedReference = templateId == FullStackTemplate.Id
                             ? file.Path == "backend/Api.Tests/Api.Tests.csproj" &&
                               element.Attribute("Include")?.Value == "../Api/Api.csproj"
-                            : file.Path == "tests/App.Tests/App.Tests.csproj" &&
+                            : projectPath == "tests/App.Tests/App.Tests.csproj" &&
                               element.Attribute("Include")?.Value == "../../src/App/App.csproj";
                         if (!isAllowedReference ||
                             element.Attributes().Any(attribute => attribute.Name != "Include") || element.HasElements)
@@ -216,7 +238,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                     }
                     else if (element.Name == "FrameworkReference")
                     {
-                        if (templateId != FullStackTemplate.Id || file.Path != "backend/Api.Tests/Api.Tests.csproj" ||
+                        if (templateId == FullStackTemplate.Id ? file.Path != "backend/Api.Tests/Api.Tests.csproj" :
+                            templateId != AgentFullStackTemplate.Id || projectPath != "tests/App.Tests/App.Tests.csproj" ||
                             element.Attribute("Include")?.Value != "Microsoft.AspNetCore.App" ||
                             element.Attributes().Any(attribute => attribute.Name != "Include") || element.HasElements)
                             throw new StudioValidationException("Only the approved ASP.NET test framework reference is allowed.");
@@ -227,7 +250,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             }
             var isTestProject = templateId == FullStackTemplate.Id
                 ? file.Path == "backend/Api.Tests/Api.Tests.csproj"
-                : file.Path == "tests/App.Tests/App.Tests.csproj";
+                : projectPath == "tests/App.Tests/App.Tests.csproj";
             if (isTestProject)
             {
                 foreach (var name in new[] { "xunit", "xunit.runner.visualstudio", "Microsoft.NET.Test.Sdk" })
@@ -235,7 +258,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                         throw new StudioValidationException($"The test project must include PackageReference for {name} with the pinned version.");
                 if (!document.Descendants("IsTestProject").Any(element => element.Value == "true") ||
                     !document.Descendants("ProjectReference").Any() ||
-                    (templateId == FullStackTemplate.Id && !document.Descendants("FrameworkReference")
+                    (templateId is FullStackTemplate.Id or AgentFullStackTemplate.Id && !document.Descendants("FrameworkReference")
                         .Any(element => element.Attribute("Include")?.Value == "Microsoft.AspNetCore.App")))
                     throw new StudioValidationException("The test project must enable IsTestProject and include its approved references.");
             }
@@ -259,9 +282,11 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         }
     }
 
-    public async Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken cancellationToken, string? templateId = null)
+    public async Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken cancellationToken, string? templateId = null,
+        ProjectSizingProfile? sizing = null)
     {
-        ValidateFiles(files, templateId);
+        sizing ??= resolveSizing?.Invoke(id);
+        ValidateFiles(files, templateId, sizing: sizing);
         var directory = GetDirectory(id);
         if (!Directory.Exists(directory))
             throw new DirectoryNotFoundException("Workspace not found.");
@@ -269,7 +294,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         foreach (var file in files)
             SafePaths.Resolve(directory, file.Path);
 
-        foreach (var old in List(id).Where(file => file.Path != "Generated.slnx" &&
+        foreach (var old in List(id, sizing).Where(file => file.Path != "Generated.slnx" &&
                      !files.Any(next => string.Equals(next.Path, file.Path, StringComparison.OrdinalIgnoreCase))))
             File.Delete(SafePaths.Resolve(directory, old.Path));
 
@@ -280,7 +305,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             SafePaths.RejectLinks(path);
             await File.WriteAllTextAsync(path, file.Content, new UTF8Encoding(false), cancellationToken);
         }
-        if (templateId is ReactTemplate.Id or AgentReactTemplate.Id)
+        if (templateId is ReactTemplate.Id or MissionReactTemplate.Id or AgentReactTemplate.Id or AgentFullStackTemplate.Id)
         {
             var staleSolution = Path.Combine(directory, "Generated.slnx");
             SafePaths.RejectLinks(staleSolution);
@@ -303,12 +328,15 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             cancellationToken);
     }
 
-    public IReadOnlyList<WorkspaceFile> List(Guid id)
+    public IReadOnlyList<WorkspaceFile> List(Guid id, ProjectSizingProfile? sizing = null)
     {
+        sizing ??= resolveSizing?.Invoke(id);
+        var limit = sizing?.MaxFiles ?? options.MaxFiles;
         var directory = GetDirectory(id);
         if (!Directory.Exists(directory))
             return [];
         var result = new List<WorkspaceFile>();
+        long total = 0;
         Scan(directory);
         return result.OrderBy(file => file.Path, StringComparer.Ordinal).ToArray();
 
@@ -325,9 +353,13 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
                 }
                 else
                 {
-                    if (result.Count > options.MaxFiles)
+                    if (result.Count >= limit + (sizing is null ? 1 : 0))
                         throw new StudioValidationException("Workspace contains unexpected files.");
-                    result.Add(new(Path.GetRelativePath(directory, path).Replace('\\', '/'), new FileInfo(path).Length));
+                    var length = new FileInfo(path).Length;
+                    total += length;
+                    if (sizing is not null && total > sizing.MaxProjectBytes)
+                        throw new StudioValidationException("Workspace exceeds the frozen project size limit.");
+                    result.Add(new(Path.GetRelativePath(directory, path).Replace('\\', '/'), length));
                 }
             }
         }
@@ -342,7 +374,8 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         if (!File.Exists(fullPath))
             throw new FileNotFoundException("Workspace file not found.");
         if (new FileInfo(fullPath).Length > (path == "package-lock.json" ||
-            path == "frontend/package-lock.json" ? ReactTemplate.MaxLockfileBytes : options.MaxFileBytes))
+            path == "frontend/package-lock.json" ? ReactTemplate.MaxLockfileBytes :
+                resolveSizing?.Invoke(id)?.MaxFileBytes ?? options.MaxFileBytes))
             throw new StudioValidationException("This file exceeds the preview limit.");
         return new(path, await File.ReadAllTextAsync(fullPath, cancellationToken));
     }
@@ -401,7 +434,7 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
             }
             var complete = updated.OrderBy(item => item.Key, StringComparer.Ordinal)
                 .Select(item => new GeneratedFile(item.Key, item.Value)).ToArray();
-            ValidateFiles(complete, templateId);
+            ValidateFiles(complete, templateId, sizing: resolveSizing?.Invoke(id));
 
             var written = new List<string>();
             try
@@ -518,8 +551,10 @@ public sealed class WorkspaceStore(StudioOptions options) : IWorkspaceStore
         {
             FullStackTemplate.Id => FullStackTemplate.IsEditable(path),
             ReactTemplate.Id => ReactTemplate.IsEditable(path),
+            MissionReactTemplate.Id => MissionReactTemplate.IsEditable(path) && !ReactTemplate.IsTest(path),
             AgentReactTemplate.Id => AgentReactTemplate.IsEditable(path),
             AgentDotNetTemplate.Id => true,
+            AgentFullStackTemplate.Id => AgentFullStackTemplate.IsEditable(path),
             TwitchTemplate.Id => TwitchTemplate.IsEditable(path),
             DiscordTemplate.Id => false,
             null => true,

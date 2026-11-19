@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 import { api } from './api'
+import { modelLibraryApi } from './modelLibraryApi'
 import { agents, mission, models } from './test/fixtures'
 
 vi.mock('./api', () => ({
@@ -10,16 +11,25 @@ vi.mock('./api', () => ({
     agents: vi.fn(), models: vi.fn(), missions: vi.fn(), missionCapacity: vi.fn(), archiveMission: vi.fn(), restoreMission: vi.fn(), localModels: vi.fn(),
     sandbox: vi.fn(), create: vi.fn(), cancel: vi.fn(), files: vi.fn(), file: vi.fn(),
     executionPlan: vi.fn(), approve: vi.fn(), twitchSettings: vi.fn(), twitchBots: vi.fn(),
-    customAgents: vi.fn(), customAgentModels: vi.fn(),
+    customAgents: vi.fn(), customAgentModels: vi.fn(), customAgentTeams: vi.fn(),
   },
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Error',
 }))
+vi.mock('./modelLibraryApi', () => ({ modelLibraryApi: { snapshot: vi.fn(), downloads: vi.fn() } }))
 
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.agents).mockResolvedValue(agents)
   vi.mocked(api.models).mockResolvedValue(models)
   vi.mocked(api.customAgents).mockResolvedValue([])
+  vi.mocked(api.customAgentTeams).mockResolvedValue([])
+  vi.mocked(modelLibraryApi.snapshot).mockResolvedValue({
+    availableSpecializations: ['Code', 'General'], maximumContextTokens: 262144,
+    models: [], loaded: [], ollamaError: null,
+    hardware: { totalRamBytes: null, availableRamBytes: null, gpus: [], freeDiskBytes: null, warnings: ['Matériel simulé'] },
+  })
+
+  vi.mocked(modelLibraryApi.downloads).mockResolvedValue([])
   vi.mocked(api.customAgentModels).mockResolvedValue(['custom:4b'])
   vi.mocked(api.missions).mockResolvedValue([])
   vi.mocked(api.missionCapacity).mockResolvedValue({ count: 0, limit: 200, remaining: 200 })
@@ -33,6 +43,99 @@ beforeEach(() => {
 })
 
 describe('Studio dashboard', () => {
+  it.each(['', 'server-profile'])('submits only an explicitly selected sizing profile: %s', async selected => {
+    vi.mocked(api.missionCapacity).mockResolvedValue({
+      count: 0, limit: 200, remaining: 200, defaultMaxTotalGenerations: 9,
+      sizingProfiles: [{ id: 'server-profile', name: 'Profil configuré', maxFiles: 64, maxPlannedFiles: 32,
+        maxFileBytes: 131072, maxProjectBytes: 1048576, maxCriteria: 64, maxCorrections: 6,
+        maxRepairGroups: 12, maxFilesPerRepairGroup: 4, missionTimeoutSeconds: 3600 }],
+    })
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'react-typescript-vite-v2')
+    const sizing = screen.getByRole('combobox', { name: 'Dimensionnement du projet' })
+    expect(sizing).toHaveValue('')
+    await user.selectOptions(sizing, selected)
+    await user.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Display information')
+    await user.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalled())
+    const request = vi.mocked(api.create).mock.calls[0][0]
+    expect(request.sizingProfileId).toBe(selected || undefined)
+    expect(request.maxTotalGenerations).toBe(9)
+    expect(request.approveSandboxExecution).toBe(false)
+    expect(sizing).toHaveValue('')
+  })
+
+  it('opts a new React v2 mission into autonomous corrections without granting execution', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'react-typescript-vite-v2')
+    const consent = screen.getByRole('checkbox', { name: 'Corrections logicielles autonomes React v2' })
+    expect(consent).not.toBeChecked()
+    await user.click(consent)
+    await user.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Display information')
+    await user.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({
+      automaticReactCorrections: true, approveSandboxExecution: false,
+    })))
+    expect(consent).not.toBeChecked()
+  })
+
+  it('uses the configured default and submits the explicitly chosen generation ceiling', async () => {
+    vi.mocked(api.missionCapacity).mockResolvedValue({ count: 0, limit: 200, remaining: 200, defaultMaxTotalGenerations: 12 })
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false,
+      maxTotalGenerations: 7, totalGenerations: 0, remainingGenerations: 7 })
+    const user = userEvent.setup()
+    render(<App />)
+    const limit = screen.getByRole('spinbutton', { name: 'Générations maximales' })
+    await waitFor(() => expect(limit).toHaveValue(12))
+    await user.clear(limit)
+    await user.type(limit, '7')
+    await user.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Afficher les informations demandées')
+    await user.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ maxTotalGenerations: 7 })))
+  })
+
+  it('opts into plan approval only for the current project without granting execution', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    const approval = screen.getByRole('checkbox', { name: 'Demander mon approbation après la planification' })
+    expect(approval).not.toBeChecked()
+    await user.click(approval)
+    await user.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Afficher les informations demandées')
+    await user.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({
+      requirePlanApproval: true, approveSandboxExecution: false,
+    })))
+    expect(approval).not.toBeChecked()
+  })
+
+  it('opts in only the submitted project and resets the new-mission default afterward', async () => {
+    vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText('Ollama connecté')
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
+    const toggle = screen.getByRole('checkbox', { name: 'Sélection automatique des modèles pour les missions' })
+    expect(toggle).not.toBeChecked()
+    await user.click(toggle)
+    await user.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer une application React')
+    await user.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
+    await waitFor(() => expect(api.create).toHaveBeenCalledWith(expect.objectContaining({
+      automaticModelSelection: true, approveSandboxExecution: false,
+    })))
+    expect(toggle).not.toBeChecked()
+  })
+
   it('distinguishes a running Docker engine from unavailable sandbox preparation and requires restart confirmation', async () => {
     vi.mocked(api.sandbox).mockResolvedValue({ available: false, engineAvailable: true, reason: 'Image manquante.' })
     const restart = vi.fn().mockResolvedValue(undefined)
@@ -70,7 +173,7 @@ describe('Studio dashboard', () => {
     await waitFor(() => expect(screen.getByRole('button', { name: 'Envoyer la mission' })).toBeDisabled())
     await screen.findByText('Ollama connecté')
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
-    expect(screen.queryByRole('checkbox')).not.toBeInTheDocument()
+    expect(screen.getByRole('checkbox', { name: 'Sélection automatique des modèles pour les missions' })).not.toBeChecked()
     expect(screen.getByText(/Après génération, consultez les fichiers/)).toBeVisible()
     const selector = screen.getByRole('combobox', { name: 'Sélection de l’agent' })
     expect(within(selector).queryByRole('option', { name: 'CustomGeneral' })).not.toBeInTheDocument()
@@ -124,19 +227,24 @@ describe('Studio dashboard', () => {
     }))
   })
 
-  it('submits React App with approved dependencies but without Docker consent', async () => {
+  it.each([false, true])('submits React App without Docker consent and detailed Planner tracing opted in: %s', async tracing => {
     vi.mocked(api.create).mockResolvedValue({ ...mission, status: 'Queued', response: null, hasWorkspace: false })
     render(<App />)
     await screen.findByText('Ollama connecté')
     await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Mode de mission' }), 'Project')
-    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'react-typescript-vite')
-    expect(screen.getByText(/React App v1/)).toHaveTextContent('lockfile figés')
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Template du projet' }), 'react-typescript-vite-v2')
+    expect(screen.getByText(/React App v2/)).toHaveTextContent('lockfile figés')
+    const traceConsent = screen.getByRole('checkbox', { name: 'Conserver les traces détaillées du Planner pour cette mission' })
+    expect(traceConsent).not.toBeChecked()
+    if (tracing) await userEvent.click(traceConsent)
     await userEvent.type(screen.getByRole('textbox', { name: 'Votre mission' }), 'Créer un gestionnaire de tâches')
     await userEvent.click(screen.getByRole('button', { name: 'Envoyer la mission' }))
     await waitFor(() => expect(api.create).toHaveBeenCalledWith({
       task: 'Créer un gestionnaire de tâches', kind: 'Project', agentId: null,
-      approveSandboxExecution: false, templateId: 'react-typescript-vite',
+      approveSandboxExecution: false, templateId: 'react-typescript-vite-v2',
+      ...(tracing ? { recordPlannerTrace: true } : {}),
     }))
+    expect(traceConsent).not.toBeChecked()
   })
 
   it('submits the full-stack template with its backend specialist and no Docker consent', async () => {
@@ -160,7 +268,7 @@ describe('Studio dashboard', () => {
   it('distinguishes installed loaded and in-use model states', async () => {
     render(<App />)
     await screen.findByText('Ollama connecté')
-    await userEvent.click(screen.getByRole('button', { name: 'Modèles' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Bibliothèque de modèles' }))
     expect(screen.getByText('Installé : oui')).toBeVisible()
     expect(screen.getByText('Chargé : non')).toBeVisible()
     expect(screen.getByText('Utilisé : non')).toBeVisible()

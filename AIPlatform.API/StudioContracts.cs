@@ -1,11 +1,42 @@
 using AIPlatform.Core.Studio;
+using AIPlatform.Infrastructure.Studio;
 
 namespace AIPlatform.API;
 
 /// <summary>Creates a queued chat or project mission; sandbox approval is explicit and scoped to this mission.</summary>
 public sealed record CreateMissionRequest(
     string? Task, MissionKind Kind = MissionKind.Chat, string? AgentId = null, bool ApproveSandboxExecution = false,
-    string? TemplateId = null);
+    string? TemplateId = null, bool AutomaticModelSelection = false, bool RecordPlannerTrace = false,
+    bool RequirePlanApproval = false, int? MaxTotalGenerations = null, bool AutomaticReactCorrections = false,
+    string? SizingProfileId = null);
+
+/// <summary>Source-free progress of an isolated software correction, never execution proof.</summary>
+public sealed record ReactSoftwareCorrectionResponse(Guid Id, string Trigger, string Reason,
+    int CompletedGroups, int TotalGroups, int ReviewerCapacity, bool InFlight, bool Ready,
+    IReadOnlyList<string> Decisions, string? Failure);
+
+/// <summary>Approves or refuses an exact saved generation plan, without authorizing code execution.</summary>
+public sealed record DecidePlanApprovalRequest(bool Approved, string Fingerprint);
+
+/// <summary>Source-free history of a human-assisted plan amendment, not an Ollama generation.</summary>
+public sealed record PlanAmendmentResponse(int PreviousVersion, DateTimeOffset PreparedAt,
+    ProjectPlan PreviousPlan, WorkflowPlanApproval PreviousApproval, string DeveloperModel,
+    ModelCompatibility Compatibility, IReadOnlyList<string> RetainedPaths,
+    IReadOnlyList<string> RemainingPaths, IReadOnlyList<FailureDiagnostic> RetainedSourceDiagnostics)
+{
+    public static PlanAmendmentResponse From(WorkflowPlanAmendment amendment, ProjectPlan plan) => new(
+        amendment.PreviousVersion, amendment.PreparedAt, amendment.PreviousPlan, amendment.PreviousApproval,
+        amendment.DeveloperModel, amendment.Compatibility,
+        amendment.PreviousDraft.Where(file => MissionReactTemplate.IsEditable(file.Path)).Select(file => file.Path).ToArray(),
+        plan.Files.Where(file => amendment.PreviousDraft.All(source => source.Path != file.Path)).Select(file => file.Path).ToArray(),
+        amendment.RetainedSourceDiagnostics);
+}
+
+/// <summary>Exact local Ollama response, readable only with explicit capture consent and Desktop authorization.</summary>
+public sealed record PlannerRawResponse(string ResponseBody);
+
+/// <summary>Eligibility and current state for a source-bound Reviewer correction retry.</summary>
+public sealed record ReviewerCorrectionResumeEligibilityResponse(bool Available, bool InProgress, string Reason);
 
 /// <summary>Immutable view of a persisted Studio mission.</summary>
 public sealed record MissionResponse(
@@ -16,7 +47,9 @@ public sealed record MissionResponse(
     IReadOnlyList<MissionEventResponse> Events, IReadOnlyList<VerificationResponse> Verification,
     WorkflowResponse? Workflow = null, string? ProjectName = null, string? ProjectDescription = null, bool Deleted = false,
     string? TemplateId = null, bool Archived = false, DateTimeOffset? ArchivedAt = null,
-    DateTimeOffset? CompletedAt = null)
+    DateTimeOffset? CompletedAt = null, int? MaxTotalGenerations = null, int TotalGenerations = 0,
+    int? RemainingGenerations = null, IReadOnlyList<MissionGenerationReservation>? GenerationReservations = null,
+    string? GenerationBudgetWarning = null, ProjectSizingProfile? Sizing = null)
 {
     public static MissionResponse From(MissionSnapshot mission) => new(
         mission.Id, mission.Task, mission.Kind, mission.RequestedAgent, mission.SandboxApproved,
@@ -26,17 +59,29 @@ public sealed record MissionResponse(
         mission.Verification.Select(VerificationResponse.From).ToArray(),
         mission.Workflow is { } flow ? WorkflowResponse.From(flow) : null,
         mission.ProjectName, mission.ProjectDescription, mission.Deleted, mission.TemplateId,
-        mission.Archived, mission.ArchivedAt, mission.CompletedAt);
+        mission.Archived, mission.ArchivedAt, mission.CompletedAt, mission.MaxTotalGenerations,
+        mission.GenerationReservations?.Count ?? 0,
+        mission.MaxTotalGenerations is { } limit ? Math.Max(0, limit - (mission.GenerationReservations?.Count ?? 0)) : null,
+        mission.GenerationReservations, mission.GenerationBudgetWarning, mission.Sizing);
 }
 
 /// <summary>Current persisted mission count and the configured capacity, including archived missions.</summary>
-public sealed record MissionCapacityResponse(int Count, int Limit, int Remaining);
+public sealed record MissionCapacityResponse(int Count, int Limit, int Remaining, int DefaultMaxTotalGenerations = 10,
+    IReadOnlyList<ProjectSizingProfile>? SizingProfiles = null);
 
 /// <summary>Observable workflow state, excluding raw prompts, draft source and internal model reasoning.</summary>
 public sealed record WorkflowResponse(Guid WorkflowId, Guid MissionId, int Version,
     IReadOnlyList<WorkflowStepResponse> Steps, ProjectPlan? Plan, ReviewReport? Review,
     IReadOnlyList<RevisionResponse> Revisions, string? FinalReport, int? CorrectionLimit,
-    IReadOnlyList<ProposalResponse> Proposals)
+    IReadOnlyList<ProposalResponse> Proposals, bool AutomaticModelSelection = false,
+    IReadOnlyList<WorkflowCriterion>? AcceptanceCriteria = null,
+    IReadOnlyList<WorkflowCriterionExecution>? CriterionExecutions = null,
+    bool RequirePlanApproval = false, WorkflowPlanApproval? PlanApproval = null,
+    IReadOnlyList<ExecutionPlanDifference>? ExecutionPlanDifferences = null,
+    IReadOnlyList<ReactRequirementTrace>? RequirementTrace = null,
+    IReadOnlyList<PlanAmendmentResponse>? PlanAmendments = null,
+    bool AutomaticReactCorrections = false, string? PendingSoftwareAgentCall = null,
+    IReadOnlyList<ReactSoftwareCorrectionResponse>? SoftwareCorrections = null)
 {
     public static WorkflowResponse From(MissionWorkflow flow)
     {
@@ -47,16 +92,27 @@ public sealed record WorkflowResponse(Guid WorkflowId, Guid MissionId, int Versi
             if (version > flow.Version) version = null;
             if (version is { } known) previousVersion = Math.Max(previousVersion ?? known, known);
             var agent = flow.Agents.Single(agent => agent.Id == step.AgentId);
+            var invocations = flow.ModelInvocations.Where(item => item.StepId == step.Id).ToArray();
             return new WorkflowStepResponse(step.Id, step.Kind, step.AgentId, step.DependsOn,
                 step.Status, step.Attempts, step.StartedAt, step.DurationMilliseconds,
                 step.Input, step.Output, step.Error,
-                agent.Role is "Test" or "Orchestrator" ? null : flow.Models.Single(model => model.Id == agent.ModelId).Name,
-                version);
+                agent.Role is "Test" or "Orchestrator" ? null :
+                    invocations.LastOrDefault(item => item.Attempt.Outcome != "Blocked")?.Attempt.ModelName ??
+                    (flow.AutomaticModelSelection ? null : flow.Models.Single(model => model.Id == agent.ModelId).Name),
+                version, flow.AutomaticModelSelection
+                    ? agent.Role is "Test" or "Orchestrator" ? "Deterministic" : "Automatic" : "Manual",
+                flow.ModelSelections.Where(item => item.AgentId == agent.Id).ToArray(), invocations);
         }).ToArray();
         return new(flow.WorkflowId, flow.MissionId, flow.Version, steps, flow.Plan, flow.Review, (flow.Revisions ?? []).Select(revision =>
             new RevisionResponse(revision.Version, revision.CreatedAt, revision.Reason, revision.Fingerprint,
                 revision.Files.Select(file => file.Path).ToArray())).ToArray(), flow.FinalReport, flow.CorrectionLimit,
-        GetProposals(flow).Select(item => new ProposalResponse(item.Version, item.CreatedAt, item.Review)).ToArray());
+        GetProposals(flow).Select(item => new ProposalResponse(item.Version, item.CreatedAt, item.Review)).ToArray(),
+        flow.AutomaticModelSelection, flow.AcceptanceCriteria, flow.CriterionExecutions,
+        flow.RequirePlanApproval, flow.PlanApproval, flow.ExecutionPlanDifferences, flow.RequirementTrace,
+        flow.PlanAmendments.Select(item => PlanAmendmentResponse.From(item, flow.Plan!)).ToArray(),
+        flow.AutomaticReactCorrections, flow.PendingSoftwareAgentCall,
+        flow.SoftwareCorrections.Select(item => new ReactSoftwareCorrectionResponse(item.Id, item.Trigger, item.Reason,
+            item.CompletedGroups, item.Calls.Count, item.ReviewerCapacity, item.InFlight, item.Ready, item.Decisions, item.Failure)).ToArray());
     }
 
     private static int? StepVersion(WorkflowStep step, int? previousVersion)
@@ -112,7 +168,9 @@ public sealed record RevisionFileChangeResponse(string Path, string? Before, str
 /// <summary>Actual execution step and frozen model assignment; version is derived for display, not persisted.</summary>
 public sealed record WorkflowStepResponse(string Id, string Kind, string AgentId, IReadOnlyList<string> DependsOn,
     WorkflowStatus Status, int Attempts, DateTimeOffset? StartedAt, double? DurationMilliseconds,
-    string? Input, string? Output, string? Error, string? ModelName, int? Version = null);
+    string? Input, string? Output, string? Error, string? ModelName, int? Version = null,
+    string SelectionMode = "Manual", IReadOnlyList<WorkflowModelSequence>? ModelSelections = null,
+    IReadOnlyList<WorkflowModelInvocation>? ModelInvocations = null);
 /// <summary>Short human-readable project metadata, independent of the original mission prompt.</summary>
 public sealed record UpdateProjectRequest(string Name, string Description);
 

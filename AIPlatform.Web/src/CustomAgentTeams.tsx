@@ -3,8 +3,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { Check, FolderOpen, Globe, LoaderCircle, Play, Plus, RotateCcw, Save, Square, Trash2, X } from 'lucide-react'
 import { api, errorMessage } from './api'
 import { Markdown } from './Markdown'
+import { installedDeveloperFallbacks, OllamaFallbackModels } from './OllamaFallbackModels'
+import { RoutingExplanation } from './ModelLibrary'
 import type {
-  CustomAgent, CustomAgentCollaborationRun, CustomAgentFileChange, CustomAgentTeam,
+  CustomAgent, CustomAgentBrowserScenarioResult, CustomAgentBrowserTestReport,
+  CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentCriterionReview, CustomAgentDevelopmentPlan, CustomAgentFileChange, CustomAgentTeam,
   CustomAgentProjectType, CustomAgentTeamMember, CustomAgentTeamRole, CustomAgentWorkspace,
   CustomAgentValidationDiagnostic, CustomAgentWorkspaceFile, LocalApplication, Mission, NativeExternalFolderSelection,
 } from './types'
@@ -46,6 +49,7 @@ function stageLabel(run: CustomAgentCollaborationRun) {
   if (run.currentStep === 'StaticValidation') return 'Validation statique'
   if (run.currentStep === 'ApplyingChanges') return 'Application des modifications'
   if (run.currentStep === 'LocalExecution') return 'Exécution locale autorisée'
+  if (run.currentStep === 'BrowserTesting') return 'Tests navigateur'
   if (run.currentStep === 'Restoring') return 'Restauration'
   if (run.currentStep) return roleLabels[run.currentStep as CustomAgentTeamRole] ?? run.currentStep
   return ({
@@ -79,6 +83,93 @@ function localApplicationStatusLabel(status: string) {
   } as Record<string, string>)[status] ?? status
 }
 
+function developmentPlanStatusLabel(status: string) {
+  return ({
+    Ready: 'Prêt',
+    Running: 'En cours',
+    Pausing: 'Pause en cours',
+    Paused: 'En pause',
+    Cancelling: 'Annulation en cours',
+    Cancelled: 'Annulé',
+    Completed: 'Exécution terminée et critères validés',
+    AwaitingValidation: 'Exécution terminée · validations manquantes',
+    Failed: 'Échec',
+  } as Record<string, string>)[status] ?? status
+}
+
+function developmentTaskStatusLabel(status: string) {
+  return ({
+    Pending: 'En attente',
+    Running: 'En cours',
+    Completed: 'Exécutée · critères à vérifier',
+    Failed: 'Échec',
+    Blocked: 'Bloquée par une dépendance',
+  } as Record<string, string>)[status] ?? status
+}
+
+function CriterionEditor({ criterion, review, taskStatus, disabled, runs, workspaceId, save }: {
+  criterion: string, review: CustomAgentCriterionReview, taskStatus: string, disabled: boolean,
+  runs: CustomAgentCollaborationRun[], workspaceId: string,
+  save: (category: string, status: string, evidence: string | null, source: string) => Promise<void>,
+}) {
+  const [category, setCategory] = useState(review.category)
+  const [status, setStatus] = useState(review.status)
+  const [evidence, setEvidence] = useState(review.evidence ?? '')
+  const [source, setSource] = useState('')
+  useEffect(() => {
+    setCategory(review.category)
+    setStatus(review.status)
+    setEvidence(review.evidence ?? '')
+  }, [review.category, review.status, review.evidence])
+  const canReview = ['Completed', 'Failed'].includes(taskStatus) &&
+    (category === 'User' || category === 'Technical')
+  const sources = runs.filter(run => run.workspace?.workspaceId === workspaceId).flatMap(run => {
+    const reports = [...(run.browserTestHistory ?? []), ...(run.browserTest ? [run.browserTest] : [])]
+    return reports.filter((report, index) => reports.findIndex(item => item.id === report.id) === index)
+      .flatMap(report => report.scenarios.filter(scenario =>
+        status === 'Verified' ? report.status === 'Passed' && scenario.status === 'Passed' :
+          status === 'Failed' && scenario.status === 'Failed')
+        .map(scenario => ({ value: `${run.id}|${report.id}|${scenario.id}`, label: `${scenario.name} · ${scenario.status} · ${formatDate(report.testedAt)}` })))
+  })
+  return <li>
+    <strong>{criterion}</strong>
+    <p>{review.status === 'Verified' ? 'Vérifié par scénario associé' :
+      review.status === 'Failed' ? 'Échoué' : 'Non vérifié'}
+      {review.reviewedAt && ` · ${formatDate(review.reviewedAt)}`}</p>
+    {review.evidence && <p className="muted small">Preuve déclarée : {review.evidence}</p>}
+    <label>Catégorie du critère<select aria-label={`Catégorie : ${criterion}`} value={category}
+      disabled={disabled} onChange={event => {
+        const next = event.target.value as CustomAgentCriterionReview['category']
+        setCategory(next)
+        if (next === 'Optional' || next === 'Unclassified') setStatus('Unverified')
+      }}>
+      <option value="Unclassified">À classer</option>
+      <option value="User">Exigence utilisateur</option>
+      <option value="Technical">Condition technique nécessaire</option>
+      <option value="Optional">Suggestion facultative</option>
+    </select></label>
+    <label>Résultat<select aria-label={`Résultat : ${criterion}`} value={status}
+      disabled={disabled || !canReview}
+      onChange={event => setStatus(event.target.value as CustomAgentCriterionReview['status'])}>
+      <option value="Unverified">Non vérifié</option>
+      <option value="Verified" disabled={taskStatus !== 'Completed'}>Vérifié</option>
+      <option value="Failed">Échoué</option>
+    </select></label>
+    {status !== 'Unverified' && <><label>Scénario navigateur<select aria-label={`Scénario : ${criterion}`}
+      value={source} disabled={disabled} onChange={event => setSource(event.target.value)}>
+      <option value="">Sélectionner un résultat enregistré</option>
+      {sources.map(item => <option key={item.value} value={item.value}>{item.label}</option>)}
+    </select></label><label>Correspondance vérifiée<textarea maxLength={1200} value={evidence}
+      aria-label={`Preuve : ${criterion}`} disabled={disabled}
+      placeholder="Expliquez comment ce scénario vérifie ce critère."
+      onChange={event => setEvidence(event.target.value)} /></label></>}
+    <button className="button secondary" disabled={disabled || status !== 'Unverified' && (!evidence.trim() || !sources.some(item => item.value === source))}
+      onClick={() => void save(category, status, status === 'Unverified' ? null : evidence, source)}>
+      Enregistrer ce critère
+    </button>
+  </li>
+}
+
 function ValidationDiagnostics({ diagnostics }: { diagnostics: CustomAgentValidationDiagnostic[] }) {
   const grouped = diagnostics.reduce<Record<string, CustomAgentValidationDiagnostic[]>>((result, item) => {
     const pathDiagnostics = result[item.path] ?? []
@@ -98,9 +189,10 @@ function ValidationDiagnostics({ diagnostics }: { diagnostics: CustomAgentValida
 }
 
 export function CustomAgentTeams({
-  agents, projects, desktopApp, onProjectCreated, onOpenProject,
+  agents, projects, desktopApp, onProjectCreated, onOpenProject, models = [],
 }: {
   agents: CustomAgent[]
+  models?: string[]
   projects: Mission[]
   desktopApp: boolean
   onProjectCreated: (project: Mission) => void
@@ -110,8 +202,17 @@ export function CustomAgentTeams({
   const [teamId, setTeamId] = useState<string | null>(null)
   const [teamName, setTeamName] = useState('')
   const [memberIds, setMemberIds] = useState<string[]>(['', '', ''])
+  const [modelEscalationEnabled, setModelEscalationEnabled] = useState(false)
+  const [automaticModelSelection, setAutomaticModelSelection] = useState(false)
+  const [memberFallbacks, setMemberFallbacks] = useState<(string[] | null)[]>([null, null, null])
   const [runs, setRuns] = useState<CustomAgentCollaborationRun[]>([])
   const [selectedRun, setSelectedRun] = useState<CustomAgentCollaborationRun | null>(null)
+  const [developmentPlans, setDevelopmentPlans] = useState<CustomAgentDevelopmentPlan[]>([])
+  const [selectedDevelopmentPlan, setSelectedDevelopmentPlan] = useState<CustomAgentDevelopmentPlan | null>(null)
+  const [projectRequests, setProjectRequests] = useState<CustomAgentConversation['messages']>([])
+  const [developmentGoal, setDevelopmentGoal] = useState('')
+  const [developmentExtension, setDevelopmentExtension] = useState('')
+  const [developmentPlanBusy, setDevelopmentPlanBusy] = useState(false)
   const [task, setTask] = useState('')
   const [mode, setMode] = useState<'Supervised' | 'Autonomous'>('Supervised')
   const [newProjectName, setNewProjectName] = useState('')
@@ -124,14 +225,20 @@ export function CustomAgentTeams({
   const [externalWriteAuthorized, setExternalWriteAuthorized] = useState(false)
   const [localApplication, setLocalApplication] = useState<LocalApplication | null>(null)
   const [localApplicationBusy, setLocalApplicationBusy] = useState(false)
+  const [browserTest, setBrowserTest] = useState<CustomAgentBrowserTestReport | null>(null)
+  const [browserTestBusy, setBrowserTestBusy] = useState(false)
+  const [browserScreenshot, setBrowserScreenshot] = useState<{ scenarioId: string; url: string } | null>(null)
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const browserFolderInput = useRef<HTMLInputElement>(null)
   const nativeGrantRef = useRef<string | null>(null)
+  const browserTestAbort = useRef<AbortController | null>(null)
   const selectedProject = workspace?.kind === 'Studio'
     ? projects.find(project => project.id === workspace.workspaceId)
     : undefined
+  const selectedProjectIdRef = useRef<string | null>(null)
+  selectedProjectIdRef.current = selectedProject?.id ?? null
   const supportsLocalApplication = selectedProject?.templateId === 'custom-agent-react' ||
     selectedProject?.templateId === 'custom-agent-dotnet'
 
@@ -167,6 +274,76 @@ export function CustomAgentTeams({
     })
     return () => { active = false }
   }, [teamId])
+
+  useEffect(() => {
+    if (!teamId) {
+      setDevelopmentPlans([])
+      setSelectedDevelopmentPlan(null)
+      return
+    }
+    let active = true
+    void api.customAgentDevelopmentPlans(teamId).then(result => {
+      if (!active) return
+      setDevelopmentPlans(result)
+      setSelectedDevelopmentPlan(current => {
+        const projectPlans = result.filter(plan => plan.workspace.workspaceId === selectedProjectIdRef.current)
+        return projectPlans.find(plan => plan.id === current?.id) ?? projectPlans[0] ?? null
+      })
+    }).catch(reason => {
+      if (active) setError(errorMessage(reason))
+    })
+    return () => { active = false }
+  }, [teamId])
+
+  useEffect(() => {
+    const activePlan = selectedDevelopmentPlan
+    if (!teamId || !activePlan || !['Running', 'Pausing', 'Cancelling'].includes(activePlan.status)) return
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const poll = async () => {
+      try {
+        const latest = await api.customAgentDevelopmentPlans(teamId)
+        if (!active) return
+        setDevelopmentPlans(latest)
+        const current = latest.find(plan => plan.id === activePlan.id) ?? null
+        setSelectedDevelopmentPlan(current)
+        const taskRunId = current?.tasks.find(task => task.id === current.currentTaskId)?.collaborationRunId
+        if (taskRunId) {
+          const taskRun = await api.customAgentTeamRun(teamId, taskRunId)
+          if (!active) return
+          setSelectedRun(taskRun)
+          setRuns(runs => [taskRun, ...runs.filter(run => run.id !== taskRun.id)])
+        }
+        if (current && ['Running', 'Pausing', 'Cancelling'].includes(current.status))
+          timer = setTimeout(() => void poll(), 900)
+        else {
+          const completedRuns = await api.customAgentTeamRuns(teamId)
+          if (active) setRuns(completedRuns)
+        }
+      } catch (reason) {
+        if (active) setError(errorMessage(reason))
+      }
+    }
+    timer = setTimeout(() => void poll(), 500)
+    return () => {
+      active = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [teamId, selectedDevelopmentPlan?.id, selectedDevelopmentPlan?.status])
+
+  useEffect(() => {
+    let active = true
+    const plan = selectedDevelopmentPlan
+    setProjectRequests([])
+    if (plan?.conversationId && plan.conversationAgentId) {
+      void api.customAgentConversation(plan.conversationAgentId, plan.conversationId).then(conversation => {
+        if (active) setProjectRequests(conversation.messages.filter(message => message.developmentPlanId === plan.id))
+      }).catch(reason => {
+        if (active) setError(errorMessage(reason))
+      })
+    }
+    return () => { active = false }
+  }, [selectedDevelopmentPlan?.id, selectedDevelopmentPlan?.conversationId, selectedDevelopmentPlan?.updatedAt])
 
   useEffect(() => {
     const activeRun = selectedRun
@@ -218,6 +395,17 @@ export function CustomAgentTeams({
     }
   }, [desktopApp, supportsLocalApplication, selectedProject?.id, selectedProject?.templateId])
 
+  useEffect(() => {
+    setBrowserTest(selectedRun && selectedProject &&
+      selectedRun.workspace?.workspaceId === selectedProject.id
+      ? selectedRun.browserTest ?? null : null)
+    setBrowserScreenshot(null)
+  }, [selectedRun?.id, selectedRun?.browserTest?.id, selectedProject?.id])
+
+  useEffect(() => () => {
+    if (browserScreenshot) URL.revokeObjectURL(browserScreenshot.url)
+  }, [browserScreenshot])
+
   useEffect(() => () => {
     const grantId = nativeGrantRef.current
     nativeGrantRef.current = null
@@ -229,7 +417,12 @@ export function CustomAgentTeams({
     setTeamId(team.id)
     setTeamName(team.name)
     setMemberIds(roles.map(role => team.members.find(member => member.role === role)?.agentId ?? ''))
+    setModelEscalationEnabled(team.modelEscalationEnabled ?? false)
+    setAutomaticModelSelection(team.automaticModelSelection ?? false)
+    setMemberFallbacks(roles.map(role => team.members.find(member => member.role === role)?.fallbackModels ?? null))
     setSelectedRun(null)
+    setDevelopmentPlans([])
+    setSelectedDevelopmentPlan(null)
     setError(null)
   }
 
@@ -238,8 +431,13 @@ export function CustomAgentTeams({
     setTeamId(null)
     setTeamName('')
     setMemberIds([available[0] ?? '', available[1] ?? '', available[2] ?? ''])
+    setModelEscalationEnabled(false)
+    setAutomaticModelSelection(false)
+    setMemberFallbacks([null, null, null])
     setRuns([])
     setSelectedRun(null)
+    setDevelopmentPlans([])
+    setSelectedDevelopmentPlan(null)
     setError(null)
   }
 
@@ -250,8 +448,13 @@ export function CustomAgentTeams({
     try {
       const members: CustomAgentTeamMember[] = roles.map((role, order) => ({
         agentId: memberIds[order] ?? '', role, order,
+        fallbackModels: memberFallbacks[order] ?? (modelEscalationEnabled
+          ? agents.find(agent => agent.id === memberIds[order])?.fallbackModels ??
+            (role === 'Developer' ? installedDeveloperFallbacks(models,
+              agents.find(agent => agent.id === memberIds[order])?.modelName ?? '') : [])
+          : null),
       }))
-      const saved = await api.saveCustomAgentTeam(teamName, members, teamId ?? undefined)
+      const saved = await api.saveCustomAgentTeam(teamName, members, teamId ?? undefined, modelEscalationEnabled, automaticModelSelection)
       setTeams(current => [saved, ...current.filter(team => team.id !== saved.id)])
       selectTeam(saved)
     } catch (reason) {
@@ -381,6 +584,103 @@ export function CustomAgentTeams({
     }
   }
 
+  function updateDevelopmentPlan(plan: CustomAgentDevelopmentPlan) {
+    setSelectedDevelopmentPlan(plan)
+    setDevelopmentPlans(current => [
+      plan, ...current.filter(existing => existing.id !== plan.id),
+    ])
+  }
+
+  async function createDevelopmentPlan() {
+    if (!teamId || !selectedProject || !workspace || workspace.kind !== 'Studio' ||
+      !developmentGoal.trim() || developmentPlanBusy) return
+    setDevelopmentPlanBusy(true)
+    setError(null)
+    try {
+      const plan = await api.createCustomAgentDevelopmentPlan(teamId, developmentGoal.trim(), workspace)
+      updateDevelopmentPlan(plan)
+      setDevelopmentGoal('')
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setDevelopmentPlanBusy(false)
+    }
+  }
+
+  async function extendDevelopmentPlan() {
+    if (!teamId || !selectedDevelopmentPlan || !developmentExtension.trim() || developmentPlanBusy) return
+    setDevelopmentPlanBusy(true)
+    setError(null)
+    try {
+      const plan = await api.extendCustomAgentDevelopmentPlan(
+        teamId, selectedDevelopmentPlan.id, developmentExtension.trim())
+      updateDevelopmentPlan(plan)
+      setDevelopmentExtension('')
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setDevelopmentPlanBusy(false)
+    }
+  }
+
+  async function reviewCriterion(taskId: string, index: number, category: string, status: string, evidence: string | null, source: string) {
+    if (!teamId || !selectedDevelopmentPlan || developmentPlanBusy) return
+    setDevelopmentPlanBusy(true)
+    try {
+      const [runId, reportId, scenarioId] = source.split('|')
+      updateDevelopmentPlan(await api.reviewDevelopmentCriterion(
+        teamId, selectedDevelopmentPlan.id, taskId, index, category, status, evidence,
+        runId || null, reportId || null, scenarioId || null))
+    } catch (error) {
+      setError(errorMessage(error))
+    } finally {
+      setDevelopmentPlanBusy(false)
+    }
+  }
+
+  async function runDevelopmentPlan(action: 'start' | 'resume' | 'retry') {
+    if (!teamId || !selectedDevelopmentPlan || !desktopApp || developmentPlanBusy ||
+      selectedDevelopmentPlan.workspace.workspaceId !== selectedProject?.id) return
+    if (!window.confirm(
+      'Autoriser cette session à modifier automatiquement les fichiers du workspace Studio sélectionné ?'))
+      return
+    if (!window.confirm(
+      'Autoriser séparément l’exécution locale de npm ou .NET ? Ces outils peuvent exécuter le code du projet et Studio ne fournit pas d’isolation de sécurité.'))
+      return
+    setDevelopmentPlanBusy(true)
+    setError(null)
+    try {
+      const plan = action === 'start'
+        ? await api.startCustomAgentDevelopmentPlan(teamId, selectedDevelopmentPlan.id)
+        : action === 'resume'
+          ? await api.resumeCustomAgentDevelopmentPlan(teamId, selectedDevelopmentPlan.id)
+          : await api.retryCustomAgentDevelopmentTask(
+            teamId, selectedDevelopmentPlan.id,
+            selectedDevelopmentPlan.tasks.find(task => task.status === 'Failed')?.id ?? '')
+      updateDevelopmentPlan(plan)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setDevelopmentPlanBusy(false)
+    }
+  }
+
+  async function controlDevelopmentPlan(action: 'pause' | 'cancel') {
+    if (!teamId || !selectedDevelopmentPlan || developmentPlanBusy) return
+    setDevelopmentPlanBusy(true)
+    setError(null)
+    try {
+      const plan = action === 'pause'
+        ? await api.pauseCustomAgentDevelopmentPlan(teamId, selectedDevelopmentPlan.id)
+        : await api.cancelCustomAgentDevelopmentPlan(teamId, selectedDevelopmentPlan.id)
+      updateDevelopmentPlan(plan)
+    } catch (reason) {
+      setError(errorMessage(reason))
+    } finally {
+      setDevelopmentPlanBusy(false)
+    }
+  }
+
   async function createProject() {
     if (!teamId || busy || !newProjectName.trim()) return
     setBusy(true)
@@ -447,6 +747,55 @@ export function CustomAgentTeams({
       setError(errorMessage(reason))
     } finally {
       setLocalApplicationBusy(false)
+    }
+  }
+
+  async function runBrowserTests() {
+    const workspaceId = selectedProject?.id
+    if (!desktopApp || !workspaceId || browserTestBusy) return
+    if (!window.confirm(
+      'Autoriser Playwright à exécuter des interactions limitées sur ce projet local fiable ? Les scripts du projet peuvent déjà exécuter du code local; Playwright ne constitue pas une sandbox.'))
+      return
+    const attachToRun = selectedRun && selectedRun.workspace?.workspaceId === workspaceId &&
+      !activeStatuses.has(selectedRun.status) ? selectedRun : null
+    const controller = new AbortController()
+    browserTestAbort.current = controller
+    setBrowserTestBusy(true)
+    setError(null)
+    try {
+      const report = await api.runStudioBrowserTests(workspaceId, {
+        executionAuthorized: true,
+        teamId: attachToRun?.teamId,
+        collaborationRunId: attachToRun?.id,
+        scenarios: attachToRun?.browserScenarios,
+      }, controller.signal)
+      setBrowserTest(report)
+      if (attachToRun) {
+        const updated = await api.customAgentTeamRun(attachToRun.teamId, attachToRun.id)
+        setSelectedRun(updated)
+        setRuns(current => current.map(item => item.id === updated.id ? updated : item))
+      }
+    } catch (reason) {
+      if (!(reason instanceof DOMException && reason.name === 'AbortError'))
+        setError(errorMessage(reason))
+    } finally {
+      if (browserTestAbort.current === controller) browserTestAbort.current = null
+      setBrowserTestBusy(false)
+    }
+  }
+
+  function cancelBrowserTests() {
+    browserTestAbort.current?.abort()
+  }
+
+  async function showBrowserScreenshot(report: CustomAgentBrowserTestReport, scenario: CustomAgentBrowserScenarioResult) {
+    const workspaceId = selectedProject?.id
+    if (!workspaceId || !scenario.screenshotId) return
+    try {
+      const url = await api.studioBrowserScreenshot(workspaceId, report.id, scenario.screenshotId)
+      setBrowserScreenshot({ scenarioId: scenario.id, url })
+    } catch (reason) {
+      setError(errorMessage(reason))
     }
   }
 
@@ -525,6 +874,9 @@ export function CustomAgentTeams({
     setExternalFiles([])
     setExternalConsent(false)
     const project = projects.find(item => item.id === value)
+    setSelectedDevelopmentPlan(project
+      ? developmentPlans.find(plan => plan.workspace.workspaceId === project.id) ?? null
+      : null)
     setWorkspace(project ? {
       kind: 'Studio', workspaceId: project.id, name: project.projectName || project.task.slice(0, 120),
     } : null)
@@ -535,6 +887,11 @@ export function CustomAgentTeams({
   const workspaceLabel = workspace?.kind === 'External'
     ? `${workspace.name} · ${desktopApp ? 'dossier Windows' : 'lecture seule'}`
     : workspace?.kind === 'Studio' ? workspace.name : 'Aucun workspace (résultat textuel uniquement)'
+  const projectDevelopmentPlans = selectedProject
+    ? developmentPlans.filter(plan => plan.workspace.workspaceId === selectedProject.id)
+    : []
+  const activeDevelopmentPlan = projectDevelopmentPlans.find(
+    plan => plan.id === selectedDevelopmentPlan?.id) ?? null
 
   return <section className="custom-team-panel">
     {error && <div role="alert" className="notice danger">{error}</div>}
@@ -561,7 +918,18 @@ export function CustomAgentTeams({
             <h3>{teamId ? 'Configurer l’équipe' : 'Créer une équipe'}</h3>
             <label>Nom de l’équipe<input maxLength={80} value={teamName}
               onChange={event => setTeamName(event.target.value)} /></label>
-            {roles.map((role, order) => <label key={role}>{order + 1}. {roleLabels[role]}<select
+            <label><input type="checkbox" checked={modelEscalationEnabled}
+              onChange={event => setModelEscalationEnabled(event.target.checked)} />
+              Activer l’escalade automatique des modèles</label>
+            <label><input type="checkbox" checked={automaticModelSelection}
+              onChange={event => setAutomaticModelSelection(event.target.checked)} />
+              Autoriser le routage automatique des agents en mode automatique</label>
+            <p className="muted small">Désactivé pour les équipes existantes. Les agents manuels ne changent pas de modèle initial.
+              En automatique, le routeur choisit une chaîne d’alternatives installées ; elle reste stable pendant la tâche.</p>
+            <p className="muted small">Après deux échecs de génération consécutifs, essayer le secours autorisé suivant,
+              sans augmenter les limites de tentatives. Contexte, mémoire, timeout et infrastructure ne déclenchent
+              pas l’escalade. Les modèles sont utilisés un à la fois ; un 14B peut dépasser la VRAM disponible.</p>
+            {roles.map((role, order) => <div key={role}><label>{order + 1}. {roleLabels[role]}<select
               value={memberIds[order] ?? ''} disabled={busy}
               onChange={event => setMemberIds(current => current.map((id, index) =>
                 index === order ? event.target.value : id))}>
@@ -569,7 +937,14 @@ export function CustomAgentTeams({
               {agents.map(agent => <option key={agent.id} value={agent.id}
                 disabled={memberIds.some((id, index) => index !== order && id === agent.id)}>
                 {agent.name} · {agent.modelName}</option>)}
-            </select></label>)}
+            </select></label>
+              <OllamaFallbackModels label={`Secours ${roleLabels[role]}`} value={memberFallbacks[order]}
+                inherited={agents.find(agent => agent.id === memberIds[order])?.fallbackModels ??
+                  (role === 'Developer' ? installedDeveloperFallbacks(models,
+                    agents.find(agent => agent.id === memberIds[order])?.modelName ?? '') : [])}
+                models={models} primary={agents.find(agent => agent.id === memberIds[order])?.modelName ?? ''}
+                onChange={value => setMemberFallbacks(current => current.map((item, index) => index === order ? value : item))} />
+            </div>)}
             <div className="custom-agent-actions">
               <button className="button primary" disabled={!canSaveTeam || busy} onClick={() => void saveTeam()}>
                 <Save size={13} /> {busy ? 'Enregistrement…' : 'Enregistrer l’équipe'}</button>
@@ -669,6 +1044,219 @@ export function CustomAgentTeams({
                   </details>}
                 </>}
             </section>}
+            {selectedProject && workspace?.kind === 'Studio' && <section
+            className="custom-agent-proposal development-plan" aria-label="Plan de développement">
+            <header><strong>Plan de développement</strong>
+              <span>{activeDevelopmentPlan
+                ? `${developmentPlanStatusLabel(activeDevelopmentPlan.status)} · ${activeDevelopmentPlan.attempts}/${activeDevelopmentPlan.maxAttempts} tentative(s)`
+                : desktopApp ? 'Aucun plan' : 'Desktop requis'}</span>
+            </header>
+            {!desktopApp && <p className="muted small">
+              La planification exécutable est disponible uniquement dans AIPlatform Studio Desktop sous Windows.
+            </p>}
+            {desktopApp && <>
+              <label>Plan enregistré<select aria-label="Plan de développement enregistré"
+                value={activeDevelopmentPlan?.id ?? ''} disabled={developmentPlanBusy}
+                onChange={event => setSelectedDevelopmentPlan(
+                  projectDevelopmentPlans.find(plan => plan.id === event.target.value) ?? null)}>
+                <option value="">Aucun plan sélectionné</option>
+                {projectDevelopmentPlans.map(plan => <option key={plan.id} value={plan.id}>
+                  {plan.goal.slice(0, 100)} · {developmentPlanStatusLabel(plan.status)}
+                </option>)}
+              </select></label>
+              {!activeDevelopmentPlan && <div>
+                <label>Objectif<textarea rows={3} maxLength={4000} value={developmentGoal}
+                  disabled={!teamId || developmentPlanBusy}
+                  onChange={event => setDevelopmentGoal(event.target.value)}
+                  placeholder="Ex. Ajouter la persistance locale et tester le parcours de tâches." />
+                </label>
+                <button className="button primary" disabled={!teamId || developmentPlanBusy ||
+                  !developmentGoal.trim() || !selectedProject.hasWorkspace}
+                  onClick={() => void createDevelopmentPlan()}>
+                  {developmentPlanBusy ? <><LoaderCircle size={13} /> Planification…</> :
+                    'Créer un plan avec le Planner'}
+                </button>
+              </div>}
+              {activeDevelopmentPlan && <>
+                <p>{activeDevelopmentPlan.goal}</p>
+                <p className="muted small">
+                  Classez les propositions du Planner et associez explicitement les scénarios qui vérifient chaque critère.
+                  Vérifiez leur pertinence : un build seul ne prouve pas une fonctionnalité.
+                </p>
+                <p>Exécution : {activeDevelopmentPlan.tasks.filter(task => task.status === 'Completed').length}/{activeDevelopmentPlan.tasks.length} tâches.
+                  {' '}Critères : {activeDevelopmentPlan.tasks.flatMap(task => task.criterionReviews ?? []).filter(item => item.status === 'Verified').length} vérifié(s),
+                  {' '}{activeDevelopmentPlan.tasks.flatMap(task => task.criterionReviews ?? []).filter(item => item.status === 'Failed').length} échoué(s),
+                  {' '}{activeDevelopmentPlan.tasks.flatMap(task => task.criterionReviews ?? []).filter(item => item.status === 'Unverified' && item.category !== 'Optional').length} non vérifié(s).
+                </p>
+                {projectRequests.length > 0 && <details open>
+                  <summary>Demandes du projet</summary>
+                  <ol>{projectRequests.map((message, index) => <li key={`${message.createdAt}-${index}`}>
+                    <time>{new Date(message.createdAt).toLocaleString()}</time> : {message.content}
+                    <ul>{message.developmentTaskIds?.map(id => {
+                      const item = activeDevelopmentPlan.tasks.find(task => task.id === id)
+                      return item && <li key={id}>{item.title} · {developmentTaskStatusLabel(item.status)}
+                        {item.summary && ` · ${item.summary}`}</li>
+                    })}</ul>
+                  </li>)}</ol>
+                </details>}
+                <ol className="development-plan-tasks">
+                  {activeDevelopmentPlan.tasks.map(task => <li key={task.id}>
+                    <strong>{task.order + 1}. {task.title}</strong>
+                    <span>{developmentTaskStatusLabel(task.status)} · {task.attempts} tentative(s)</span>
+                    <p>{task.description}</p>
+                    <ul>{task.acceptanceCriteria.map((criterion, index) => <CriterionEditor
+                      key={`${task.id}-criterion-${index}`} criterion={criterion}
+                      review={task.criterionReviews?.[index] ?? {
+                        category: 'Unclassified', status: 'Unverified', evidence: null, reviewedAt: null, current: false,
+                        runId: null, reportId: null, scenarioId: null,
+                      }}
+                      taskStatus={task.status}
+                      runs={runs} workspaceId={selectedProject.id}
+                      disabled={developmentPlanBusy || ['Running', 'Pausing', 'Cancelling'].includes(activeDevelopmentPlan.status)}
+                      save={(category, status, evidence, source) => reviewCriterion(task.id, index, category, status, evidence, source)}
+                    />)}</ul>
+                    {(task.criterionReviewHistory?.length ?? 0) > 0 && <details>
+                      <summary>Historique des vérifications</summary>
+                      <ul>{task.criterionReviewHistory.map((item, index) => <li key={index}>
+                        {formatDate(item.recordedAt)} · {task.acceptanceCriteria[item.criterionIndex]} · {item.category} · {item.status}
+                        {item.evidence && ` · ${item.evidence}`}
+                        {item.reportId && ` · rapport ${item.reportId}, scénario ${item.scenarioId}`}
+                      </li>)}</ul>
+                    </details>}
+                    {task.dependencies.length > 0 && <p className="muted small">
+                      Dépend de : {task.dependencies.join(', ')}
+                    </p>}
+                    {task.changedFiles.length > 0 && <p className="muted small">
+                      Fichiers : {task.changedFiles.join(', ')}
+                    </p>}
+                    {task.error && <p role="alert" className="notice danger">{task.error}</p>}
+                    {task.validation && <>
+                      <p className="muted small">
+                        {validationStatusLabel(task.validation.staticStatus)} · compilation : {
+                          task.validation.compilationStatus === 'Passed' ? 'réussie' :
+                            task.validation.compilationStatus === 'Failed' ? 'échouée' :
+                              task.validation.compilationStatus === 'TimedOut' ? 'délai dépassé' :
+                                'non disponible'}
+                      </p>
+                      {task.validation.diagnostics.length > 0 &&
+                        <ValidationDiagnostics diagnostics={task.validation.diagnostics} />}
+                    </>}
+                    {task.collaborationRunId && runs.find(run => run.id === task.collaborationRunId) &&
+                      <button className="button secondary"
+                        onClick={() => setSelectedRun(
+                          runs.find(run => run.id === task.collaborationRunId) ?? null)}>
+                        Voir la collaboration et ses journaux
+                      </button>}
+                  </li>)}
+                </ol>
+                {activeDevelopmentPlan.error && <div role="alert" className="notice danger">
+                  {activeDevelopmentPlan.error}
+                </div>}
+                <div className="custom-agent-actions">
+                  {activeDevelopmentPlan.status === 'Ready' && <button className="button primary"
+                    disabled={developmentPlanBusy} onClick={() => void runDevelopmentPlan('start')}>
+                    <Play size={13} /> Démarrer le plan
+                  </button>}
+                  {activeDevelopmentPlan.status === 'Running' && <>
+                    <button className="button secondary" disabled={developmentPlanBusy}
+                      onClick={() => void controlDevelopmentPlan('pause')}>Mettre en pause</button>
+                    <button className="button secondary" disabled={developmentPlanBusy}
+                      onClick={() => void controlDevelopmentPlan('cancel')}>Annuler le plan</button>
+                  </>}
+                  {activeDevelopmentPlan.status === 'Paused' && <button className="button primary"
+                    disabled={developmentPlanBusy} onClick={() => void runDevelopmentPlan('resume')}>
+                    <Play size={13} /> Reprendre après autorisation
+                  </button>}
+                  {activeDevelopmentPlan.status === 'Failed' &&
+                    activeDevelopmentPlan.attempts < activeDevelopmentPlan.maxAttempts &&
+                    <button className="button primary" disabled={developmentPlanBusy ||
+                      !activeDevelopmentPlan.tasks.some(task => task.status === 'Failed')}
+                      onClick={() => void runDevelopmentPlan('retry')}>
+                      <RotateCcw size={13} /> Réessayer la tâche échouée
+                    </button>}
+                </div>
+                {!['Running', 'Pausing', 'Cancelling'].includes(activeDevelopmentPlan.status) &&
+                  activeDevelopmentPlan.tasks.length < 20 && <div>
+                  <label>Ajouter une demande au plan<textarea rows={2} maxLength={4000}
+                    value={developmentExtension} disabled={developmentPlanBusy}
+                    onChange={event => setDevelopmentExtension(event.target.value)}
+                    placeholder="Décrire les tâches supplémentaires sans répéter celles terminées." />
+                  </label>
+                  <button className="button secondary" disabled={developmentPlanBusy ||
+                    !developmentExtension.trim()} onClick={() => void extendDevelopmentPlan()}>
+                    <Plus size={13} /> Étendre le plan
+                  </button>
+                </div>}
+                <details>
+                  <summary>Mémoire projet persistée</summary>
+                  <p>{activeDevelopmentPlan.memory.architecture}</p>
+                  {activeDevelopmentPlan.memory.completedFeatures.length > 0 &&
+                    <p>Fonctionnalités : {activeDevelopmentPlan.memory.completedFeatures.join(' · ')}</p>}
+                  {activeDevelopmentPlan.memory.decisions.length > 0 &&
+                    <p>Décisions : {activeDevelopmentPlan.memory.decisions.join(' · ')}</p>}
+                  {activeDevelopmentPlan.memory.keyFiles.length > 0 &&
+                    <p>Fichiers clés : {activeDevelopmentPlan.memory.keyFiles.join(', ')}</p>}
+                  {activeDevelopmentPlan.memory.knownIssues.length > 0 &&
+                    <p>Problèmes connus : {activeDevelopmentPlan.memory.knownIssues.join(' · ')}</p>}
+                </details>
+              </>}
+            </>}
+            </section>}
+            {supportsLocalApplication && selectedProject && <section className="custom-agent-proposal browser-tests"
+                aria-label="Tests navigateur">
+                <header><strong>Tests navigateur</strong>
+                  <span>{browserTest
+                    ? `${browserTest.passed} réussi(s) · ${browserTest.failed} échoué(s)`
+                    : desktopApp ? 'Aucun résultat' : 'Desktop requis'}</span></header>
+                <p className="notice warning">
+                  Playwright utilise Edge/Chromium installé localement, un contexte temporaire et des actions limitées. Il ne s’agit pas d’une sandbox de sécurité; les accès réseau hors de l’origine localhost testée sont bloqués.
+                </p>
+                {!desktopApp
+                  ? <p className="muted small">Les tests navigateur sont disponibles uniquement dans AIPlatform Studio Desktop sous Windows.</p>
+                  : <div className="custom-agent-actions">
+                    <button className="button primary" disabled={browserTestBusy || busy ||
+                      !selectedProject.hasWorkspace || activeStatuses.has(selectedRun?.status ?? '')}
+                      onClick={() => void runBrowserTests()}>
+                      {browserTestBusy ? <><LoaderCircle size={13} className="spin" /> Tests en cours…</> :
+                        <><Globe size={13} /> Tester l’application</>}
+                    </button>
+                    {browserTestBusy && <button className="button secondary"
+                      onClick={() => void cancelBrowserTests()}>Annuler les tests</button>}
+                  </div>}
+                {browserTest && <div className="browser-test-results" aria-live="polite">
+                  <strong>{({
+                    Passed: 'Tests navigateur réussis',
+                    Failed: 'Échec des tests navigateur',
+                    InvalidScenario: 'Scénario de test invalide',
+                    BrowserUnavailable: 'Chromium indisponible',
+                    ServerUnavailable: 'Serveur local indisponible',
+                    TimedOut: 'Délai des tests dépassé',
+                    Unsupported: 'Projet non compatible',
+                    Cancelled: 'Tests annulés',
+                  } as Record<string, string>)[browserTest.status] ?? browserTest.status}</strong>
+                  {browserTest.url && <p className="muted small">URL vérifiée : <code>{browserTest.url}</code></p>}
+                  {browserTest.error && <div role="alert" className="notice danger">{browserTest.error}</div>}
+                  {browserTest.scenarios.map(scenario => <article key={scenario.id}>
+                    <strong>{scenario.name} · {scenario.status === 'Passed' ? 'Réussi' : 'Échec'}</strong>
+                    {scenario.failedStep && <p className="muted small">Étape : {scenario.failedStep}</p>}
+                    {scenario.error && <p role="alert" className="muted small">{scenario.error}</p>}
+                    {scenario.javaScriptErrors.map((message, index) =>
+                      <p key={`${scenario.id}-${index}`} className="muted small">JavaScript : {message}</p>)}
+                    {scenario.screenshotId && <button className="button secondary"
+                      onClick={() => void showBrowserScreenshot(browserTest, scenario)}>
+                      Voir la capture locale</button>}
+                    {browserScreenshot?.scenarioId === scenario.id &&
+                      <img className="browser-test-screenshot" src={browserScreenshot.url}
+                        alt={`Capture d’écran du scénario ${scenario.name}`} />}
+                  </article>)}
+                  <p className="muted small">Dernier test : {formatDate(browserTest.testedAt)}</p>
+                </div>}
+                {!browserTest && selectedRun?.workspace?.workspaceId === selectedProject.id &&
+                  (selectedRun.browserScenarios?.length ?? 0) > 0 &&
+                  <p className="muted small">
+                    {selectedRun!.browserScenarios!.length} scénario(s) fonctionnel(s) proposé(s) par le Planner seront utilisés.
+                  </p>}
+            </section>}
             {workspace?.kind === 'External' && <>
               {desktopApp && !externalWriteAuthorized && <button className="button secondary"
                 disabled={!externalGrantId || busy} onClick={() => void authorizeExternalWrites()}>
@@ -726,6 +1314,18 @@ export function CustomAgentTeams({
                     <div><strong>{selectedRun.mode === 'Autonomous' ? 'Autonome · ' : 'Supervisé · '}{stageLabel(selectedRun)}</strong><span>{selectedRun.task}</span></div>
                     {activeStatuses.has(selectedRun.status) && <LoaderCircle size={16} className="spin" />}
                   </header>
+                  {(selectedRun.modelAttempts?.length ?? 0) > 0 && <section aria-label="Sélection des modèles">
+                    <h4>Modèles et décisions</h4>
+                    <p>Modèle actif / dernier utilisé : <strong>{selectedRun.modelAttempts?.at(-1)?.modelName}</strong></p>
+                    <ol>{selectedRun.modelAttempts?.map(attempt => <li key={attempt.id}>
+                      <strong>{roleLabels[attempt.role]} · {attempt.modelName}</strong> · {attempt.outcome}
+                      <p>{attempt.selectionReason}</p>
+                      {attempt.routingDecision && <RoutingExplanation decision={attempt.routingDecision} />}
+                      <p>{attempt.decision}</p>
+                      <p>Prochain modèle : {attempt.nextModel ?? 'aucun changement prévu'} · Compilation/tests : {attempt.compilationStatus}
+                        {attempt.failureKind && ` · ${attempt.failureKind}`}</p>
+                    </li>)}</ol>
+                  </section>}
                   {selectedRun.contributions.map((contribution, index) => <article
                     key={`${contribution.agentId}-${index}`} className="custom-chat-message assistant">
                     <strong>{contribution.role === 'Developer' && index > 2

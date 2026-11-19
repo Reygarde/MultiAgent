@@ -608,14 +608,14 @@ public sealed class CollaborativeWorkflowTests
     }
 
     [Theory]
-    [InlineData("garbage")]
-    [InlineData("""{"name":"bad","description":"bad","decisions":[],"files":[]}""")]
-    public async Task InvalidPlanNeverReachesDeveloperOrDocker(string response)
+    [InlineData("garbage", 1)]
+    [InlineData("""{"name":"bad","description":"bad","decisions":[],"files":[]}""", 3)]
+    public async Task InvalidPlanNeverReachesDeveloperOrDocker(string response, int plannerCalls)
     {
         using var fixture = new WorkflowFixture(responseOverride: _ => response);
         var mission = fixture.Store.Submit(new("Create Calculator", MissionKind.Project));
         await Assert.ThrowsAnyAsync<Exception>(() => fixture.Processor.ProcessAsync(mission.Id, default));
-        Assert.Single(fixture.Provider.Requests);
+        Assert.Equal(plannerCalls, fixture.Provider.Requests.Count);
         Assert.False(fixture.Store.Get(mission.Id)!.HasWorkspace);
         Assert.Empty(fixture.Sandbox.Calls);
     }
@@ -704,7 +704,9 @@ public sealed class CollaborativeWorkflowTests
         await Assert.ThrowsAsync<StudioValidationException>(() => fixture.Processor.ProcessAsync(mission.Id, default));
         Assert.Empty(fixture.Sandbox.Calls);
         Assert.NotEqual(MissionStatus.AwaitingApproval, fixture.Store.Get(mission.Id)!.Status);
-        Assert.Equal(invalidFile ? 2 : 6, calls);
+        Assert.Equal(invalidFile ? 2 : 6 + fixture.Options.MaxCorrectionAttempts, calls);
+        Assert.Equal(invalidFile ? 0 : fixture.Options.MaxCorrectionAttempts, fixture.Store.Get(mission.Id)!.CorrectionAttempts);
+        Assert.DoesNotContain(fixture.Store.Get(mission.Id)!.Workflow!.Steps, step => step.Kind == "Correct");
     }
 
     [Fact]
@@ -818,6 +820,7 @@ internal sealed class WorkflowFixture : IDisposable
     public ExecutionPlanService Plans { get; }
     public FakeProvider Provider { get; }
     public WorkflowSandbox Sandbox { get; }
+    public SandboxOptions SandboxOptions { get; }
     public CollaborativeProcessor Processor { get; }
     public static ProjectPlan Plan => new("Calculator", "Offline calculator library", ["Small deterministic library."],
     [
@@ -828,16 +831,17 @@ internal sealed class WorkflowFixture : IDisposable
     ]);
 
     public WorkflowFixture(bool available = true, int corrections = 3,
-        Func<LlmRequest, string>? responseOverride = null, bool fullStack = false, int maxOutputTokens = 2048)
+        Func<LlmRequest, string>? responseOverride = null, bool fullStack = false, int maxOutputTokens = 2048,
+        IReactSourceCheck? sourceCheck = null, int contextSize = 8192)
     {
         Options = new() { DataDirectory = Path.Combine(Path.GetTempPath(), "AIPlatform-workflow-" + Guid.NewGuid().ToString("N")),
-            CollaborativeWorkflows = true, MaxCorrectionAttempts = corrections };
+            CollaborativeWorkflows = true, MaxCorrectionAttempts = corrections, DefaultMaxTotalGenerations = 100 };
         var original = TestSupport.Configuration();
         var workflowRoles = new List<string> { "Planner", "Review", "Test", "Orchestrator" };
         if (fullStack) workflowRoles.AddRange(["Backend", "Frontend"]);
         Platform = original with
         {
-            Models = original.Models.Select(model => model with { ContextSize = 8192, MaxOutputTokens = maxOutputTokens }).ToList(),
+            Models = original.Models.Select(model => model with { ContextSize = contextSize, MaxOutputTokens = maxOutputTokens }).ToList(),
             Agents = [.. original.Agents.Select(agent => agent.Id == "DeveloperAgent"
                 ? agent with { Role = "Developer", AllowedTools = ["GenerateFiles"], TaskTypes = ["Chat", "Project"] } : agent),
                 .. workflowRoles.Select(role => new AgentDefinition
@@ -848,9 +852,11 @@ internal sealed class WorkflowFixture : IDisposable
                 })]
         };
         Registry = new(Platform);
-        Workspaces = new(Options);
-        Store = new(Options, Platform, Registry, Workspaces);
-        Plans = new(Workspaces, new(), Options, Store, new WorkflowImageProcess());
+        MissionStore? store = null;
+        Workspaces = new(Options, resolveSizing: id => store?.Get(id)?.Sizing);
+        Store = store = new(Options, Platform, Registry, Workspaces);
+        SandboxOptions = new() { Enabled = available };
+        Plans = new(Workspaces, SandboxOptions, Options, Store, new WorkflowImageProcess());
         Sandbox = new(available);
         Provider = new((request, cancellationToken) =>
         {
@@ -870,7 +876,8 @@ internal sealed class WorkflowFixture : IDisposable
                 [], "No blocking defect found.", [], "Matches plan.", "Verify in Docker.");
             return Task.FromResult(JsonSerializer.Serialize(response, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
         });
-        Processor = new(Store, new WorkflowAgents(new LlmProviderResolver([Provider]), Options), Workspaces, Plans, Sandbox, Options);
+        Processor = new(Store, new WorkflowAgents(new LlmProviderResolver([Provider]), Options), Workspaces, Plans, Sandbox,
+            Options, reactSourceCheck: sourceCheck);
     }
 
     public async Task Approve(Guid id)

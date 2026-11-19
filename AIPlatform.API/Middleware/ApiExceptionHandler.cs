@@ -12,7 +12,9 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
     {
         var (status, title) = exception switch
         {
+            GenerationBudgetExhaustedException => (StatusCodes.Status409Conflict, "GenerationBudgetExhausted"),
             LlmTimeoutException => (StatusCodes.Status504GatewayTimeout, "LLM provider timeout"),
+            ModelOperationConflictException => (StatusCodes.Status409Conflict, "Model operation blocked"),
             LlmProviderException => (StatusCodes.Status503ServiceUnavailable, "LLM provider unavailable"),
             CustomAgentModelUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Custom agent model unavailable"),
             PreviewUnavailableException => (StatusCodes.Status503ServiceUnavailable, "Preview unavailable"),
@@ -36,7 +38,7 @@ public sealed class ApiExceptionHandler(ILogger<ApiExceptionHandler> logger) : I
             title: title,
             detail: exception switch
             {
-                StudioValidationException or StudioCapacityException or TwitchIntegrationException or
+                GenerationBudgetExhaustedException or ModelOperationConflictException or StudioValidationException or StudioCapacityException or TwitchIntegrationException or
                     CustomAgentModelUnavailableException => exception.Message,
                 LlmTimeoutException => "Ollama took too long to respond. Try again.",
                 LlmProviderException => "Ollama is unavailable or returned an error. Check that it is running and try again.",

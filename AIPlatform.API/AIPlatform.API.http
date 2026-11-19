@@ -49,6 +49,22 @@ Content-Type: application/json
 ### Remplacer par l'identifiant retourne par POST /api/missions
 @missionId = 00000000-0000-0000-0000-000000000000
 
+### OPTIONAL REAL GENERATION: only after explicit authorization, never run automatically
+# Plan approval and per-revision Docker consent remain separate.
+POST {{AIPlatform.API_HostAddress}}/api/missions
+Content-Type: application/json
+
+{
+  "task": "Display a counter starting at zero with increment and reset actions.",
+  "kind": "Project",
+  "templateId": "react-typescript-vite-v2",
+  "automaticReactCorrections": true,
+  "sizingProfileId": "small",
+  "requirePlanApproval": true,
+  "approveSandboxExecution": false,
+  "maxTotalGenerations": 15
+}
+
 ### Creer les agents personnalises dans l'interface, puis remplacer cet identifiant
 @customTeamId = 00000000-0000-0000-0000-000000000000
 
@@ -166,6 +182,49 @@ Content-Type: application/json
 
 ### Arreter le serveur et son arbre de processus
 POST {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/local-application/stop
+Authorization: Bearer {{desktopToken}}
+
+### Executer des tests navigateur bornes sur un projet local fiable (Playwright, Desktop uniquement)
+@browserTeamId = 00000000-0000-0000-0000-000000000000
+@browserRunId = 00000000-0000-0000-0000-000000000000
+@browserTestId = 00000000-0000-0000-0000-000000000000
+POST {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/browser-tests
+Authorization: Bearer {{desktopToken}}
+Content-Type: application/json
+
+{
+  "executionAuthorized": true,
+  "teamId": "{{browserTeamId}}",
+  "collaborationRunId": "{{browserRunId}}",
+  "scenarios": [
+    {
+      "id": "0123456789abcdef0123456789abcdef",
+      "name": "Ajouter, recharger puis supprimer une tache",
+      "path": "/",
+      "steps": [
+        {
+          "action": "fill",
+          "locatorType": "label",
+          "locator": "Nouvelle tache",
+          "value": "{{testValue}}",
+          "role": null,
+          "index": null
+        },
+        {
+          "action": "click",
+          "locatorType": "role",
+          "locator": "Ajouter",
+          "value": null,
+          "role": "button",
+          "index": null
+        }
+      ]
+    }
+  ]
+}
+
+### Lire une capture d'ecran locale d'un scenario en echec
+GET {{AIPlatform.API_HostAddress}}/api/studio/projects/{{studioProjectId}}/browser-tests/{{browserTestId}}/scenarios/0123456789abcdef0123456789abcdef/screenshot
 Authorization: Bearer {{desktopToken}}
 
 ### Apercu texte d'un fichier valide

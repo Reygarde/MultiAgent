@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aiplatform-studio"
-version = "0.6.5"
+version = "0.6.6"
 dependencies = [
  "getrandom 0.3.4",
  "serde",

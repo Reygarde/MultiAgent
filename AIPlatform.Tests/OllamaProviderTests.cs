@@ -7,6 +7,91 @@ namespace AIPlatform.Tests;
 
 public sealed class OllamaProviderTests
 {
+    [Theory]
+    [InlineData(65536)]
+    [InlineData(262144)]
+    public async Task SendsExplicitLargeContextWithoutChangingOutputOrThinking(int context)
+    {
+        using var handler = new StubHttpHandler(async (message, token) =>
+        {
+            using var json = JsonDocument.Parse(await message.Content!.ReadAsStringAsync(token));
+            Assert.Equal(context, json.RootElement.GetProperty("options").GetProperty("num_ctx").GetInt32());
+            Assert.Equal(1024, json.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+            Assert.False(json.RootElement.GetProperty("think").GetBoolean());
+            return StubHttpHandler.Json("""{"done":true,"message":{"content":"Answer"}}""");
+        });
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new());
+        var request = TestSupport.Request();
+        Assert.Equal("Answer", await provider.CompleteAsync(request with
+            { Model = request.Model with { ContextSize = context } }, default));
+    }
+
+    [Theory]
+    [InlineData(262145, 1024)]
+    [InlineData(65536, 65536)]
+    [InlineData(65536, 0)]
+    public async Task InvalidContextOutputFailsBeforeAnyHttpRequest(int context, int output)
+    {
+        var calls = 0;
+        using var handler = new StubHttpHandler((_, _) =>
+        {
+            calls++;
+            throw new InvalidOperationException("No HTTP call is permitted.");
+        });
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new());
+        var request = TestSupport.Request();
+        await Assert.ThrowsAsync<LlmContextException>(() => provider.CompleteAsync(request with
+            { Model = request.Model with { ContextSize = context, MaxOutputTokens = output } }, default));
+        Assert.Equal(0, calls);
+    }
+
+    [Theory]
+    [InlineData("model requires more system memory")]
+    [InlineData("CUDA out of memory")]
+    [InlineData("unable to allocate tensor memory")]
+    public async Task MemoryErrorsAreTypedAndNeverStartAnotherGeneration(string error)
+    {
+        var calls = 0;
+        using var handler = new StubHttpHandler((_, _) =>
+        {
+            calls++;
+            return Task.FromResult(StubHttpHandler.Json(JsonSerializer.Serialize(new { error }), HttpStatusCode.InternalServerError));
+        });
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new());
+        await Assert.ThrowsAsync<LlmMemoryException>(() => provider.CompleteAsync(TestSupport.Request(), CancellationToken.None));
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task ContextErrorsDoNotStartAnAlternativeModel()
+    {
+        using var handler = new StubHttpHandler((_, _) => Task.FromResult(
+            StubHttpHandler.Json("""{"error":"context length exceeded"}""", HttpStatusCode.BadRequest)));
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new());
+        await Assert.ThrowsAsync<LlmContextException>(() => provider.CompleteAsync(TestSupport.Request(), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ExclusiveSelectionUnloadsPreviousModelEvenWhenGlobalUnloadIsOff()
+    {
+        var paths = new List<string>();
+        using var handler = new StubHttpHandler((message, _) =>
+        {
+            paths.Add(message.RequestUri!.AbsolutePath);
+            return Task.FromResult(StubHttpHandler.Json(message.RequestUri.AbsolutePath == "/api/generate"
+                ? """{"done":true}""" : """{"done":true,"message":{"content":"Answer"}}"""));
+        });
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new() { UnloadPreviousModel = false });
+        await provider.CompleteAsync(TestSupport.Request("first") with { ExclusiveModel = true }, CancellationToken.None);
+        await provider.CompleteAsync(TestSupport.Request("second") with { ExclusiveModel = true }, CancellationToken.None);
+        Assert.Equal(new[] { "/api/chat", "/api/generate", "/api/chat" }, paths);
+    }
+
     [Fact]
     public async Task SendsConfiguredMessagesSchemaAndResourceParameters()
     {
@@ -103,7 +188,6 @@ public sealed class OllamaProviderTests
     [InlineData("{\"done\":false,\"message\":{\"content\":\"partial\"}}")]
     [InlineData("{\"done\":true,\"message\":{\"content\":\" \"}}")]
     [InlineData("{\"done\":true,\"error\":\"failure\"}")]
-    [InlineData("{\"done\":true,\"done_reason\":\"length\",\"message\":{\"content\":\"truncated\"}}")]
     public async Task InvalidOrIncompleteResponsesAreRejected(string json)
     {
         using var handler = new StubHttpHandler((_, _) => Task.FromResult(StubHttpHandler.Json(json)));
@@ -111,6 +195,37 @@ public sealed class OllamaProviderTests
         using var provider = new OllamaProvider(client, new());
         await Assert.ThrowsAsync<LlmProviderException>(() =>
             provider.CompleteAsync(TestSupport.Request(), CancellationToken.None));
+    }
+
+    [Theory]
+    [InlineData("partial JSON", "")]
+    [InlineData("", "reasoning only")]
+    public async Task OutputLimitRejectsEvenEmptyContentWithoutRetryAndReportsAvailableCounts(string content, string thinking)
+    {
+        var calls = 0;
+        using var handler = new StubHttpHandler(async (message, token) =>
+        {
+            calls++;
+            using var input = JsonDocument.Parse(await message.Content!.ReadAsStringAsync(token));
+            Assert.False(input.RootElement.GetProperty("think").GetBoolean());
+            Assert.Equal(3072, input.RootElement.GetProperty("options").GetProperty("num_predict").GetInt32());
+            return StubHttpHandler.Json(JsonSerializer.Serialize(new
+            {
+                done = true, done_reason = "length", eval_count = 3072,
+                message = new { content, thinking }
+            }));
+        });
+        using var client = new HttpClient(handler);
+        using var provider = new OllamaProvider(client, new());
+        var request = TestSupport.Request() with
+        { Model = TestSupport.Request().Model with { Name = "selected-code-model", MaxOutputTokens = 3072 } };
+        var error = await Assert.ThrowsAsync<LlmOutputLimitException>(() => provider.CompleteAsync(request, default));
+        Assert.Equal(3072, error.EvaluatedTokens);
+        Assert.Equal(content.Length, error.ContentCharacters);
+        Assert.Equal(thinking.Length, error.ThinkingCharacters);
+        Assert.Contains("selected-code-model", error.Message);
+        Assert.Equal("OutputLimit", AIPlatform.Infrastructure.Studio.CustomAgentModelPolicy.Classify(error));
+        Assert.Equal(1, calls);
     }
 
     [Fact]

@@ -78,35 +78,69 @@ public sealed partial class TwitchBotService(
 
     public TwitchBotView Update(Guid id, string name, string channel, IReadOnlyList<TwitchCommand> commands)
     {
-        if (store.Get(id) is not { } current)
-            throw new TwitchIntegrationException("bot_not_found", "This Twitch bot no longer exists.", 404);
+        TwitchBotConfiguration updated;
         lock (sync)
+        {
+            var current = store.Get(id) ??
+                throw new TwitchIntegrationException("bot_not_found", "This Twitch bot no longer exists.", 404);
             if (running.ContainsKey(id))
                 throw new TwitchIntegrationException("bot_running", "Stop the Twitch bot before editing its configuration.", 409);
-        var updated = current with
-        {
-            Name = name.Trim(),
-            Channel = channel.Trim().ToLowerInvariant(),
-            Commands = commands.ToArray()
-        };
-        store.Save(updated);
+            updated = current with
+            {
+                Name = name.Trim(),
+                Channel = channel.Trim().ToLowerInvariant(),
+                Commands = commands.ToArray()
+            };
+            store.Save(updated);
+        }
         AddEvent(id, "configuration", "Configuration du bot enregistrée.");
         return BuildView(updated);
     }
 
+    internal T ApplyIfUnchanged<T>(TwitchBotConfiguration before, TwitchBotConfiguration after,
+        Func<T> validate)
+    {
+        lock (sync)
+        {
+            var current = store.Get(before.Id) ??
+                throw new TwitchIntegrationException("bot_not_found", "This Twitch bot no longer exists.", 404);
+            if (running.ContainsKey(before.Id))
+                throw new TwitchIntegrationException("bot_running", "Stop the Twitch bot before editing its configuration.", 409);
+            if (!SameConfiguration(current, before))
+                throw new TwitchIntegrationException("bot_changed",
+                    "The bot configuration changed after this proposal was created.", 409);
+            store.Save(after);
+            var success = false;
+            try
+            {
+                var result = validate();
+                success = true;
+                return result;
+            }
+            finally
+            {
+                if (!success)
+                    store.Save(before);
+            }
+        }
+    }
+
+    internal static bool SameConfiguration(TwitchBotConfiguration left, TwitchBotConfiguration right) =>
+        left.Id == right.Id && left.Name == right.Name && left.Channel == right.Channel &&
+        left.Commands.SequenceEqual(right.Commands);
+
     public bool Delete(Guid id)
     {
         lock (sync)
+        {
             if (running.ContainsKey(id))
                 throw new TwitchIntegrationException("bot_running", "Stop the Twitch bot before deleting it.", 409);
-        if (store.Get(id) is null)
-            return false;
-        if (tokenVault.IsAvailable)
-            DeleteCredentials(id);
-        var deleted = store.Delete(id);
-        if (deleted)
-        {
-            lock (sync)
+            if (store.Get(id) is null)
+                return false;
+            if (tokenVault.IsAvailable)
+                DeleteCredentials(id);
+            var deleted = store.Delete(id);
+            if (deleted)
             {
                 pending.Remove(id);
                 states.Remove(id);
@@ -115,8 +149,8 @@ public sealed partial class TwitchBotService(
                 seenMessageIds.Remove(id);
                 messageOrder.Remove(id);
             }
+            return deleted;
         }
-        return deleted;
     }
 
     public async Task<TwitchDeviceAuthorization> BeginConnectAsync(Guid id, CancellationToken cancellationToken)
@@ -445,7 +479,13 @@ public sealed partial class TwitchBotService(
         var bot = store.Get(botId);
         if (bot is null)
             return;
-        var route = runtime.Commands.Route(bot.Commands, message.Text, message.SenderId, consumeCooldown: true);
+        var route = runtime.Commands.Route(bot.Commands, message.Text, message.SenderId, consumeCooldown: true,
+            isModerator: message.IsModerator);
+        if (route.PermissionDenied)
+        {
+            AddEvent(botId, "permission", "Commande réservée aux modérateurs ignorée.");
+            return;
+        }
         if (route.CooldownRemainingSeconds > 0)
         {
             AddEvent(botId, "cooldown", "Commande ignorée pendant son délai anti-spam.");

@@ -1,0 +1,35 @@
+@baseUrl = http://localhost:5167
+@mission = 73f717cc-040a-4176-990c-7701913be258
+
+### Prepare only: no Docker process
+# @name prepare
+POST {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/prepare
+
+### Read the latest technical report (null when no run exists)
+GET {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/report
+
+### Denial example: returns 409 and does not run Docker
+POST {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/authorize
+Content-Type: application/json
+
+{
+  "approved": false,
+  "requestId": "{{prepare.response.body.$.requestId}}",
+  "fingerprint": "{{prepare.response.body.$.plan.fingerprint}}"
+}
+
+# After reviewing the returned plan, use Studio's explicit authorization button.
+
+### Prepare a Developer correction without generation (replace identifiers with the current failed report)
+# @name correctionPlan
+POST {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/correction-plan
+Content-Type: application/json
+
+{
+  "reportId": "00000000-0000-0000-0000-000000000000",
+  "revisionFingerprint": "replace-with-current-revision-fingerprint",
+  "groups": [{"paths":["src/App.test.tsx"],"instructions":"Repair the Vitest imports without changing unrelated tests."}]
+}
+
+# POST /correct accepts {"scope": <the exact prepared request>, "planFingerprint": <returned fingerprint>}.
+# Use Studio's explicit Developer button to avoid accidentally starting a real correction from this file.

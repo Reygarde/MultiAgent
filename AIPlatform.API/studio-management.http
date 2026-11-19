@@ -4,6 +4,275 @@
 @customAgentId = 33333333-3333-3333-3333-333333333333
 @conversationId = 44444444-4444-4444-4444-444444444444
 @proposalId = 55555555-5555-5555-5555-555555555555
+@teamId = 66666666-6666-6666-6666-666666666666
+@planId = 77777777-7777-7777-7777-777777777777
+@taskId = implement-task-view
+@plannerId = 88888888-8888-8888-8888-888888888888
+@reviewerId = 99999999-9999-9999-9999-999999999999
+
+### Explicit specializations, including for a future installed tag; no generation
+PUT {{baseUrl}}/model-library/specializations
+Content-Type: application/json
+
+{ "name": "future-coder:latest", "specializations": ["Code", "Tests"] }
+
+### Restore catalogue defaults (empty defaults for an unknown model)
+PUT {{baseUrl}}/model-library/specializations
+Content-Type: application/json
+
+{ "name": "future-coder:latest", "specializations": null }
+
+### Explicit observation only: requires matching digests and an already loaded model
+POST {{baseUrl}}/model-library/qualification
+Content-Type: application/json
+
+{ "name": "future-coder:latest", "contextTokens": 65536, "confirmed": true }
+
+### Refusal example: no confirmation, even if a model is resident
+POST {{baseUrl}}/model-library/qualification
+Content-Type: application/json
+
+{ "name": "future-coder:latest", "contextTokens": 65536, "confirmed": false }
+
+### Explicitly revoke measured evidence; no changes to weights or missions
+POST {{baseUrl}}/model-library/qualification/clear
+Content-Type: application/json
+
+{ "name": "future-coder:latest", "confirmed": true }
+
+### Read persistent economic draft repair progress (404 if not started)
+GET {{baseUrl}}/missions/{{missionId}}/react-draft-repair/
+
+### Project AST repairs and measure groups; no generation, mission mutation or Docker
+POST {{baseUrl}}/missions/{{missionId}}/react-draft-repair/prepare
+Content-Type: application/json
+
+{
+  "groups": [
+    { "paths": ["src/App.tsx", "src/App.test.tsx"],
+      "instructions": "Fix the attached diagnostics in the interface and functional tests. Preserve the existing exported contracts." }
+  ]
+}
+
+### Prepare exact patches instead of complete files; no model or Docker
+# Replace the placeholder with actual exact unique source text after the projected AST repairs.
+# Every path must have an anchor. Missing, repeated or overlapping originals are rejected.
+POST {{baseUrl}}/missions/{{missionId}}/react-draft-repair/prepare
+Content-Type: application/json
+
+{
+  "groups": [
+    { "paths": ["src/App.tsx"],
+      "instructions": "Fix the diagnosed defect inside the prepared anchor, preserving behavior and exports.",
+      "patchTargets": [
+        { "path": "src/App.tsx", "original": "replace-with-the-exact-unique-source-snippet" }
+      ] }
+  ]
+}
+
+### EXPLICIT GENERATION: only after reviewing a successful preflight; never run automatically
+# For patch mode, copy the FULL prepared scope including patchTargets, and its own fingerprint.
+# Repeating this same fingerprint resumes completed group checkpoints, not failed/incomplete sends.
+POST {{baseUrl}}/missions/{{missionId}}/react-draft-repair/start
+Content-Type: application/json
+
+{
+  "fingerprint": "copy-the-full-accepted-preflight-fingerprint",
+  "scope": {
+    "groups": [
+      { "paths": ["src/App.tsx", "src/App.test.tsx"],
+        "instructions": "Fix the attached diagnostics in the interface and functional tests. Preserve the existing exported contracts." }
+    ]
+  }
+}
+
+### Prepare an amendment, never approve or resume here
+# Replace expectedUpdatedAt/fingerprint and copy the FULL current files array without changing any entry.
+# This abbreviated example is deliberately refused if it omits any of the current planned files.
+POST {{baseUrl}}/missions/{{missionId}}/react-plan-amendment
+Content-Type: application/json
+
+{
+  "expectedUpdatedAt": "2026-01-01T00:00:00Z",
+  "previousApprovalFingerprint": "copy-the-current-plan-approval-fingerprint",
+  "developerModel": "qwen2.5-coder:7b",
+  "plan": {
+    "name": "Requested application",
+    "description": "Original requirements, with clarified coverage",
+    "decisions": ["Use React 19.3.1 with the locked scaffold"],
+    "files": [
+      {"path":"src/App.tsx","purpose":"Interface","dependsOn":[]},
+      {"path":"src/App.test.tsx","purpose":"Business tests","dependsOn":["src/App.tsx"]}
+    ],
+    "criterionCoverage": [
+      {"criterionId":"C1","paths":["src/App.tsx","src/App.test.tsx"],"explanation":"Declare the implementation and business test for the normalized requirement."}
+    ]
+  }
+}
+
+### New collaborative project only; set true explicitly to opt in (starts generation when sent)
+POST {{baseUrl}}/missions
+Content-Type: application/json
+
+{
+  "task": "Create a React task application with tests",
+  "kind": "Project",
+  "templateId": "react-typescript-vite-v2",
+  "approveSandboxExecution": false,
+  "automaticModelSelection": false,
+  "recordPlannerTrace": false,
+  "requirePlanApproval": false,
+  "maxTotalGenerations": 10
+}
+
+### Frozen generation ceiling, reserved/remaining units and per-role reservation history
+# Historical missions without maxTotalGenerations remain explicitly unbudgeted.
+GET {{baseUrl}}/missions/{{missionId}}
+
+### Read server default (defaultMaxTotalGenerations); never starts generation
+GET {{baseUrl}}/missions/capacity
+
+### Optional generation-plan gate: create with requirePlanApproval=true, then inspect without resuming
+GET {{baseUrl}}/missions/{{missionId}}/workflow
+
+### Explicitly approve the saved plan; use planApproval.fingerprint from the current workflow
+# Stale/repeated decisions return 409. This does NOT authorize build, tests or execution.
+POST {{baseUrl}}/missions/{{missionId}}/plan-approval
+Content-Type: application/json
+
+{"approved":true,"fingerprint":"replace-with-the-current-planApproval-fingerprint"}
+
+### Refuse that exact plan, preserving history and preventing Developer and Reviewer
+POST {{baseUrl}}/missions/{{missionId}}/plan-approval
+Content-Type: application/json
+
+{"approved":false,"fingerprint":"replace-with-the-current-planApproval-fingerprint"}
+
+### Private structured Planner attempts, including rejected plans; never executable
+GET {{baseUrl}}/missions/{{missionId}}/planner-diagnostics
+
+### Exact raw response: Desktop authorization AND explicit prior recordPlannerTrace consent required
+# Replace with a retained attempt ID; no generation is started.
+GET {{baseUrl}}/missions/{{missionId}}/planner-diagnostics/11111111-1111-1111-1111-111111111111/raw
+
+### Explicit deletion of private Planner diagnostics for a terminal mission, without changing its history
+DELETE {{baseUrl}}/missions/{{missionId}}/planner-diagnostics
+
+### Private structured Reviewer reports and exact validation errors; read-only, no raw prompts/responses
+GET {{baseUrl}}/missions/{{missionId}}/reviewer-diagnostics
+
+### Read-only eligibility; checks the rejected report, exact review source fingerprint and remaining budgets
+GET {{baseUrl}}/missions/{{missionId}}/reviewer-correction-resume
+
+### Explicitly retry only an interrupted Reviewer report correction; 409 includes the refusal reason
+# Does not create a new Reviewer step, rerun Planner/Developer, modify files, or reset budgets.
+POST {{baseUrl}}/missions/{{missionId}}/reviewer-correction-resume
+
+### Explicit deletion for a terminal mission only (409 while active); preserves history, files and budgets
+DELETE {{baseUrl}}/missions/{{missionId}}/reviewer-diagnostics
+
+### Persisted actual models, initial chains and validation history; never resumes the mission
+GET {{baseUrl}}/missions/{{missionId}}/workflow
+
+### Read-only library/hardware; never pulls weights or calls an LLM
+GET {{baseUrl}}/model-library/?context=4096
+
+### Verify an exact public registry tag (metadata only)
+POST {{baseUrl}}/model-library/verify
+Content-Type: application/json
+
+{"name":"qwen2.5-coder:7b"}
+
+### Read download progress, including interrupted history
+GET {{baseUrl}}/model-library/downloads
+
+### One download (404 for this example id)
+GET {{baseUrl}}/model-library/downloads/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
+
+### Desktop only; keep confirmation false until explicitly authorized to download
+POST {{baseUrl}}/model-library/downloads
+Content-Type: application/json
+
+{"name":"qwen2.5-coder:7b","confirmed":false}
+
+### Desktop only; cancel a real active download id
+POST {{baseUrl}}/model-library/downloads/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/cancel
+
+### Desktop only; blocked while loaded/configured/active; never reassigns silently
+POST {{baseUrl}}/model-library/delete
+Content-Type: application/json
+
+{"name":"qwen2.5-coder:7b","confirmed":false}
+
+### Explain a choice without any generation
+POST {{baseUrl}}/model-library/routing/preview
+Content-Type: application/json
+
+{"task":"Correct TS18004 in frontend/src/App.tsx","role":"Developer","contextTokens":4096}
+
+### Actual saved observations, not synthetic benchmarks
+GET {{baseUrl}}/model-library/routing/statistics
+
+### Exclude prior observations without deleting mission history (requires confirmation)
+POST {{baseUrl}}/model-library/routing/statistics/reset
+Content-Type: application/json
+
+{"confirmed":false}
+
+### Discover installed models without generation or download
+GET {{baseUrl}}/custom-agents/models
+
+### Configure an agent's ordered fallbacks (only installed models can be selected at runtime)
+PUT {{baseUrl}}/custom-agents/{{customAgentId}}
+Content-Type: application/json
+
+{
+  "name": "Developer",
+  "description": "Local development",
+  "systemPrompt": "Implement the current task and preserve existing behavior.",
+  "modelName": "qwen2.5-coder:7b",
+  "fallbackModels": ["qwen3.5:9b", "qwen2.5-coder:14b"]
+}
+
+### Explicit team opt-in; absent fallbackModels inherits, [] disables role fallbacks
+PUT {{baseUrl}}/custom-agent-teams/{{teamId}}
+Content-Type: application/json
+
+{
+  "name": "Local team",
+  "modelEscalationEnabled": true,
+  "members": [
+    { "agentId": "{{plannerId}}", "role": "Planner", "order": 0, "fallbackModels": [] },
+    { "agentId": "{{customAgentId}}", "role": "Developer", "order": 1 },
+    { "agentId": "{{reviewerId}}", "role": "Reviewer", "order": 2, "fallbackModels": [] }
+  ]
+}
+
+### Read per-run model selection and validation evidence
+GET {{baseUrl}}/custom-agent-teams/{{teamId}}/runs
+
+### One targeted retry, paused after builds; recording is OFF unless explicitly consented
+### WARNING: true stores exact prompts/code locally, possibly containing secrets, without guaranteed redaction.
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/retry
+Content-Type: application/json
+
+{
+  "taskId": "{{taskId}}",
+  "workspaceAuthorized": true,
+  "executionAuthorized": true,
+  "taskOnly": true,
+  "compilationOnly": true,
+  "recordOllamaTrace": false
+}
+
+### Delete only this project's private local traces after stopping capture (not sources or history)
+DELETE {{baseUrl}}/studio/projects/{{missionId}}/ollama-traces
+
+### Classify a criterion and record a manual verification
+PUT {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/tasks/{{taskId}}/criteria/0
+Content-Type: application/json
+
+{ "category": "User", "status": "Unverified", "evidence": null }
 
 ### Read Twitch settings
 GET {{baseUrl}}/twitch/settings
@@ -49,6 +318,37 @@ POST {{baseUrl}}/twitch/bots/{{botId}}/commands/test
 Content-Type: application/json
 
 { "input": "!hello" }
+
+### Offline simulation: first message, immediate retry, then after five virtual seconds
+POST {{baseUrl}}/twitch/bots/{{botId}}/simulation
+Content-Type: application/json
+
+{ "events": [
+  { "userId": "viewer", "role": "Viewer", "text": "!hello", "atSeconds": 0 },
+  { "userId": "viewer", "role": "Viewer", "text": "!hello", "atSeconds": 0 },
+  { "userId": "viewer", "role": "Viewer", "text": "!hello", "atSeconds": 5 }
+] }
+
+### Generate a command proposal (review it before applying)
+POST {{baseUrl}}/twitch/bots/{{botId}}/command-proposals
+Content-Type: application/json
+
+{ "teamId": "{{teamId}}", "request": "Ajoute une commande !hello qui répond Bonjour !" }
+
+### Apply a reviewed proposal to a stopped, unchanged bot
+POST {{baseUrl}}/twitch/bots/{{botId}}/command-proposals/{{proposalId}}/apply
+Content-Type: application/json
+
+{ "approved": true, "deleteApproved": false }
+
+### Read command proposal history and evidence
+GET {{baseUrl}}/twitch/bots/{{botId}}/command-proposals
+
+### Restore an interrupted application after reviewing its snapshots
+POST {{baseUrl}}/twitch/bots/{{botId}}/command-proposals/{{proposalId}}/restore
+Content-Type: application/json
+
+{ "approved": true }
 
 ### Start a saved bot explicitly
 POST {{baseUrl}}/twitch/bots/{{botId}}/start
@@ -99,3 +399,58 @@ POST {{baseUrl}}/custom-agents/{{customAgentId}}/conversations/{{conversationId}
 Content-Type: application/json
 
 { "approved": false }
+
+### List a team's incremental development plans
+GET {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans
+
+### Ask the Planner for a dependency-aware plan; planning does not modify files
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans
+Content-Type: application/json
+
+{
+  "goal": "Add task persistence and verify the user workflow.",
+  "workspace": {
+    "kind": "Studio",
+    "workspaceId": "{{missionId}}",
+    "name": "Task manager"
+  }
+}
+
+### Read task status, validation history, and persisted project memory
+GET {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}
+
+### Add tasks without regenerating completed work
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/extend
+Content-Type: application/json
+
+{ "request": "Add an accessible empty state and verify it." }
+
+### Start after authorizing workspace writes and local code execution in Desktop
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/start
+Content-Type: application/json
+
+{ "workspaceAuthorized": true, "executionAuthorized": true }
+
+### Pause the active task; resume requires fresh authorization
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/pause
+
+### Explicitly resume after authorizing workspace writes and local execution again
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/resume
+Content-Type: application/json
+
+{ "workspaceAuthorized": true, "executionAuthorized": true }
+
+### Cancel an active plan
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/cancel
+
+### Retry one failed task without repeating completed tasks
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/retry
+Content-Type: application/json
+
+{ "taskId": "{{taskId}}", "workspaceAuthorized": true, "executionAuthorized": true }
+
+### Retry a targeted correction, pausing after builds before HTTP verification
+POST {{baseUrl}}/custom-agent-teams/{{teamId}}/development-plans/{{planId}}/retry
+Content-Type: application/json
+
+{ "taskId": "{{taskId}}", "workspaceAuthorized": true, "executionAuthorized": true, "taskOnly": true, "compilationOnly": true }

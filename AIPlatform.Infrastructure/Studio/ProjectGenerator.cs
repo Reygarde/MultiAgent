@@ -19,6 +19,7 @@ public sealed class ProjectGenerator(
         AgentDefinition agent, string task, ProjectManifest? previous, string? diagnostics,
         CancellationToken cancellationToken)
     {
+        using var generationRole = LlmGenerationScope.ForRole("Developer");
         var model = registry.GetModel(agent.ModelId) with
         {
             ContextSize = options.GenerationContextSize,

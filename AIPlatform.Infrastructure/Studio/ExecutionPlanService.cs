@@ -19,35 +19,46 @@ public sealed class ExecutionPlanService(
         if (files.Count == 0)
             throw new StudioValidationException("No generated files are available for approval.");
         var mission = missions?.Get(id);
+        var limits = mission is null ? studio : studio.ForMission(mission);
         var templateId = mission?.TemplateId;
         if (templateId is not null && templateId != DiscordTemplate.Id && templateId != ReactTemplate.Id &&
+            templateId != MissionReactTemplate.Id &&
             templateId != TwitchTemplate.Id && templateId != FullStackTemplate.Id)
             throw new StudioValidationException("Unknown project template.");
         var image = sandbox.Image;
+        var imageReference = image;
+        string? imageDigest = null;
         if (templateId is not null)
         {
-            if (process is null) throw new InvalidOperationException("Docker image inspection is required for project templates.");
-            image = templateId == ReactTemplate.Id ? ReactTemplate.Image :
+            image = templateId is ReactTemplate.Id or MissionReactTemplate.Id ? ReactTemplate.Image :
                 templateId == TwitchTemplate.Id ? TwitchTemplate.Image :
                 templateId == FullStackTemplate.Id ? FullStackTemplate.Image : DiscordTemplate.Image;
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(TimeSpan.FromSeconds(8));
-            try
+            imageReference = image;
+            if (sandbox.Enabled)
             {
-                var inspected = await process.RunAsync(["image", "inspect", "--format", "{{.Id}}", image], timeout.Token);
-                var imageId = inspected.Output.Trim();
-                if (inspected.ExitCode == 0 && Regex.IsMatch(imageId, @"^sha256:[a-f0-9]{64}$", RegexOptions.CultureInvariant))
-                    image = imageId;
+                if (process is null) throw new InvalidOperationException("Docker image inspection is required for project templates.");
+                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeout.CancelAfter(TimeSpan.FromSeconds(8));
+                try
+                {
+                    var inspected = await process.RunAsync(["image", "inspect", "--format", "{{.Id}}", image], timeout.Token);
+                    var imageId = inspected.Output.Trim();
+                    if (inspected.ExitCode == 0 && Regex.IsMatch(imageId, @"^sha256:[a-f0-9]{64}$", RegexOptions.CultureInvariant))
+                    {
+                        image = imageId;
+                        imageDigest = imageId;
+                    }
+                }
+                catch (Win32Exception) { }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
             }
-            catch (Win32Exception) { }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
         }
         var operations = new List<string>
         {
             "Read-only mount of this mission workspace; copy sources to an ephemeral container directory.",
             "Offline dotnet build Generated.slnx; no network, ports, secrets or Docker socket.",
             "Offline dotnet test tests/App.Tests/App.Tests.csproj with the three pinned test packages.",
-            $"At most {studio.MaxCorrectionAttempts} targeted LLM corrections. Modified versions require new human approval in collaborative workflows.",
+            $"At most {limits.MaxCorrectionAttempts} targeted LLM corrections. Modified versions require new human approval in collaborative workflows.",
             "Non-root UID 10001, read-only root, no capabilities, no-new-privileges, 128 processes maximum.",
             "Force-remove each named container on completion, cancellation or timeout. No execution on Windows."
         };
@@ -59,7 +70,7 @@ public sealed class ExecutionPlanService(
             operations[2] = "Offline dotnet test tests/App.Tests/App.Tests.csproj --configuration Release with exact cached xUnit packages.";
             operations.Insert(0, "Twitch template v1: native .NET EventSub/Helix; no runtime packages, credentials or live Twitch connection. xunit [2.9.3], xunit.runner.visualstudio [3.1.4], Microsoft.NET.Test.Sdk [17.14.1].");
         }
-        if (templateId == ReactTemplate.Id)
+        if (templateId is ReactTemplate.Id or MissionReactTemplate.Id)
         {
             operations[1] = "Offline TypeScript tsc --noEmit, then Vite production build using fixed trusted configuration.";
             operations[2] = "Offline Vitest with jsdom and React Testing Library; require a nonempty consistent passing JSON report.";
@@ -89,13 +100,24 @@ public sealed class ExecutionPlanService(
             return new(fingerprint, image, sandbox.MemoryMegabytes, sandbox.CpuCount,
                 sandbox.TimeoutSeconds, 0, operations, canonical);
         }
-        var content = JsonSerializer.Serialize(new { files, Image = image, sandbox.MemoryMegabytes,
-            sandbox.CpuCount, sandbox.TimeoutSeconds, studio.MaxCorrectionAttempts, operations });
-        if (templateId == ReactTemplate.Id)
-            content += "\n" + JsonSerializer.Serialize(new[]
+        if (templateId is ReactTemplate.Id or MissionReactTemplate.Id)
+        {
+            var commands = new[]
             {
-                ReactBuildProfile.Command("TypeScript"), ReactBuildProfile.Command("Build"), ReactBuildProfile.Command("Tests")
-            });
+                ReactBuildProfile.Command("TypeScript"), ReactBuildProfile.Command("Build"),
+                ReactBuildProfile.Command("Tests")
+            };
+            var sourceFiles = files.Select(file => new GeneratedFile(file.Path, file.Content)).ToArray();
+            var descriptor = new ReactExecutionPlanDescriptor(1, templateId,
+                ReactExecutionPlanDescriptor.Manifest(sourceFiles), imageReference, image, imageDigest,
+                sandbox.Enabled, sandbox.MemoryMegabytes, sandbox.CpuCount, sandbox.TimeoutSeconds,
+                limits.MaxCorrectionAttempts, operations.ToArray(), commands);
+            return new(descriptor.ComputeFingerprint(sourceFiles), image, sandbox.MemoryMegabytes,
+                sandbox.CpuCount, sandbox.TimeoutSeconds, limits.MaxCorrectionAttempts, operations,
+                ReactDescriptor: descriptor);
+        }
+        var content = JsonSerializer.Serialize(new { files, Image = image, sandbox.Enabled, sandbox.MemoryMegabytes,
+            sandbox.CpuCount, sandbox.TimeoutSeconds, limits.MaxCorrectionAttempts, operations });
         if (templateId == TwitchTemplate.Id)
             content += "\n" + JsonSerializer.Serialize(new[]
             {
@@ -114,6 +136,6 @@ public sealed class ExecutionPlanService(
                     "plan-container", "plan-workspace", "Integration", image, templateId));
         var hash = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
         return new(hash, image, sandbox.MemoryMegabytes, sandbox.CpuCount,
-            sandbox.TimeoutSeconds, studio.MaxCorrectionAttempts, operations);
+            sandbox.TimeoutSeconds, limits.MaxCorrectionAttempts, operations);
     }
 }

@@ -4,13 +4,788 @@ Plateforme multi-agents locale .NET 10 + React/TypeScript. Ollama selectionne un
 agent autorise et son modele configure. Studio permet de suivre des missions
 asynchrones, generer les fichiers d'un petit projet .NET 10, puis les compiler et
 tester hors ligne dans Docker apres autorisation humaine. Les corrections sont
-ciblees et limitees a trois au maximum.
+ciblees et limitees a trois par defaut.
 
-**Le code genere est non fiable. Aucun code genere ne doit etre execute sur l'hote.**
-Sans Docker Linux disponible, image hors ligne preparee, activation explicite de
+### Dimensionnement des nouvelles missions React v2
+
+Le selecteur **Dimensionnement du projet** est alimente par
+`GET /api/missions/capacity`. Son choix initial, **Parametres existants
+(inchanges)**, n'enregistre aucun profil et conserve les anciens comportements.
+Un profil est selectionne explicitement avec `sizingProfileId` dans
+`POST /api/missions`. Il est copie dans `mission.sizing`, persiste et immuable :
+modifier la configuration ne modifie ni une mission existante ni son budget.
+Les autres templates, notamment Twitch, ne peuvent pas selectionner ces profils.
+
+| Limite | Avant / sans profil | Petit | Standard | Complexe |
+|---|---:|---:|---:|---:|
+| Fichiers proposes par le Planner | 12 | 12 | 32 | 64 |
+| Fichiers du workspace, scaffold compris | 40 | 40 | 64 | 100 |
+| Taille UTF-8 d'un fichier genere | 64 Kio | 64 Kio | 128 Kio | 256 Kio |
+| Taille UTF-8 totale, lockfile compris | 256 Kio | 256 Kio | 1 Mio | 4 Mio |
+| Criteres fonctionnels | 32 | 32 | 64 | 128 |
+| Corrections partagees entre les etapes | 3 | 3 | 6 | 12 |
+| Groupes Developer par reparation | brouillon 3, rapport Docker 8, autonome borne par les fichiers | 3 | 12 | 32 |
+| Fichiers par groupe | brouillon/autonome 4, rapport Docker 2 | 4 | 4 | 4 |
+| Delai du worker par passage | 900 s | 900 s | 3600 s | 7200 s |
+
+Le scaffold comporte actuellement 11 fichiers. Le plafond de generation est donc
+de 23, 43 ou 75 fichiers pour ces profils ; les 40/64/100 sont les plafonds de
+stockage/validation, pas une promesse de generer autant de fichiers applicatifs.
+Le lockfile technique garde son exception de taille existante ; il compte toujours
+dans la taille totale. Les lectures, exports, copies isolees, corrections et
+validations utilisent les limites de la mission, pas seulement le schema Planner.
+
+Les profils sont configurables dans la section backend `Studio:SizingProfiles`
+(liste complete remplacant les profils fournis, puis redemarrage). Exemple :
+
+```json
+{
+  "Studio": {
+    "SizingProfiles": [{
+      "Id": "standard",
+      "Name": "Projet standard",
+      "MaxFiles": 64,
+      "MaxPlannedFiles": 32,
+      "MaxFileBytes": 131072,
+      "MaxProjectBytes": 1048576,
+      "MaxCriteria": 64,
+      "MaxCorrections": 6,
+      "MaxRepairGroups": 12,
+      "MaxFilesPerRepairGroup": 4,
+      "MissionTimeoutSeconds": 3600
+    }]
+  }
+}
+```
+
+La liste contient 1 a 8 profils uniques. Bornes de securite : 100 fichiers,
+89 propositions au plus et assez de place pour le scaffold, 1 Mio/fichier,
+4 Mio/projet, 128 criteres, 12 corrections, 32 groupes, 8 fichiers/groupe et
+7200 s par passage. Les nombres nuls, depassements et incoherences sont refuses
+(zero correction est permis). Aucun profil n'augmente le budget des generations.
+
+Pour les missions avec profil, le preflight et l'execution utilisent la meme
+revue groupee : couverture integrale des criteres et de leurs dependances,
+schema compris dans le contexte, decoupage selon contexte ET estimation de
+sortie. La sortie est estimee par une enveloppe JSON synthetique par critere,
+en UTF-8 avec coefficient 1,25 et 20 % de marge. Ce n'est pas une borne garantie :
+des explications, preuves ou findings plus longs peuvent encore etre refuses
+par les controles de troncature. Les rapports agreges restent bornes par le
+nombre de groupes ; les fichiers hors couverture restent signales, sans supprimer
+de critere fonctionnel pour faire tenir une revue.
+
+**Limites restantes et ressources, non augmentees par les profils :**
+
+| Domaine | Limites reelles / configuration existante |
+|---|---|
+| Demande utilisateur | `Platform:MaxTaskLength`, 16000 caracteres par defaut |
+| Modele | `num_ctx` jusqu'a 262144 ; `num_predict` strictement inferieur au contexte, profils de modeles explicites |
+| Prompts | budget conservateur `(contexte - sortie) * 2` caracteres ; refus plutot que troncature des sources |
+| Ollama | delai configure 180 s par defaut, plage 1-3600 s ; borne effective aussi limitee par l'agent et le worker |
+| Agents | delai configure 180 s par defaut, plage 5-900 s |
+| Worker | delai par passage, pas un cumul persistant sur toute la vie de la mission ; attente/reprise redemarre un passage |
+| Budget | plafond persistant de 1 a 1000 generations ; aucune reservation fictive de revue consommee avant appel |
+| Planner | 3 generations au plus ; 12 dependances par fichier et 12 chemins par critere ; chemins relatifs 180 caracteres / 8 segments |
+| Revue | au plus un groupe par critere (128), schema borne, pas de reduction de couverture ; refus d'une unite indivisible trop grande |
+| Helper TypeScript | 15 s, heap Node 256 Mio, restitution d'au plus 60 diagnostics ; un candidat encore invalide n'est pas publie |
+| Docker | 2048 Mio, 2 CPU, 120 s par defaut ; configuration globale bornee a 512-4096 Mio, 1-4 CPU et 5-600 s |
+| Isolation Docker | reseau desactive, non-root, racine read-only, aucune capacite, 128 PID ; tmpfs `/tmp` 128 Mio et `/work` 512 Mio |
+| Reponses Ollama | `num_predict`, refus `done_reason=length`, reponse incomplete/JSON invalide ; pas de plafond HTTP metier en octets distinct du buffering HttpClient |
+
+Les budgets, modeles, contextes/sorties, delais des agents/provider et ressources
+Docker se reglent separement. Augmenter un profil ne charge aucun modele et ne
+garantit ni sa compatibilite memoire, ni le debit, ni la reussite fonctionnelle.
+Sur 64 Go RAM / 24 Go VRAM, de plus grands modeles/contextes peuvent etre affectes
+via les mecanismes existants ; les plafonds Docker et du helper restent ceux
+ci-dessus. Aucun modele, conteneur ou projet reel n'a ete lance pour cette etape.
+
+Fichiers concernes par le dimensionnement :
+
+- Contrats : [ProjectSizingProfile](AIPlatform.Core/Studio/ProjectSizingProfile.cs),
+  [MissionModels](AIPlatform.Core/Studio/MissionModels.cs).
+- Orchestration : [CollaborativeProcessor](AIPlatform.Infrastructure/Studio/CollaborativeProcessor.cs),
+  [corrections autonomes](AIPlatform.Infrastructure/Studio/CollaborativeProcessor.ReactCorrections.cs),
+  [WorkflowAgents](AIPlatform.Infrastructure/Studio/WorkflowAgents.cs),
+  [WorkflowModelRouting](AIPlatform.Infrastructure/Studio/WorkflowModelRouting.cs)
+  (lecture du plafond de corrections uniquement, algorithme de routage inchange),
+  [ExecutionPlanService](AIPlatform.Infrastructure/Studio/ExecutionPlanService.cs).
+- Persistance/fichiers : [MissionStore](AIPlatform.Infrastructure/Studio/MissionStore.cs),
+  [reservations economiques](AIPlatform.Infrastructure/Studio/MissionStore.EconomicRepair.cs),
+  [WorkspaceStore](AIPlatform.Infrastructure/Studio/WorkspaceStore.cs),
+  [ProjectExport](AIPlatform.Infrastructure/Studio/ProjectExport.cs).
+- Validation/reparation : [MissionReactTemplate](AIPlatform.Infrastructure/Studio/MissionReactTemplate.cs),
+  [ReactDraftRepair](AIPlatform.Infrastructure/Studio/ReactDraftRepair.cs),
+  [ReactRevisionCorrection](AIPlatform.Infrastructure/Studio/ReactRevisionCorrection.cs),
+  [ReactRevisionValidation](AIPlatform.Infrastructure/Studio/ReactRevisionValidation.cs),
+  [ReactPlanAmendment](AIPlatform.Infrastructure/Studio/ReactPlanAmendment.cs),
+  [ReviewerCorrectionResumeService](AIPlatform.Infrastructure/Studio/ReviewerCorrectionResumeService.cs).
+- API : [Program](AIPlatform.API/Program.cs), [MissionWorker](AIPlatform.API/Services/MissionWorker.cs),
+  [StudioContracts](AIPlatform.API/StudioContracts.cs), [StudioEndpoints](AIPlatform.API/StudioEndpoints.cs),
+  [exemple HTTP](AIPlatform.API/AIPlatform.API.http).
+- Interface : [App](AIPlatform.Web/src/App.tsx), [MissionDetails](AIPlatform.Web/src/MissionDetails.tsx),
+  [types](AIPlatform.Web/src/types.ts).
+- Tests : [ProjectSizingTests](AIPlatform.Tests/ProjectSizingTests.cs),
+  [WorkflowApiTests](AIPlatform.Tests/WorkflowApiTests.cs),
+  [CollaborativeWorkflowTests](AIPlatform.Tests/CollaborativeWorkflowTests.cs),
+  [App.test](AIPlatform.Web/src/App.test.tsx),
+  [MissionDetails.test](AIPlatform.Web/src/MissionDetails.test.tsx).
+
+### Orchestration logicielle autonome React v2 (optionnelle)
+
+Les nouvelles missions React v2 proposent **Corrections logicielles autonomes
+React v2** (`automaticReactCorrections: true` a la creation). Desactive par
+defaut : les missions historiques et les autres templates ne changent pas.
+Cette option est independante du routage et de l'approbation du plan.
+
+Le processeur collaboratif existant enchaine generation, controle statique,
+reparations AST sures, Developer et nouvelle revue. Les findings fonctionnels
+du Reviewer et les diagnostics des etapes Docker deja autorisees alimentent
+la meme boucle. Une panne d'infrastructure ou des diagnostics sans fichier
+approuve identifiable arretent la validation pour inspection, sans correction
+Developer speculative. Les rapports Reviewer mal formes restent corriges par le
+mecanisme existant, pas confondus avec des defauts applicatifs.
+
+Les corrections sont preparees sur une copie : fichiers complets/groupes
+lies (quatre fichiers par defaut, jusqu'a huit dans un profil borne), ou patchs exacts lorsque des lignes de diagnostic
+fournissent une ancre unique et une sortie mesuree plus petite. Les contrats
+JSON, applications de patchs et controles statiques existants sont reutilises.
+Pas de patch approximatif. Les groupes dependant de routes figees differentes
+ne sont pas fusionnes. Le contexte est remesure avant chaque appel ; sortie
+conservatrice UTF-8 + 25 %, avec 20 % de marge. Ce n'est pas un tokenizer exact
+ni une garantie que du code nouveau tiendra dans la sortie.
+
+La capacite de tous les groupes Developer et de la revue complete (sources
+stressees de 25 %) est controlee avant correction, puis atomiquement lors des
+reservations Developer. Les criteres ne sont jamais retires pour economiser
+une revue. Sans profil, la limite existante `Studio:MaxCorrectionAttempts` (0 a 3)
+reste applicable. Un profil explicitement choisi fige sa limite (0 a 12) ;
+elle reste partagee avec les autres corrections. Un candidat
+inchange, un retour a des sources precedentes ou les memes findings repetes
+arretent la boucle sans publication du candidat.
+
+Les originaux, candidats, contrats, decisions, groupes termines et appels en
+vol sont persistants. Une fermeture n'entraine jamais de relance spontanee.
+La reprise explicite reutilise les groupes termines ; une reservation sans
+resultat confirme bloque le rejeu automatique et exige une inspection.
+Les checkpoints versionnes refusent les ecritures d'un processus obsolete.
+Les prompts et sources des checkpoints ne sont pas exposes par les resumes API.
+
+Le suivi Missions montre progression, budget, decisions, blocages et validations
+reellement executees. **Aucun code genere n'est execute sur l'hote.** Une revue
+favorable prepare la validation Docker ; l'autorisation humaine reste liee
+aux sources et a leur empreinte. Toute correction de sources invalide l'accord
+precedent et impose une nouvelle autorisation avant de poursuivre Docker.
+Un constat Reviewer `Unverified` ne devient pas une preuve fonctionnelle.
+
+Validation de cette integration : modeles, controles et Docker simules seulement,
+dans des repertoires temporaires. Une validation reelle doit etre autorisee
+separement, disposer des modeles locaux et du helper TypeScript, puis obtenir
+les accords du plan et de chaque revision Docker. Aucune mission historique
+n'est migree ou reprise par l'activation de l'option.
+
+### Bibliotheque de modeles et routage local
+
+L'onglet **Bibliotheque de modeles** propose Catalogue, Modeles installes et
+Telechargements : recherche/filtres, metadonnees `/api/tags` et `/api/show`,
+modeles charges `/api/ps`, installation `/api/pull` en flux et suppression
+`/api/delete`. Aucun telechargement ni chargement ne resulte de la consultation.
+Installer/supprimer/annuler exige une session Desktop authentifiee ; une
+installation ou suppression exige aussi une confirmation explicite.
+Les operations de mutation et de generation Studio sont serialisees.
+Une suppression est bloquee pour les modeles charges, les executions actives
+ou les affectations configurees : reaffecter explicitement dans Agents/Teams
+et dans les configurations concernees. Les references purement historiques
+ne sont pas effacees et ne bloquent pas une suppression.
+
+Le catalogue documentaire extensible est
+`AIPlatform.Infrastructure/Studio/model-catalog.json` : tags consultes dans les
+fiches officielles Ollama le 17 novembre 2026, sources par fiche, tailles
+approximatives et aucune promesse de performance/disponibilite permanente.
+Il couvre Qwen2.5-Coder, Qwen3-Coder/Next, Devstral, DeepSeek-Coder, Codestral,
+Qwen3/3.5, DeepSeek-R1/Distill, GLM, Yi, Llama, Gemma et Mistral.
+Les identifiants manuels `[namespace/]modele[:tag]` sont verifies contre le
+manifeste du registre public Ollama avant installation ; les tags cloud et
+URL arbitraires sont refuses. Cette verification transfere des metadonnees,
+pas les poids. Une variante absente est signalee et n'est pas remplacee.
+Les licences inconnues restent inconnues ; les poids ouverts ne sont pas
+automatiquement qualifies d'open-source, meme avec une licence permissive.
+
+Les telechargements affichent les octets reels de la couche signalee par
+Ollama (pas un pourcentage global invente). Annuler ferme le flux ; Ollama peut
+conserver ses couches partielles. Apres interruption de Studio, l'operation
+est marquee interrompue a la prochaine consultation : une nouvelle
+confirmation est necessaire pour reprendre les couches en cache.
+Les 50 dernieres operations sont stockees dans `model-downloads.json`
+du repertoire de donnees Studio, sans modifier les missions.
+
+La sonde `IHardwareProbe` mesure la RAM Windows via GlobalMemoryStatusEx,
+la VRAM NVIDIA via l'executable fixe System32/nvidia-smi.exe, sans shell
+ni argument fourni par l'utilisateur, et le disque du repertoire Studio.
+Autres GPU/OS ou mesures indisponibles : avertissement et donnees inconnues.
+L'estimation distingue poids GGUF quantifies, KV F16 calcule d'apres
+l'architecture/contexte, buffers et reserve systeme de 1,5 Gio. CPU, GPU
+et offload hybride sont evalues separement ; RAM et VRAM ne sont pas une
+memoire interchangeable. Architectures hybrides/MoE ou metadonnees manquantes :
+informations insuffisantes, jamais une compatibilite inventee.
+Un modele deja charge n'est pas compte deux fois. L'estimation ne predit pas
+le debit reel. Les telechargements ne sont pas interdits a cause de la RAM ;
+l'espace disque est verifie avant le pull. Avant generation, une estimation
+insuffisante bloque l'appel ; les estimations manuelles limites/inconnues
+sont explicitement journalisees, et Ollama peut encore refuser l'allocation.
+Studio ne ferme pas d'applications et ne modifie pas le fichier d'echange.
+
+Les **agents personnalises** ont un mode Manuel (par defaut) ou Automatique
+et des parametres optionnels. En equipe, le mode automatique demande
+**aussi** l'activation dans cette equipe ; un agent manuel reste manuel.
+Les workflows systeme versionnes conservent leurs modeles configures par defaut
+et proposent un opt-in distinct par nouvelle mission, decrit ci-dessous.
+Sans parametres personnalises, les anciens budgets sont conserves en manuel ;
+le mode automatique utilise 4096 tokens de contexte / 1024 de sortie / 0,2
+de temperature, sous reserve des plafonds propres aux corrections.
+Aucun LLM n'est appele par le routeur : classification heuristique explicable,
+capacites completion, contexte, specialisation documentee, memoire estimee,
+modele deja charge et observations reelles. Les modeles d'architecture
+inconnue ne sont pas automatiquement declares admissibles.
+La confiance est qualitative (faible/moderee), pas une probabilite.
+La previsualisation ne genere rien.
+
+#### Profils explicites et futur materiel
+
+Chaque carte permet d'enregistrer les specialisations **Code, General, Planning,
+Review, Debugging, Tests, Architecture, Documentation, Reasoning** reconnues par
+le routeur existant. Elles sont conservees atomiquement dans
+`StudioData/model-routing-profiles.json`, independamment des missions et
+des parametres des agents. Sans override (ou apres restauration), les valeurs
+du catalogue restent appliquees ; un nouveau modele installe n'a aucune
+specialisation par defaut. Declarer Code n'est pas une certification de qualite.
+
+Pour une architecture sans estimation analytique fiable, **Qualifier le
+chargement** observe uniquement un modele deja charge par Ollama : aucune
+generation ni aucun chargement n'est declenche. Une confirmation explicite,
+la meme empreinte SHA-256 dans `/api/tags` et `/api/ps`, un contexte resident
+connu, des allocations coherentes et une reserve RAM suffisante sont requis.
+La qualification persiste l'empreinte, le contexte reel et les allocations
+observees. Elle ne sert jamais a outrepasser une insuffisance de l'estimateur.
+Les ressources sont reverifiees avant utilisation ; sans modele resident,
+RAM et VRAM libres doivent couvrir le placement observe et la reserve systeme.
+Pas d'extrapolation a un contexte superieur, ni d'invention d'un cache KV pour
+une architecture inconnue. Un changement de poids, une preuve absente ou
+inverifiable bloque l'admissibilite automatique ; retirer la qualification
+est explicite. La selection manuelle reste possible avec avertissement pour
+une estimation inconnue, mais pas pour une insuffisance detectee.
+Les decisions deja figees ne sont pas reclassees ; leur admissibilite automatique
+est recontrolee avant appel, y compris a la reprise.
+
+Les profils systeme, personnalises, la bibliotheque, l'estimateur et le provider
+acceptent des contextes jusqu'a **262144 tokens**. Aucune valeur existante n'est
+agrandie ; les minima propres aux profils sont conserves et la sortie doit
+rester strictement inferieure au contexte. Le modele doit annoncer un contexte
+suffisant et les ressources doivent le permettre pour le routage automatique.
+Les timeouts, sorties par defaut, budgets, plafonds de fichiers/corrections et
+controles de troncature ne changent pas.
+
+Un tag Ollama futur peut donc etre installe, specialise, qualifie puis affecte
+depuis l'interface sans recompilation : bibliotheque pour le profil, editeurs
+Modeles/Agents pour les agents systeme, affectation manuelle sur la carte pour
+les agents personnalises. La premiere observation qualifiante demande un
+chargement prealable via Ollama au contexte voulu. Une mesure n'est pas une
+garantie de debit ou de rechargement ; les sondes Windows/NVIDIA et les
+metadonnees reelles restent necessaires pour une admission automatique.
+Les versions Ollama ne publiant pas digest/contexte/allocations suffisants
+ne permettent pas cette qualification ; aucun besoin memoire manuel n'est accepte.
+
+La chaine initiale reste stable pendant une tache/reprise ; l'escalade
+existante ne passe au secours suivant qu'apres deux echecs de qualite.
+Les autorisations, historiques, limites d'essais et rollback restent requis.
+Les tentatives conservent categorie, choix/alternatives/raisons, duree,
+compilation, commandes de tests, navigateur et rollback lorsqu'ils sont
+observables. L'historique est deduplique entre runs et plans ; au moins trois
+observations comparables sont requises pour influencer faiblement le score.
+Une compilation seule n'est pas comptee comme reussite fonctionnelle ;
+memoire, contexte, timeout et infrastructure ne penalisent pas la qualite.
+Reinitialiser le classement enregistre seulement une date de coupure dans
+`model-ranking-reset.json`, sans supprimer les historiques de missions.
+
+### Routage des missions systeme
+
+Dans le formulaire Projet, **Selection automatique des modeles pour les
+missions** est decoche par defaut et revient a cet etat apres soumission.
+L'API accepte `automaticModelSelection: true` uniquement pour un projet avec
+workflow collaboratif. Aucune migration n'active une mission/equipe existante ;
+le parametre absent reste faux. Les missions legacy non collaboratives et
+les conversations ne sont pas basculees vers ce mecanisme.
+
+Planner, Developer (dont Backend/Frontend), Reviewer et les corrections
+passent par le meme routeur local. Role, template, fichier, contexte borne
+reel, diagnostics et complexite heuristique sont transmis sans autre LLM.
+Les budgets, outils autorises et parametres du workflow gele sont preserves ;
+seul le nom du modele admissible change. Les roles systeme distinguent .NET
+et React meme lorsqu'un contrat full-stack mentionne les deux technologies.
+Si un modele code installe supporte le contexte demande, les categories de
+generation React/.NET/projet exigent un modele specialise code admissible.
+Un Planner generaliste deja resident ne remplace pas silencieusement ce
+Developer quand la memoire du modele code est insuffisante ou inconnue.
+Les allocations des autres modeles charges ne sont pas supposees liberees :
+un changement necessite une nouvelle verification des ressources.
+
+Le nom selectionne conserve le `num_ctx`, le `num_predict` et la temperature
+du profil de role fige, pas ceux d'un autre profil portant le meme nom.
+Une reponse Ollama `done_reason=length` est rejetee entierement, meme avec un
+contenu vide et du raisonnement. Le diagnostic `OutputLimit` expose la limite,
+`eval_count` si fourni et les tailles du contenu/raisonnement, sans publier
+le fragment ni declencher une nouvelle generation. Il n'est pas classe comme
+une panne d'infrastructure ou une erreur de qualite justifiant un retry.
+Une reprise reste explicite, conserve les reservations et saute les fichiers
+deja presents dans le brouillon. Une chaine de routage deja figee n'est pas
+remplacee automatiquement par une nouvelle politique.
+
+La chaine initiale est persistee par agent/fichier ou operation. Les reprises
+et corrections la reutilisent sans reclasser ni revenir sur un modele rejete.
+La politique existante exige deux echecs de qualite avant le secours suivant ;
+les retries consomment la limite globale de corrections existante, jamais une
+nouvelle enveloppe. Memoire/contexte sont controles avant l'appel ; un blocage
+ne consomme ni tentative de generation ni correction. Une allocation refusee
+par le fournisseur annule aussi ces compteurs et garde une observation
+`Blocked`, non utilisee pour decider une escalade de qualite. Une alternative
+devenue indisponible bloque la reprise, sans reordonner la chaine en silence.
+
+Les details des etapes exposent mode, decisions/alternatives/contraintes,
+modele effectivement appele, raison d'escalade et validations observees.
+Ces invocations alimentent les statistiques existantes, dedupliquees par
+identifiant ; builds et tests ne prouvent pas seuls les criteres fonctionnels.
+Les choix d'une mission active sont des dependances protegees de suppression.
+Les sources, versions, propositions, approbations et traces opt-in ne changent
+pas de politique. En particulier, le workflow full-stack versionne conserve
+son arret pour diagnostic humain apres une validation echouee : activer le
+routage n'autorise pas de nouvelles corrections jusque-la interdites.
+
+### Evolution d'un projet Studio existant
+
+Dans Desktop, selectionner une equipe puis un projet Studio React ou .NET.
+Choisir son plan enregistre, decrire la nouvelle demande et etendre le plan :
+les taches terminees sont conservees et le Planner recoit les fichiers actuels,
+un inventaire borne et la memoire historique. Les demandes et leurs taches sont
+liees a une conversation du Planner et restent consultables apres redemarrage.
+Demarrer ou reprendre le plan requiert de nouvelles autorisations distinctes
+pour les modifications et pour l'execution locale.
+
+Les scripts npm et les projets .NET peuvent executer du code sur Windows :
+utiliser uniquement un projet explicitement declare fiable. Les tests executes
+ne prouvent pas automatiquement chaque critere d'acceptation. Les criteres du
+Planner sont des propositions a classer : exigence utilisateur, condition
+technique ou suggestion facultative. Pour chaque critere obligatoire, une
+personne doit associer un scenario navigateur enregistre et expliquer pourquoi
+il verifie le critere. Studio verifie le resultat et la fraicheur du scenario,
+mais ne peut pas deduire automatiquement sa pertinence ; sans scenario adapte,
+le critere reste non verifie. Un build ou une affirmation d'agent ne suffit
+pas. Le plan reste en attente
+de validation tant qu'un critere obligatoire est echoue ou non verifie. Une
+modification du workspace invalide les confirmations precedentes ; leur trace
+reste visible. Les anciens plans sont egalement reexamines sans relancer leurs
+taches. Les limites de taille du contexte et les fichiers
+proteges du scaffold peuvent empecher certaines modifications.
+
+**Le code genere est non fiable.** Le workflow de validation isole ci-dessous
+n'execute pas de code genere sur l'hote ; l'execution locale Desktop decrite
+ci-dessus est un mode distinct, non isole et explicitement autorise.
+Pour le workflow isole, sans Docker Linux disponible, image hors ligne preparee, activation explicite de
 la sandbox ET accord humain pour la mission, la compilation et les tests ne sont
 pas executes. Le statut final est alors `GeneratedUnverified`, jamais un succes
 de compilation.
+
+Avec `Sandbox.Enabled=false`, ni l'empreinte pre-revue ni la verification de
+disponibilite ne lancent Docker, meme pour une inspection. Le plan et la revue
+peuvent etre conserves sans executer le projet ; l'empreinte lie aussi
+l'activation du sandbox et une reconfiguration invalide l'accord precedent.
+Cela n'active pas une validation locale des missions systeme. L'executeur
+Desktop existant rattache ses processus au Job Object apres leur demarrage et
+ne refuse pas un hote eleve : il ne suffit pas a garantir le controle demande
+des enfants des leur creation et l'absence de privileges eleves. Aucun mode
+« Validation locale supervisee » n'est propose sur cette base ; aucun resultat
+local n'est invente ni transmis au Reviewer comme une verification effectuee.
+
+### Contrat des nouvelles missions React
+
+Le choix **React App** utilise `react-typescript-vite-v2` : seul le scaffold
+technique est fourni (dependances figees, configuration stricte, point d'entree
+et test de fonctionnement du runtime). Aucun ajout/suppression de taches,
+filtre ou autre fonctionnalite metier n'est impose. L'identifiant historique
+`react-typescript-vite` conserve son contrat de gestion de taches pour la
+compatibilite ; les missions et plans existants ne sont pas migres.
+
+La demande originale reste dans le plan persistant. Les elements de listes
+explicites sont classes separement. Pour une demande en prose, les phrases
+completes sont separees sans decouper les chemins ou les versions. Une
+enumeration positive d'actions a objet commun peut etre developpee
+(`modifier et supprimer des rapports` donne deux comportements) ; les
+negations et les listes de champs ne sont pas ainsi developpees. Les fragments
+originaux restent dans la trace, y compris les exigences transversales
+(responsive, tests) et techniques. Les comportements fonctionnels deviennent
+`C1`, `C2`, etc. (32 maximum), sans garantie d'interpretation semantique complete.
+Les plans et criteres historiques ne sont jamais renormalises a la lecture :
+modifier un plan approuve exige un amendement explicite et une nouvelle
+approbation liee a son empreinte, pas un simple appel de reprise.
+Pour un echec de generation initiale non publiee, l'action explicite
+`POST /api/missions/{id}/react-plan-amendment` prepare cet amendement :
+elle exige `expectedUpdatedAt`, l'ancienne empreinte approuvee, le plan
+complet avec manifeste inchange et le modele code local choisi. Elle
+renormalise les exigences originales, valide la couverture et la version
+React verrouillee, verifie inventaire/ressources et budget minimal, puis
+conserve l'ancien plan, son approbation, routage et brouillon dans l'historique.
+Les sources existantes restent intactes, avec leurs diagnostics statiques ;
+leur conservation n'est pas une preuve de compatibilite ou de compilation.
+L'interface identifie l'amendement comme assiste, pas comme un nouveau
+resultat Planner. L'etat devient `AwaitingPlanApproval`, sans mise en queue,
+generation, reservation ni sandbox. L'approbation suivante lie aussi le
+profil Developer fige et ses choix par fichier ; les ressources seront
+reverifiees a l'execution. Les anciennes empreintes sans amendement gardent
+leur format. Cette action est limitee aux missions React v2 a routage
+automatique et approbation obligatoire, sans revision/workspace, avec un
+budget fige, et a trois amendements au maximum. Exemple dans
+`AIPlatform.API/studio-management.http`. L'approbation et Docker restent
+deux autorisations distinctes ; le budget minimal ne garantit pas la
+reussite des futures corrections ou du Reviewer.
+
+Le Planner
+recoit la version React lue dans le scaffold verrouille. Il
+conserve ses chemins autorises sous `src/` et declare, pour chaque critere,
+des fichiers d'implementation et de tests. Le prompt precise que chaque entree
+`criterionCoverage`, y compris l'etat initial et l'interface, doit referencer
+au moins une implementation editable et un test metier reconnu (`.test.ts`
+ou `.test.tsx`, suffixes sensibles a la casse), tous declares dans `files`.
+Le test technique protege ne compte pas ; un test declare ailleurs dans le
+plan ne couvre pas automatiquement tous les criteres. Un exemple JSON neutre
+illustre le format existant, sans ajouter ni reparer automatiquement de couverture.
+Une couverture manquante bloque le plan ; une declaration de couverture ne
+prouve pas sa pertinence.
+
+Sur une mission React v2 inactive ayant une revision publiee (y compris en
+`Failed`), **Valider cette revision** prepare une demande sans lancer Docker.
+Studio verifie les fichiers publies et affiche l'image locale par ID, les
+commandes et les protections du conteneur. Il faut une autorisation explicite,
+a usage unique et liee a cette revision et a cette configuration. Une demande
+expire au bout de 15 minutes et ne survit pas a un redemarrage de l'API.
+La validation reutilise le sandbox hors reseau et teste une copie en lecture
+seule, sans modifier la mission, ses fichiers ni son budget. Le dernier rapport
+technique reste consultable apres redemarrage ; il ne valide aucun critere
+fonctionnel a lui seul. Si la revision ne fournit pas d'ID d'image immuable
+ou que cette image n'est plus disponible localement, Studio n'execute rien
+et ne telecharge aucune image.
+
+Depuis le rapport technique en echec de la revision courante, **Corriger
+depuis ce rapport** permet de preparer des groupes de un ou deux chemins
+editables par appel Developer. Laisser le champ vide propose les fichiers
+identifies par les diagnostics ; si aucun fichier editable n'est identifiable,
+il faut definir le perimetre. Studio transmet les erreurs TypeScript et Vite,
+les echecs de chargement et les assertions Vitest, avec leurs positions si
+disponibles, les sources utiles et le budget restant. La preparation verifie
+les contextes et le budget global avant toute generation. Les groupes suivants
+voient les dependances retenues telles qu'elles viennent d'etre corrigees ;
+si le contexte ne tient plus, la correction s'arrete sans publication.
+
+Avant publication, Studio compare les fichiers au manifeste du plan et analyse
+la syntaxe TypeScript, les imports/exports locaux, les dependances du scaffold
+et les usages incompatibles de Jest et de jest-dom. Seuls le helper Studio et
+son compilateur TypeScript de confiance tournent sur l'hote : les sources sont
+lues en memoire, sans charger leur configuration ni executer leurs scripts.
+Node.js doit etre disponible pour ce controle. Au premier brouillon, une
+passe Developer ciblee peut corriger ces erreurs si le budget restant et la
+limite de tentatives le permettent. Si les erreurs persistent, le brouillon
+est conserve mais aucune revision n'est publiee.
+
+La correction depuis un rapport reutilise la limite de tentatives de la
+mission et le budget global. Un candidat en echec n'est pas publie ; les appels
+deja effectues restent comptes. Studio preserve les revisions precedentes, les
+fichiers hors perimetre et le statut de la mission. La publication ne relance ni
+Planner, ni Reviewer, ni Docker. Il faut preparer puis autoriser une nouvelle
+validation Docker pour l'empreinte corrigee. L'analyse statique n'est ni une
+compilation complete ni une preuve de couverture fonctionnelle.
+
+#### Reparation economique d'un brouillon React v2
+
+L'API `POST /api/missions/{id}/react-draft-repair/prepare` projette une
+reparation sur une copie en memoire, sans modifier la mission ni appeler un
+modele. Le helper TypeScript de confiance transforme uniquement des cas
+prouves par diagnostic et AST : imports nommes utilises exclusivement comme
+types (effets de module conserves), mauvais chemin vers un unique module
+purement type exportant les symboles attendus, `jest.fn()` sans argument vers
+`vi.fn()` sans collision, et ancien import a effet de bord jest-dom lorsque
+le setup Vitest est exactement celui du scaffold. Les fichiers avec erreur
+syntaxique et les cas ambigus restent intacts. Chaque edition conserve
+positions, avant/apres et SHA256 ; une nouvelle analyse rejette tout nouveau
+diagnostic. Ces transformations sont idempotentes.
+
+La preparation accepte 1 a 3 groupes ordonnes de 1 a 4 fichiers editables
+existants, avec instructions de coordination. Elle reutilise le constructeur
+de contexte, le contrat JSON strict et le transport Developer des corrections
+depuis rapport ; seules les sources cibles et leurs dependances transitives
+sont fournies. La reponse doit contenir exactement les chemins demandes,
+sans doublon, propriete inconnue, chemin supplementaire ou JSON incomplet.
+Une sortie tronquee est rejetee par le provider. Les dependances deja
+corrigees sont rafraichies avant le groupe suivant ; les cibles puis le
+candidat complet repassent le controle statique.
+
+Chaque groupe peut choisir `patchTargets: [{ "path": "src/App.tsx",
+"original": "texte exact unique" }]` au lieu du contrat de fichiers complets.
+Ce mode est aussi disponible pour les corrections depuis rapport de revision.
+Les 1 a 8 ancrages doivent couvrir exactement les chemins du groupe, sans
+doublon ni chevauchement, et chaque original doit exister une seule fois.
+Le Developer doit renvoyer uniquement
+`{ "patches": [{ "path": "...", "original": "...", "replacement": "..." }] }`
+avec exactement les couples prepares. Tout element supplementaire, manquant,
+inchange, ambigu ou tronque est refuse avant application. Le remplacement
+vide supprime du texte ; aucun ajout ou retrait de fichier n'est permis.
+La comparaison est ordinale, sans normalisation des fins de ligne ni
+recherche approximative. Les offsets sont calcules sur la meme source
+originale et les remplacements appliques en ordre inverse sur une copie.
+Chaque groupe repasse l'analyse syntaxique et des imports : diagnostics
+restants sur les cibles ou nouveaux diagnostics ailleurs interdisent sa
+validation. Les checkpoints du brouillon conservent les patchs valides,
+leurs positions, avant/apres et SHA256 ; les revisions publiees conservent
+leurs sources completes dans l'historique pour comparaison.
+
+Le preflight expose `replyContract`, `baselineJsonBytes`,
+`completeFilesJsonBytes` et `completeFilesContextCharacters`. Les sources
+pertinentes restent fournies en entier : les ancrages et leur schema peuvent
+donc augmenter le contexte. La sonde de sortie des patchs mesure le JSON
+avec un remplacement de meme taille que l'original, pas la future reponse.
+Un ancrage couvrant tout un fichier peut couter plus que le contrat complet.
+Le choix reste explicite ; les anciens appels et checkpoints restent en
+mode fichiers complets. Ni `num_predict` ni les sources et criteres complets
+du Reviewer ne sont reduits ou augmentes pour favoriser les patchs.
+
+Le nombre de revues est mesure par le meme decoupage que le vrai Reviewer,
+avec un stress de croissance des sources de 25 %. Sans tokenizer integre ni
+compteurs de sortie persistants pour les generations reussies, la borne de
+sortie utilise les octets UTF-8 du JSON initial, majores de 25 %, et exige
+20 % de marge sous `num_predict`. Ce garde conservateur peut refuser un
+regroupement realisable ; il ne pretend pas mesurer les tokens exacts ni
+borner la longueur d'un nouveau programme. Les contextes restent soumis au
+plafond existant en caracteres. Une preparation refusee n'autorise aucun appel.
+
+`POST /api/missions/{id}/react-draft-repair/start` exige l'empreinte exacte
+du preflight accepte et constitue l'action explicite de generation.
+Sous le mutex persistant du budget officiel, un checkpoint separe dans
+`missions/economic-repairs/` protege les capacites Developer et Reviewer ;
+aucune n'est consommee avant son appel reel. Tous les chemins de reservation,
+y compris d'autres processus, respectent cette protection. Les sauvegardes
+perimees ne peuvent effacer ni le registre des appels ni le candidat applique.
+`GET /api/missions/{id}/react-draft-repair/` expose la progression et les
+extraits avant/apres des patchs valides, sans les fichiers sources complets.
+Les groupes complets sont repris sans regeneration ; un envoi facture sans
+resultat complet interdit tout rejeu automatique. Les echecs restent comptes.
+
+Le brouillon original est archive dans le checkpoint et n'est remplace
+qu'apres validation de tout le candidat et nouveau calcul Reviewer. Une
+croissance hors capacite arrete la correction sans appliquer le candidat.
+Cette action ne change pas le statut Failed, ne publie aucune revision et
+ne met rien en file : la reprise officielle reste une action humaine distincte.
+Elle n'execute ni code genere, ni Docker, ni Planner, ni Reviewer.
+La validation Docker d'une future revision necessitera toujours sa propre
+autorisation. Le controle statique ne garantit pas la correction fonctionnelle.
+
+### Budget global des generations par mission
+
+Chaque nouvelle mission Studio fige `MaxTotalGenerations` a la creation :
+champ API `maxTotalGenerations` (1 a 1000), sinon
+`Studio:DefaultMaxTotalGenerations` (10 par defaut). Le champ
+« Generations maximales » est disponible dans la creation de mission.
+Les nouveaux projets d'equipes personnalisees acceptent aussi ce champ.
+Les plafonds Planner et les budgets de correction existants restent des limites
+supplementaires, sans remplacement ni remise a zero lors d'une reprise.
+
+`MissionStore.EnterGenerationScope` associe la mission aux appels asynchrones ;
+`LlmGenerationScope.Reserve` est l'unique point de reservation. Le fournisseur
+Ollama natif l'appelle avant toute operation reseau de generation ; le resolver
+enveloppe les fournisseurs simules/autres sans doubler une reservation native.
+Cela couvre le routage LLM des conversations Studio, Planner, chaque fichier
+Developer, Reviewer, corrections, escalades et reprises. Les conversations et
+equipes personnalisees liees a un projet Studio utilisent le meme budget, meme
+si le Reviewer ne recoit volontairement pas de contexte de fichiers.
+Les appels sans mission Studio (orchestrateur texte independant, espaces
+externes/personnalises sans projet et configuration de commandes Twitch) n'ont
+pas de budget de mission a debiter. Les requetes d'inventaire, telechargement
+et dechargement sans prompt ne sont pas des generations.
+
+Une reservation contient un identifiant unique, le role, le modele et la date.
+Elle est ecrite avant l'appel, sous verrou memoire et mutex OS partage par le
+repertoire, puis synchronisee sur disque et remplacee atomiquement. La source
+persistante est relue sous ce verrou ; les ecritures ulterieures fusionnent le
+journal sans pouvoir supprimer ses unites ni changer le plafond.
+Un echec de persistance interdit l'appel. Une reservation incertaine apres
+interruption reste comptee. **Aucun remboursement automatique** n'est implemente :
+une annulation avant reservation ne consomme rien, mais un echec, une attente,
+un timeout ou une annulation apres reservation consomme l'unite, meme si le
+fournisseur n'a finalement pas envoye de requete. C'est volontairement prudent.
+
+Au premier appel refuse, la mission termine `Failed`, avec le motif
+`GenerationBudgetExhausted` ; aucun nouvel appel n'est lance et les sources,
+plans, diagnostics et reservations sont conserves. Ce motif persiste meme si
+un autre appel deja reserve se termine ensuite. Une reprise ne restaure aucune
+unite. La consultation affiche utilise/restant et le journal par role, sans
+assimiler une reservation a un test reussi. Un risque de budget insuffisant est
+signale a la creation quand un minimum est connu, puis avant Developer d'apres
+le plan valide ; aucune estimation ne garantit la completion.
+
+Les missions historiques sans plafond restent explicitement non plafonnees :
+aucune migration, aucun recalcul de leurs compteurs ou generations passees.
+
+### Correction ciblee des rapports Reviewer
+
+Les nouvelles missions collaboratives figent `reviewerCorrectionEnabled = true`.
+Un rapport invalide reste distinct d'un defaut du code : les erreurs de champs
+et de citations retournent au Reviewer, sans creer de correction Developer.
+La nouvelle tentative recoit la demande, les criteres, les sources actuelles,
+le rapport rejete disponible et ses diagnostics exacts. Le moteur ne remplace,
+ne normalise et n'invente aucune citation ; les chemins et extraits restent
+strictement compares (casse, espaces, retours a la ligne, 500 caracteres maximum,
+sans numeros de ligne ajoutes). Les findings ne sont jamais retires par le moteur.
+Un rapport valide signalant un defaut de code utilise la correction Developer existante.
+
+Les reprises reutilisent le routage, l'escalade et `MaxCorrectionAttempts` partage,
+sans boucle supplementaire ni remise a zero du budget. Un budget nul interdit
+la correction du rapport. Les annulations et limites de contexte restent applicables.
+Si une correction React v2 depasse le budget de caracteres, les instructions
+redondantes, descriptions du plan et anciens journaux sont reduits ; seuls les
+chemins de couverture sont conserves. Si necessaire, les explications de criteres
+du rapport rejete non visees par un diagnostic sont omises et leurs champs sont
+explicitement listes. Les constats, risques, verdicts, citations, diagnostics,
+criteres originaux, preuves d'execution actuelles et sources editables completes
+restent presents. Le rapport prive original demeure intact. Si ces donnees ne
+tiennent pas, ou si une source de couverture manque, la correction s'arrete avec
+un diagnostic avant toute reservation de generation. Aucune source ni citation
+n'est tronquee pour satisfaire le budget ; le controle porte sur les messages
+systeme et utilisateur complets, sans modifier la taille du contexte modele.
+Le retour cible est lie au run, a l'etape, aux sources/plan/criteres/version et au
+fichier de routage ; une revue d'une autre version ne reutilise pas un rejet obsolete.
+Les missions historiques sans cette politique gardent leur fonctionnement anterieur.
+
+Pour la generation fichier par fichier React v2, le Developer recoit la couverture
+du fichier courant, ses prerequis declares et les exigences transversales et
+techniques non dupliquees dans les criteres. Un fichier sans lien explicite de
+couverture garde tous les criteres pour ne pas perdre de comportement. La demande
+et le plan complets restent persistes. Les sources selectionnees sont transmises
+sans troncature et la limite de contexte continue de s'appliquer.
+
+Si une revue statique React v2 ne tient pas en un appel, Studio couvre les
+criteres par groupes dans la meme etape Reviewer. Chaque groupe recoit les
+fichiers complets mappes au plan et leurs dependances, ainsi que les exigences
+liees. Les citations sont validees contre les sources du groupe avant
+agregation ; les fichiers editables non consultes sont signales. Une source
+requise manquante ou un critere qui ne tient pas seul bloque la revue sans
+tronquer le code. Chaque appel reste soumis au budget global existant.
+
+Les rapports structures et erreurs (critere, champ, regle, chemin, extrait disponible)
+restent prives dans le magasin de diagnostics existant : ACL, taille, nombre,
+retention et suppression restent applicables. Aucune trace brute Reviewer n'est activee.
+Les endpoints `GET/DELETE /api/missions/{id}/reviewer-diagnostics` permettent
+l'inspection explicite sans reprise et la suppression apres terminaison, sans
+modifier l'historique ou les compteurs. Un rapport rejete n'est jamais une revue
+acceptee ; l'absence de preuves d'execution interdit de declarer les tests reussis.
+Les anciens rapports non conserves ne peuvent pas etre recuperes retroactivement.
+
+### Correction autonome bornee du Planner
+
+Les nouvelles missions projet collaboratives figent `plannerGenerationLimit = 3` :
+une generation initiale et au plus deux corrections. Apres un rejet du validateur,
+le prochain appel recoit la demande originale, les criteres figes, le plan rejete
+disponible et les diagnostics exacts depuis le magasin prive existant. Les memes
+regles de fichiers/couverture et le meme schema de reponse restent obligatoires.
+Seul le modele peut proposer une correction : le moteur ne fabrique aucune
+couverture et ne supprime aucun critere pour faire accepter le resultat.
+
+Les tentatives restent dans l'historique et les diagnostics prives (memes limites,
+retention et consentement separe pour les traces brutes). Le routage et l'escalade
+existants sont reutilises. Les corrections consomment aussi le budget partage
+`MaxCorrectionAttempts` ; un budget nul interdit toute correction. Le plafond
+Planner borne egalement les reprises sur erreur de generation du routage
+automatique. Un appel provider commence reste compte dans ce plafond meme si
+l'allocation memoire echoue ; un blocage de ressources avant l'appel ne le consomme
+pas. Annulation, timeout ou erreur de ressources ne declenchent aucune
+boucle supplementaire. Apres redemarrage, une reprise explicite conserve les
+compteurs et utilise le dernier rejet encore disponible ; un plafond epuise
+interdit une nouvelle planification pour cette mission.
+
+Un plan invalide ne peut jamais atteindre Developer. Avec l'approbation du plan,
+les corrections ont lieu **avant** `AwaitingPlanApproval` ; seul le plan accepte
+et son empreinte sont presentes a l'utilisateur pour decision. Sans cette option,
+le workflow continue automatiquement apres validation. Les missions historiques
+sans cette politique persistante conservent leur comportement, sans migration.
+
+### Approbation optionnelle du plan avant Developer
+
+Pour une nouvelle mission projet collaborative, **Demander mon approbation
+apres la planification** (`requirePlanApproval`, desactive par defaut) suspend
+le workflow seulement si le validateur existant accepte le plan. Le plan,
+le scaffold, l'etape Planner terminee, son empreinte et l'etat
+`AwaitingPlanApproval` sont sauvegardes atomiquement avant la pause. Aucun
+Developer ni Reviewer ne demarre. Un plan rejete conserve les diagnostics
+existants, sans attente d'approbation.
+
+Le suivi presente le plan complet, les fichiers, les criteres et leur couverture
+lorsque le contrat les declare, le modele Planner et ses generations consommees.
+La consultation ne reprend rien. **Approuver et continuer** lie la decision a
+l'empreinte exacte (mission, workflow, version du plan, demande, criteres et plan)
+et remet une seule fois la mission dans la file du worker existant. Le Planner
+n'est pas rappele et le plan n'est pas modifie. Les decisions concurrentes,
+repetees ou obsoletes sont refusees (`409`). Le contenu approuve est recontrole
+avant les etapes suivantes ; les versions ulterieures du code n'invalident pas
+a elles seules la version initiale du plan approuve.
+
+**Refuser le plan** termine la mission en `Cancelled`, conserve le plan et
+l'historique, et interdit la reprise generique de ce plan refuse. Une mission
+en attente reste en attente apres redemarrage, sans execution automatique.
+Cette approbation ne donne **aucune autorisation de compilation, tests ou
+execution** : la demande d'autorisation du workspace genere reste distincte.
+Les missions anterieures et le comportement automatique par defaut ne changent pas.
+
+Le Developer recoit la demande, les criteres, le plan et les sources utiles.
+Il genere les tests metier de cette mission ; leurs titres portent les IDs
+`[C1]`, etc. Les corrections ne peuvent pas modifier ces tests ni le scaffold.
+Le Reviewer recoit aussi les fichiers reels et les resultats disponibles,
+avec leur provenance. Chaque critere exige un verdict statique explique :
+`Satisfied` avec citation de source verifiable, `NotSatisfied` ou `Unverified`.
+Des `findings: []` ou une affirmation du modele ne constituent pas une preuve.
+
+La validation fonctionnelle exige, en plus de la revue statique et des trois
+etapes TypeScript/build/tests, des assertions Vitest effectivement rapportees
+comme reussies pour chaque critere, dans ses fichiers de tests prevus. Ces
+traces sont liees a la version et a l'empreinte autorisee des sources ; le test
+technique seul ne compte pas. Sans correspondance, l'etat reste
+`GeneratedUnverified`. L'interface distingue revue et execution.
+La qualite semantique des criteres, des tests generes et de leur revue reste
+une limite : un nom de test ne garantit pas la pertinence de ses assertions.
+Ce contrat n'ajoute aucune permission, aucun mode local supervise ni aucune
+execution automatique de code genere.
+
+Les nouveaux essais Planner React v2 conservent leur resultat JSON structure
+**avant validation**, y compris en cas de rejet. Ces copies de diagnostic ne
+sont jamais des plans approuves ou executables. Elles sont associees a la
+mission, au workflow/run, au modele reel et a l'identifiant/numero de tentative.
+Les erreurs indiquent le critere, une regle stable, le champ, le chemin
+eventuel et une explication : couverture absente, critere inconnu, explication
+invalide, doublon, chemin interdit/non planifie, implementation ou test reconnu
+manquant. Les conditions d'acceptation restent inchangees.
+
+Dans le suivi de mission, **Consulter les diagnostics Planner** ouvre ces copies
+explicitement, sans reprise ni execution. Le stockage reutilise `ollama-traces`
+prive, ses ACL Windows, sa limite par fichier et sa retention/nombre de fichiers
+configurables (par defaut 1 Mio, 7 jours, 20 fichiers, partages avec les autres
+traces). Une limite de stockage bloque explicitement la capture, sans accepter
+le plan. Les copies expirees ou supprimees ne sont plus consultables.
+Une suppression explicite des diagnostics est disponible meme sans workspace ;
+la suppression d'un projet retire aussi ses diagnostics Planner.
+
+La case **Conserver les traces detaillees du Planner pour cette mission**
+(`recordPlannerTrace`, desactive par defaut et non reconduit apres envoi)
+autorise en plus les corps HTTP exacts, potentiellement sensibles. Sans cet
+accord, aucune reponse brute n'est conservee. La consultation brute exige aussi
+l'autorisation Desktop et une action distincte ; elle n'est pas incluse dans
+les reponses ordinaires de l'historique ou les journaux generaux.
+Les anciennes missions ne sont pas modifiees : un plan precedemment rejete
+et non capture ne peut pas etre recupere retroactivement. Du JSON mal forme
+ne peut pas etre conserve comme plan structure ; son diagnostic reste
+disponible, et le brut seulement si la capture avait ete autorisee.
 
 ## Avancement MVP 6 (incomplet)
 
@@ -281,6 +1056,35 @@ L'export ZIP et la coloration de l'apercu sont disponibles pour les workspaces
 reutilisent le meme workflow collaboratif. La mission React est maintenant
 `Verified` en version 5 : TypeScript, Vite et dix tests Vitest ont reellement
 reussi dans Docker. Cela ne valide pas les futures missions Twitch.
+
+### Simulation locale des bots configures
+
+Dans le module Twitch, la simulation execute uniquement le routeur des commandes
+enregistrees, avec un utilisateur et un role simules. Elle ne lit pas les jetons
+OAuth et ne contacte pas Twitch. Une sequence peut tester le cooldown avec une
+horloge virtuelle ; son etat est independant de celui du bot connecte. Les
+commandes peuvent etre reservees aux moderateurs ou au diffuseur ; en mode
+connecte, les roles proviennent des badges EventSub. Les anciennes commandes
+restent accessibles a tous par defaut. Seuls les messages de chat sont pris en
+charge ; les follow, abonnements et raids ne sont pas simules. Les resultats ne
+sont pas des preuves persistantes et cette fonction n'execute ni n'isole les
+projets Twitch generes.
+
+Le module Twitch permet aussi de demander a une equipe existante une proposition
+de configuration structuree. Un bot doit etre arrete ; l'utilisateur examine
+les operations et approuve explicitement leur application (avec une confirmation
+supplementaire pour une suppression). La configuration precedente est conservee,
+les simulations utilisent le routeur existant et l'horloge virtuelle, et un
+echec restaure la configuration. Les propositions et resultats sont conserves
+dans les donnees Twitch ; si la configuration change, leurs preuves sont marquees
+perimees. Une application interrompue peut etre restauree si la configuration
+correspond encore a son instantane. Ces simulations verifient les operations
+proposees, pas la totalite des intentions exprimees en langage naturel. Les
+reponses sont du texte fixe : aucune generation aleatoire ni execution de code.
+Une nouvelle commande utilise par defaut un cooldown de cinq secondes ; une
+autre valeur doit etre explicitement demandee. La detection des contenus
+ressemblant a du code est conservatrice et n'est pas exhaustive : les operations
+doivent etre examinees avant approbation.
 
 ### MVP 6.3 - Twitch (scenario Ollama/Docker reel verifie)
 
@@ -1001,8 +1805,15 @@ compagnon. React est compile et embarque : aucun serveur Vite en production.
    actives. Les missions en attente d'autorisation restent en attente.
    **Ollama et Docker ne sont jamais arretes par Studio.**
 
-Le backend est autonome : l'utilisateur final n'a besoin ni du SDK .NET, ni de
-Node.js, ni de Rust. WebView2 est requis ; l'installateur propose son bootstrap
+Le backend .NET est autonome : aucun SDK .NET ni Rust n'est necessaire pour
+Studio lui-meme. Le controle statique React v2, les reparations AST et les
+helpers navigateur exigent Node.js x64 >= 20.14 installe dans
+`%ProgramFiles%\nodejs` (une jonction d'installation est resolue).
+Node.js n'est pas embarque : en son absence la publication React est bloquee
+explicitement, jamais validee par defaut. Les helpers de confiance et leurs
+dependances TypeScript/Playwright sont, eux, inclus dans les ressources
+`studio-browser` de l'installateur ; aucun `npm install` n'est lance sur les
+sources generees. WebView2 est requis ; l'installateur propose son bootstrap
 Microsoft s'il manque (telechargement necessaire). **Ollama et Docker Desktop
 restent externes** : les demarrer ou les installer separement depuis
 [Ollama](https://ollama.com/download/windows) et
@@ -1100,6 +1911,41 @@ npm run desktop:build          # publication .NET + React + Rust + installateur 
 Ne pas distribuer le seul executable Rust du dossier target : utiliser
 l'installateur, qui inclut aussi le compagnon et sa configuration.
 
+#### Stabilisation Windows 0.6.6
+
+La version 0.6.6 reprend le moteur React v2, son helper TypeScript, les
+reparations AST, groupees et par patchs, sans modifier les contrats
+d'autorisation ou les budgets. La fabrique de workspaces utilise maintenant
+les options injectees, y compris dans les tests isoles. La compaction
+existante des rapports Reviewer rejetes s'applique egalement aux revues
+groupees ; criteres, sources completes, citations et diagnostics restent
+obligatoires, et un contexte encore trop grand est refuse avant generation.
+
+Verification de livraison : 373 tests backend cibles, 102 tests de composants
+React, six parcours Edge desktop/tablette et onze tests des helpers reussis.
+Deux tests du backend et des helpers empaquetes et six tests Rust natifs
+reussissent egalement.
+Les onze anciens echecs Workflow API sont resolus : stockage capture au lieu
+des options injectees, puis configuration du sandbox simule incoherente avec
+le plan canonique de la fixture. Les fixtures de normalisation et les
+selecteurs d'interface obsoletes ont ete alignes sur les contrats actuels.
+
+Le backend autonome publie a reellement demarre en mode Desktop : authentification,
+CORS, rotation du jeton et arret par commande ou fermeture du canal proprietaire
+verifies. Un autre demarrage avec stockage Development vide et isole a ete
+verifie. Les helpers empaquetes chargent leur TypeScript embarque et analysent
+des sources synthetiques sans les executer. Aucun appel Ollama, execution de
+code genere sous Docker ou changement des missions historiques n'a ete requis.
+
+L'installateur NSIS x64 non signe est produit par `npm run desktop:build` dans
+`AIPlatform.Web/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/`.
+L'assistant NSIS a reellement ete ouvert jusqu'a la page de detection d'une
+version deja installee. Ces controles ne certifient pas une installation ou
+mise a jour Windows, ni le lancement du frontend natif apres installation.
+La verification du script NSIS montre que le mode `/UPDATE` n'efface pas
+les donnees applicatives ; ne jamais cocher une suppression des donnees lors
+d'une desinstallation. Conserver une sauvegarde avant toute mise a jour.
+
 ## 1. Prerequis et demarrage
 
 Environnement verifie : Windows, SDK .NET 10, Node.js 20.14, npm 10.8,
@@ -1107,6 +1953,94 @@ Ollama sur `http://localhost:11434`, modeles deja installes :
 
 - `qwen3:4b` : routage et conversation generale ;
 - `qwen2.5-coder:7b` : developpement et generation de projets.
+
+### Escalade locale des modeles des equipes
+
+Les reprises ciblees distinguent le fichier actuel apres rollback, le fragment
+du candidat precedent rejete (avec son run), ses diagnostics historiques non
+verifies sur le fichier actuel, et l'objectif HTTP. La fonction complete et
+ses variables restent fournies ; les diagnostics ne sont pas rebaptises en
+erreurs actuelles.
+
+Le champ `recordOllamaTrace` de la requete `retry` est **false par defaut**.
+Le passer a `true` constitue un consentement explicite a enregistrer localement
+le code et les prompts de cette invocation uniquement. Ils peuvent contenir des
+secrets : aucun masquage parfait n'est garanti. Les en-tetes d'authentification
+ne sont jamais enregistres et les corps ne vont pas dans les logs generaux.
+Les traces privees Windows sont dans `StudioData/ollama-traces`, avec ACL
+limitee au compte courant (les administrateurs peuvent reprendre les droits).
+Elles conservent le modele, les corps JSON exacts requete/reponse et leurs
+metadonnees de fin, les operations extraites, application/rollback et validation,
+associes au workspace, run, task et identifiant de tentative.
+Les limites `Studio.OllamaTraceMaxBytes` (1 Mio par trace),
+`OllamaTraceMaxFiles` (20) et `OllamaTraceRetentionDays` (7) sont configurables.
+La retention est appliquee aux ecritures et au demarrage de Studio ; aucun
+nettoyage ne tourne lorsque Studio est arrete. Un depassement explicite arrete
+la tentative plutot que tronquer une trace en pretendant qu'elle est complete.
+`DELETE /api/studio/projects/{id}/ollama-traces` supprime ces traces locales,
+sans toucher au projet ni aux historiques ; une capture active doit etre arretee.
+
+Dans **Agents / Teams**, l'escalade est optionnelle et desactivee par defaut,
+y compris pour les equipes deja enregistrees. Le modele configure de chaque
+agent reste le premier choix. Les secours sont ordonnes et modifiables :
+priorite a la liste du membre de l'equipe, puis a celle de l'agent ; une liste
+vide interdit les secours, une liste absente herite. Pour le Developer, les
+suggestions par defaut sont `qwen2.5-coder:7b`, `qwen3.5:9b`,
+`qwen2.5-coder:14b`, uniquement lorsqu'ils sont installes.
+
+Les collaborations et reprises d'une meme tache passent au secours suivant
+apres deux echecs consecutifs de generation (code invalide, correction sans
+effet, tests fonctionnels echoues). Ollama `/api/tags` et `/api/show` verifient
+l'installation et la capacite `completion`, sans telechargement ni generation.
+Un contexte excessif est reduit avant l'appel ; s'il reste trop grand, il est
+refuse. Contexte, autorisation, infrastructure, environnement, memoire et
+timeout ne declenchent pas d'escalade et interrompent la tentative concernee.
+
+Chaque tentative conserve modele, motif, resultat de compilation/tests,
+diagnostics et decision suivante. L'interface affiche ces informations pendant
+l'execution. Les historiques cumules restent attaches a la tache lors d'une
+reprise autorisee, sans relancer les taches terminees ni augmenter les limites.
+Les requetes Studio restent serialisees et le modele precedent est decharge
+lors d'un changement pour une equipe ayant active l'escalade. Cela ne controle
+pas les autres clients Ollama ; un modele 14B peut depasser la memoire disponible.
+Les autorisations d'execution, rollback et annulation restent obligatoires.
+
+Pour les projets full-stack d'agents, le contexte de correction contient une
+seule copie de chaque source pertinente (version proposee incluse) et le contrat
+API reel. Le budget reserve la reponse, le schema JSON et 768 tokens de marge ;
+les fichiers optionnels sont retires avant l'appel si necessaire. Un contexte
+indispensable trop grand produit une erreur explicite sans appel Ollama.
+La requete `POST /api/custom-agent-teams/{id}/development-plans/{planId}/retry`
+accepte `taskOnly: true` pour reprendre uniquement `taskId`, puis mettre le plan
+en pause apres sa reussite. Sans cette option, le comportement reste inchange.
+`resume` accepte egalement `taskOnly` et `taskInstructions` (2000 caracteres)
+pour preciser la correction de la prochaine tache sans reecrire son historique.
+Une correction identique conserve les diagnostics fonctionnels et consomme une
+tentative ; elle ne vaut pas validation. L'annulation conserve les derniers
+resultats persistes. Le helper navigateur est resolu depuis les scripts du depot
+pour l'hote source, ou les ressources voisines de l'hote installe ; les liens
+symboliques et jonctions restent refuses, sans chemin fourni par le workspace.
+`POST /api/custom-agent-teams/{id}/development-plans/{planId}/targeted-corrections`
+ajoute une tache d'integration a un plan en pause avec consentements workspace et
+execution. Le Developer recoit l'extrait, le fichier concerne complet (fonction
+et variables englobantes), la signature API, les diagnostics HTTP/compilateur et
+le format attendu. Le budget reserve la reponse, le schema et une marge de
+securite ; un contexte trop grand est refuse sans tronquer la fonction ni appeler
+la generation. Un remplacement doit correspondre a un
+extrait unique du fichier courant ; aucun Planner ni regeneration complete
+n'est utilise. Une seule generation est permise, sans correction automatique ;
+la modification n'est acceptee qu'apres compilation, tests et verifications
+existantes. Un echec ou une annulation restaure les fichiers anterieurs par le
+mecanisme de modifications revues, sans ecraser une modification concurrente.
+Les modifications tentees, le diagnostic HTTP initial et les erreurs de
+compilation restent dans l'historique ; un echec de restauration est explicite.
+La reprise autorisee de cette tache echouee ne relance aucune autre tache et
+conserve les compteurs. Elle recharge le contexte et les erreurs precedentes,
+y compris pour une ancienne correction ayant laisse du code invalide en place.
+L'option `compilationOnly: true` de la reprise est reservee aux corrections
+ciblees explicitement autorisees : seuls les builds sont executes, puis le plan
+se met en pause sans tests, navigateur ni Reviewer. Ce mode ne constitue pas une
+preuve HTTP ; celle-ci doit etre obtenue avant les validations d'integration.
 
 Docker Desktop 4.99.0 / Engine 29.9.3, contexte `desktop-linux` (WSL 2), a
 maintenant ete valide sur cette machine. L'image hors ligne a ete preparee apres
@@ -1313,6 +2247,24 @@ Le choix manuel est valide avant mise en file et ne sollicite pas le routeur.
 En Development, `Studio.DataDirectory` vaut `..\StudioData` relativement au projet
 API. En Desktop, les donnees sont dans `%LOCALAPPDATA%\AIPlatformStudio\StudioData`,
 independamment du repertoire d'installation.
+
+Pour ouvrir le Studio React v2 connecte sans utiliser les donnees installees :
+
+```powershell
+cd AIPlatform.Web
+npm run studio:dev
+```
+
+Cette commande lance l'API sur `http://localhost:5167` et Vite sur
+`http://127.0.0.1:5173`. Elle reutilise `Studio__DataDirectory` avec
+`%LOCALAPPDATA%\AIPlatformStudio.Dev\StudioData` et desactive les appels Ollama
+et les sondes Docker pour cette session de verification. `Ctrl+C` arrete les
+processus. Le demarrage de l'API Development refuse les chemins qui chevauchent
+le dossier installe (y compris les alias Windows) ; le mode Desktop conserve
+son chemin d'origine et ignore ce reglage.
+
+Ne pas utiliser `desktop:dev` pour cette verification : Tauri debug demarre le
+compagnon en mode Desktop et utilise les donnees et les journaux Desktop.
 
 ```text
 StudioData\

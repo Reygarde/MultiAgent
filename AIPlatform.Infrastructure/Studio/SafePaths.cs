@@ -36,7 +36,7 @@ public static partial class SafePaths
                 .Contains(segment, StringComparer.OrdinalIgnoreCase)))
             throw new StudioValidationException("Generated output directories are not allowed.");
         if (ReactTemplate.IsPath(path) || FullStackTemplate.IsPath(path) ||
-            AgentReactTemplate.IsAdditionalSource(path)) return path;
+            AgentReactTemplate.IsAdditionalSource(path) || AgentFullStackTemplate.IsPath(path)) return path;
         if (!new[] { ".cs", ".csproj", ".json", ".md" }.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase))
             throw new StudioValidationException("Only C#, project, JSON and Markdown source files are allowed.");
         if (!(path.StartsWith("src/App/", StringComparison.Ordinal) ||

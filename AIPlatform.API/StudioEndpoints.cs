@@ -1,4 +1,6 @@
 using AIPlatform.Core.Studio;
+using AIPlatform.Infrastructure.Studio;
+using AIPlatform.API.Services;
 using Microsoft.AspNetCore.Http.HttpResults;
 
 namespace AIPlatform.API;
@@ -7,6 +9,82 @@ public static class StudioEndpoints
 {
     public static void MapStudio(this WebApplication app)
     {
+        app.MapPost("/api/missions/{id:guid}/react-plan-amendment",
+            async Task<Results<Ok<WorkflowResponse>, NotFound>> (
+                Guid id, PrepareReactPlanAmendmentRequest request, IReactPlanAmendment amendments, CancellationToken token) =>
+        {
+            try
+            {
+                var mission = await amendments.PrepareAsync(id, request, token);
+                return TypedResults.Ok(WorkflowResponse.From(mission.Workflow!));
+            }
+            catch (KeyNotFoundException) { return TypedResults.NotFound(); }
+        }).WithName("PrepareReactPlanAmendment")
+            .WithSummary("Save a human-assisted amendment awaiting separate plan approval")
+            .WithDescription("Only failed unpublished React v2 generations. Retains the old plan, routing, draft and budget. " +
+                "Reads local model metadata and statically parses sources, never calls a model or Docker. Does not approve or queue the mission.")
+            .ProducesProblem(400).ProducesProblem(409);
+
+        app.MapGet("/api/missions/{id:guid}/reviewer-diagnostics",
+            Results<Ok<IReadOnlyList<ReviewerAttemptDiagnostic>>, NotFound> (
+                Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, HttpResponse response, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            response.Headers.CacheControl = "no-store";
+            return missions.Get(id) is { Deleted: false }
+                ? TypedResults.Ok(diagnostics.ReviewerAttempts(id)) : TypedResults.NotFound();
+        }).WithName("GetReviewerDiagnostics").WithSummary("Read private diagnostic-only Reviewer reports")
+            .WithDescription("Explicit local inspection under normal Desktop authentication and retention. Rejected reports are never accepted reviews or execution evidence.");
+
+        app.MapDelete("/api/missions/{id:guid}/reviewer-diagnostics",
+            Results<NoContent, NotFound, Conflict> (
+                Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is not { } mission) return TypedResults.NotFound();
+            if (!mission.IsTerminal) return TypedResults.Conflict();
+            return diagnostics.DeleteReviewerAttempts(id, () => missions.Get(id)?.IsTerminal == true)
+                ? TypedResults.NoContent() : TypedResults.Conflict();
+        }).WithName("DeleteReviewerDiagnostics").WithSummary("Delete private Reviewer reports for a terminal mission")
+            .WithDescription("Does not modify sources, accepted reviews, histories, plans or budgets.");
+
+        app.MapGet("/api/missions/{id:guid}/planner-diagnostics",
+            Results<Ok<IReadOnlyList<PlannerAttemptDiagnostic>>, NotFound> (
+                Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, HttpResponse response, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            response.Headers.CacheControl = "no-store";
+            return missions.Get(id) is { Deleted: false }
+                ? TypedResults.Ok(diagnostics.PlannerAttempts(id)) : TypedResults.NotFound();
+        }).WithName("GetPlannerDiagnostics").WithSummary("Read private diagnostic-only Planner attempts")
+            .WithDescription("Explicit local inspection, subject to normal Desktop authentication and trace retention. Never supplies an executable plan.");
+
+        app.MapGet("/api/missions/{id:guid}/planner-diagnostics/{attemptId:guid}/raw",
+            Results<Ok<PlannerRawResponse>, NotFound, ProblemHttpResult> (
+                Guid id, Guid attemptId, IMissionService missions, OllamaDiagnosticStore diagnostics,
+                DesktopSession desktop, HttpResponse response, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            response.Headers.CacheControl = "no-store";
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: 403, title: "Raw diagnostic responses are available only in Studio Desktop.");
+            if (missions.Get(id) is not { Deleted: false }) return TypedResults.NotFound();
+            return diagnostics.PlannerRawResponse(id, attemptId) is { } raw
+                ? TypedResults.Ok(new PlannerRawResponse(raw)) : TypedResults.NotFound();
+        }).WithName("GetPlannerRawResponse").WithSummary("Explicitly inspect a consented private Ollama response");
+
+        app.MapDelete("/api/missions/{id:guid}/planner-diagnostics",
+            Results<NoContent, NotFound, Conflict> (
+                Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is not { } mission) return TypedResults.NotFound();
+            if (!mission.IsTerminal) return TypedResults.Conflict();
+            diagnostics.DeletePlannerAttempts(id);
+            return TypedResults.NoContent();
+        }).WithName("DeletePlannerDiagnostics").WithSummary("Delete private Planner results and consented raw exchanges")
+            .WithDescription("Does not modify mission plans, histories, counters or generated files.");
+
         app.MapGet("/api/missions/{id:guid}/workflow", Results<Ok<WorkflowResponse>, NotFound> (
             Guid id, IMissionService missions, CancellationToken token) =>
         {
@@ -53,6 +131,32 @@ public static class StudioEndpoints
             return missions.Resume(id) ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
         }).WithName("ResumeMission").WithSummary("Explicitly resume an interrupted collaborative mission")
             .WithDescription("Retains prior results, discards prior approvals and rereviews existing files. Verified, deleted and legacy missions cannot resume.");
+
+        app.MapGet("/api/missions/{id:guid}/reviewer-correction-resume",
+            async Task<Results<Ok<ReviewerCorrectionResumeEligibilityResponse>, NotFound>> (
+                Guid id, ReviewerCorrectionResumeService resumes, HttpResponse response, CancellationToken token) =>
+        {
+            response.Headers.CacheControl = "no-store";
+            var eligibility = await resumes.GetEligibilityAsync(id, token);
+            return eligibility is null ? TypedResults.NotFound() :
+                TypedResults.Ok(new ReviewerCorrectionResumeEligibilityResponse(
+                    eligibility.Available, eligibility.InProgress, eligibility.Reason));
+        }).WithName("GetReviewerCorrectionResumeEligibility")
+            .WithSummary("Check source-bound Reviewer correction retry eligibility")
+            .WithDescription("Read-only check of the failed Reviewer step, private rejected report, persisted source identity, and remaining budgets.");
+
+        app.MapPost("/api/missions/{id:guid}/reviewer-correction-resume",
+            async Task<Results<Accepted, NotFound, ProblemHttpResult>> (
+                Guid id, IMissionService missions, ReviewerCorrectionResumeService resumes, CancellationToken token) =>
+        {
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            var result = await resumes.ResumeAsync(id, token);
+            if (result.Accepted) return TypedResults.Accepted($"/api/missions/{id}");
+            return TypedResults.Problem(statusCode: 409, title: "Reprise Reviewer ciblée indisponible",
+                detail: result.Reason);
+        }).WithName("ResumeReviewerCorrection")
+            .WithSummary("Retry an interrupted Reviewer report correction without regenerating sources")
+            .WithDescription("Reuses the original rejected report and exact source-bound step. Does not reset budgets, create a review step, or authorize code execution.");
 
         app.MapPost("/api/missions/{id:guid}/revalidate",
             async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
@@ -127,11 +231,14 @@ public static class StudioEndpoints
             .ProducesProblem(400);
 
         app.MapDelete("/api/workspaces/{id:guid}", Results<NoContent, NotFound, Conflict> (
-            Guid id, IMissionService missions, CancellationToken token) =>
+            Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();
             if (missions.Get(id) is null) return TypedResults.NotFound();
-            return missions.DeleteProject(id) ? TypedResults.NoContent() : TypedResults.Conflict();
+            if (!missions.Get(id)!.IsTerminal) return TypedResults.Conflict();
+            if (!missions.DeleteProject(id)) return TypedResults.Conflict();
+            diagnostics.DeleteWorkspace(id);
+            return TypedResults.NoContent();
         }).WithName("DeleteProject").WithSummary("Delete a terminal mission's isolated project sources")
             .WithDescription("Never deletes an active or approval-waiting workspace. Retains mission audit metadata, logs and workflow.");
 
@@ -139,7 +246,8 @@ public static class StudioEndpoints
         {
             token.ThrowIfCancellationRequested();
             var mission = missions.Submit(new(request.Task ?? "", request.Kind, request.AgentId,
-                request.ApproveSandboxExecution, request.TemplateId));
+                request.ApproveSandboxExecution, request.TemplateId, request.AutomaticModelSelection, request.RecordPlannerTrace,
+                request.RequirePlanApproval, request.MaxTotalGenerations, request.AutomaticReactCorrections, request.SizingProfileId));
             return TypedResults.Accepted($"/api/missions/{mission.Id}", MissionResponse.From(mission));
         }).WithName("CreateMission").WithSummary("Queue a Studio mission")
             .WithDescription("Returns immediately with a mission identifier and Location for polling.")
@@ -157,7 +265,7 @@ public static class StudioEndpoints
             token.ThrowIfCancellationRequested();
             var count = missions.List().Count;
             return TypedResults.Ok(new MissionCapacityResponse(count, options.MaxMissions,
-                Math.Max(0, options.MaxMissions - count)));
+                Math.Max(0, options.MaxMissions - count), options.DefaultMaxTotalGenerations, options.AvailableSizingProfiles));
         }).WithName("GetMissionCapacity").WithSummary("Read persisted mission capacity")
             .WithDescription("Archived missions continue to count toward the configured limit; no data is purged.");
 
@@ -192,7 +300,7 @@ public static class StudioEndpoints
             var mission = missions.Get(id);
             return mission is null ? TypedResults.NotFound() : TypedResults.Ok(MissionResponse.From(mission));
         }).WithName("GetMission").WithSummary("Poll a mission's state")
-            .WithDescription("Poll real execution states including AwaitingApproval, Verified, BuildFailed and TestsFailed.");
+            .WithDescription("Poll real states including AwaitingPlanApproval, AwaitingApproval, Verified, BuildFailed and TestsFailed.");
 
         app.MapGet("/api/missions/{id:guid}/execution-plan",
             async Task<Results<Ok<ExecutionPlanResponse>, NotFound, Conflict>> (
@@ -212,6 +320,17 @@ public static class StudioEndpoints
             return TypedResults.Ok(ExecutionPlanResponse.From(plan));
         }).WithName("GetMissionExecutionPlan").WithSummary("Review this mission's bounded execution plan")
             .WithDescription("Includes the workspace/configuration fingerprint, offline image, limits and allowed operations.");
+
+        app.MapPost("/api/missions/{id:guid}/plan-approval",
+            Results<Accepted, NotFound, Conflict> (
+                Guid id, DecidePlanApprovalRequest request, IMissionService missions, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (missions.Get(id) is null) return TypedResults.NotFound();
+            return missions.DecidePlanApproval(id, request.Approved, request.Fingerprint)
+                ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
+        }).WithName("DecidePlanApproval").WithSummary("Approve or refuse the exact saved Planner result")
+            .WithDescription("Only valid while AwaitingPlanApproval. Stale or repeated decisions return 409. Never authorizes code execution.");
 
         app.MapPost("/api/missions/{id:guid}/approval",
             async Task<Results<Accepted, NotFound, Conflict>> (
@@ -347,8 +466,12 @@ public static class StudioEndpoints
         }).WithName("GetLocalModels").WithSummary("Observe configured models in local Ollama")
             .WithDescription("Installed, loaded and in-use states are distinct. Telemetry failures are explicit.");
 
-        app.MapGet("/api/sandbox", async (ISandboxRunner sandbox, CancellationToken token) =>
+        app.MapGet("/api/sandbox", async (ISandboxRunner sandbox, IConfiguration config,
+            IWebHostEnvironment environment, CancellationToken token) =>
         {
+            if (environment.IsDevelopment() && config.GetValue<bool>("StudioDevDeferSandboxProbe"))
+                return TypedResults.Ok(new SandboxResponse(false,
+                    "Automatic Docker probing is disabled in this development session. Independent React validation checks Docker only after authorization."));
             var availability = await sandbox.GetAvailabilityAsync(token);
             return TypedResults.Ok(new SandboxResponse(availability.Available, availability.Reason, availability.EngineAvailable));
         }).WithName("GetSandbox").WithSummary("Check offline container isolation")

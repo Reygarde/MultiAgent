@@ -41,7 +41,8 @@ public static class CustomAgentEndpoints
                 CustomAgentRequest request, ICustomAgentService agents, CancellationToken token) =>
         {
             var agent = await agents.CreateAgentAsync(
-                new(request.Name, request.Description, request.SystemPrompt, request.ModelName), token);
+                new(request.Name, request.Description, request.SystemPrompt, request.ModelName, request.FallbackModels,
+                    request.AutomaticModelSelection, request.Generation), token);
             var response = CustomAgentResponse.From(agent);
             return TypedResults.Created($"/api/custom-agents/{agent.Id}", response);
         }).WithName("CreateCustomAgent").WithSummary("Create a persisted custom AI agent")
@@ -54,7 +55,8 @@ public static class CustomAgentEndpoints
                 Guid id, CustomAgentRequest request, ICustomAgentService agents, CancellationToken token) =>
         {
             var agent = await agents.UpdateAgentAsync(
-                id, new(request.Name, request.Description, request.SystemPrompt, request.ModelName), token);
+                id, new(request.Name, request.Description, request.SystemPrompt, request.ModelName, request.FallbackModels,
+                    request.AutomaticModelSelection, request.Generation), token);
             return agent is null
                 ? TypedResults.NotFound()
                 : TypedResults.Ok(CustomAgentResponse.From(agent));
@@ -214,7 +216,7 @@ public static class CustomAgentEndpoints
                 CustomAgentTeamRequest request, ICustomAgentService agents, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();
-            var team = agents.SaveTeam(null, new(request.Name, request.Members))
+            var team = agents.SaveTeam(null, new(request.Name, request.Members, request.ModelEscalationEnabled, request.AutomaticModelSelection))
                 ?? throw new InvalidOperationException("The new custom-agent team could not be saved.");
             var response = CustomAgentTeamResponse.From(team);
             return TypedResults.Created($"/api/custom-agent-teams/{team.Id}", response);
@@ -227,7 +229,7 @@ public static class CustomAgentEndpoints
                 Guid id, CustomAgentTeamRequest request, ICustomAgentService agents, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();
-            var team = agents.SaveTeam(id, new(request.Name, request.Members));
+            var team = agents.SaveTeam(id, new(request.Name, request.Members, request.ModelEscalationEnabled, request.AutomaticModelSelection));
             return team is null
                 ? TypedResults.NotFound()
                 : TypedResults.Ok(CustomAgentTeamResponse.From(team));
@@ -252,8 +254,8 @@ public static class CustomAgentEndpoints
                 return TypedResults.NotFound();
             if (!Enum.TryParse<CustomAgentProjectType>(request.ProjectType, true, out var projectType) ||
                 !Enum.IsDefined(projectType))
-                throw new StudioValidationException("Project type must be React or DotNet.");
-            var mission = await missions.CreateCustomAgentProjectAsync(request.Name, projectType, token);
+                throw new StudioValidationException("Project type must be React, DotNet or FullStack.");
+            var mission = await missions.CreateCustomAgentProjectAsync(request.Name, projectType, token, request.MaxTotalGenerations);
             return TypedResults.Created($"/api/missions/{mission.Id}", MissionResponse.From(mission));
         }).WithName("CreateCustomAgentProject").WithSummary("Create a Studio project for a custom-agent team")
             .WithDescription("Creates a trusted React/Vite or .NET 10 scaffold without queuing system agents or applying generated changes.")
@@ -310,6 +312,78 @@ public static class CustomAgentEndpoints
             return TypedResults.Ok(LocalApplicationResponse.From(application));
         }).WithName("StopStudioLocalApplication").WithSummary("Stop the owned local development server");
 
+        app.MapDelete("/api/studio/projects/{id:guid}/ollama-traces",
+            Results<NoContent, NotFound, ProblemHttpResult> (
+                Guid id, IMissionService missions, OllamaDiagnosticStore diagnostics, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Diagnostic traces are available only in Studio Desktop.");
+            if (missions.Get(id) is not { HasWorkspace: true })
+                return TypedResults.NotFound();
+            diagnostics.DeleteWorkspace(id);
+            return TypedResults.NoContent();
+        }).WithName("DeleteStudioOllamaTraces").WithSummary("Delete private local Ollama traces for a stopped project")
+            .WithDescription("Deletes only diagnostic exchanges, never project files, plan counters or collaboration history.");
+
+        app.MapPost("/api/studio/projects/{id:guid}/browser-tests",
+            async Task<IResult> (
+                Guid id, RunStudioBrowserTestsRequest request, IMissionService missions,
+                IStudioBrowserTestRunner browserTests, ICustomAgentService agents,
+                DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled || !browserTests.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Browser tests are available only in AIPlatform Studio Desktop on Windows.");
+            var mission = missions.Get(id);
+            if (mission is null || !TryGetLocalProjectType(mission, out _))
+                return TypedResults.NotFound();
+            if (!request.ExecutionAuthorized)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Explicit authorization to execute this trusted local project is required.");
+            if (request.TeamId.HasValue != request.CollaborationRunId.HasValue)
+                return TypedResults.Problem(statusCode: StatusCodes.Status400BadRequest,
+                    title: "A browser result can be attached only when both the team and collaboration run are supplied.");
+            if (request.TeamId is { } teamId && request.CollaborationRunId is { } runId)
+            {
+                var existingRun = agents.GetCollaborationRun(teamId, runId);
+                if (existingRun?.Workspace?.WorkspaceId != id)
+                    return TypedResults.NotFound();
+            }
+
+            var report = await browserTests.RunAsync(id, request.Scenarios, true, token);
+            if (request.TeamId is { } savedTeamId && request.CollaborationRunId is { } savedRunId &&
+                agents.RecordBrowserTestResult(savedTeamId, savedRunId, id, report) is null)
+                return TypedResults.Problem(statusCode: StatusCodes.Status409Conflict,
+                    title: "The browser result could not be attached to the collaboration history.");
+            return TypedResults.Ok(CustomAgentBrowserTestResponse.From(report));
+        }).WithName("RunStudioBrowserTests").WithSummary("Run bounded Playwright scenarios on a verified local Studio application")
+            .WithDescription("Accepts only structured actions and accessible locators; no JavaScript is executed from the model. Browser tests are not a security sandbox.")
+            .Produces<CustomAgentBrowserTestResponse>(StatusCodes.Status200OK)
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+
+        app.MapGet("/api/studio/projects/{id:guid}/browser-tests/{testId:guid}/scenarios/{scenarioId:guid}/screenshot",
+            async Task<IResult> (
+                Guid id, Guid testId, Guid scenarioId, IStudioBrowserTestRunner browserTests,
+                DesktopSession desktop, CancellationToken token) =>
+        {
+            if (!desktop.Enabled || !browserTests.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Browser test screenshots are available only in AIPlatform Studio Desktop on Windows.");
+            var screenshot = await browserTests.ReadScreenshotAsync(id, testId, scenarioId, token);
+            if (screenshot is null)
+                return TypedResults.NotFound();
+            return TypedResults.File(screenshot, "image/png");
+        }).WithName("GetStudioBrowserTestScreenshot").WithSummary("Read a locally stored browser-test screenshot")
+            .WithDescription("Screenshots remain in local per-project Studio data and are never sent to an LLM.")
+            .Produces(StatusCodes.Status200OK, contentType: "image/png")
+            .Produces(StatusCodes.Status404NotFound)
+            .ProducesProblem(StatusCodes.Status403Forbidden);
+
         app.MapGet("/api/custom-agent-teams/{id:guid}/runs",
             Results<Ok<CustomAgentCollaborationRunResponse[]>, NotFound> (
                 Guid id, ICustomAgentService agents, CancellationToken token) =>
@@ -331,6 +405,202 @@ public static class CustomAgentEndpoints
                 ? TypedResults.NotFound()
                 : TypedResults.Ok(CustomAgentCollaborationRunResponse.From(run));
         }).WithName("GetCustomAgentCollaborationRun").WithSummary("Get a collaboration run and its contributions");
+
+        app.MapGet("/api/custom-agent-teams/{id:guid}/development-plans",
+            Results<Ok<CustomAgentDevelopmentPlanResponse[]>, NotFound> (
+                Guid id, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!agents.ListTeams().Any(team => team.Id == id))
+                return TypedResults.NotFound();
+            return TypedResults.Ok(agents.ListDevelopmentPlans(id)
+                .Select(CustomAgentDevelopmentPlanResponse.From).ToArray());
+        }).WithName("ListCustomAgentDevelopmentPlans").WithSummary("List persisted incremental development plans");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans",
+            async Task<Results<Created<CustomAgentDevelopmentPlanResponse>, NotFound>> (
+                Guid id, CreateCustomAgentDevelopmentPlanRequest request,
+                ICustomAgentService agents, CancellationToken token) =>
+        {
+            var plan = await agents.CreateDevelopmentPlanAsync(id, request.Goal, request.Workspace, token);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Created(
+                    $"/api/custom-agent-teams/{id}/development-plans/{plan.Id}",
+                    CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("CreateCustomAgentDevelopmentPlan")
+            .WithSummary("Ask the Planner to create a small, dependency-aware project plan")
+            .WithDescription("Planning is read-only. Running the plan later requires fresh workspace and local-execution authorization.")
+            .ProducesProblem(StatusCodes.Status400BadRequest)
+            .ProducesProblem(StatusCodes.Status503ServiceUnavailable)
+            .ProducesProblem(StatusCodes.Status504GatewayTimeout);
+
+        app.MapGet("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}",
+            Results<Ok<CustomAgentDevelopmentPlanResponse>, NotFound> (
+                Guid id, Guid planId, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var plan = agents.GetDevelopmentPlan(id, planId);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("GetCustomAgentDevelopmentPlan").WithSummary("Get plan progress, validations, and project memory");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/extend",
+            async Task<Results<Ok<CustomAgentDevelopmentPlanResponse>, NotFound>> (
+                Guid id, Guid planId, ExtendCustomAgentDevelopmentPlanRequest request,
+                ICustomAgentService agents, CancellationToken token) =>
+        {
+            var plan = await agents.ExtendDevelopmentPlanAsync(id, planId, request.Request, token);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("ExtendCustomAgentDevelopmentPlan").WithSummary("Append Planner tasks without regenerating completed work")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPut("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/tasks/{taskId}/criteria/{criterionIndex:int}",
+            Results<Ok<CustomAgentDevelopmentPlanResponse>, NotFound> (
+                Guid id, Guid planId, string taskId, int criterionIndex,
+                ReviewDevelopmentCriterionRequest request, ICustomAgentService agents, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            var plan = agents.ReviewDevelopmentCriterion(
+                id, planId, taskId, criterionIndex, request.Category, request.Status, request.Evidence,
+                request.RunId, request.ReportId, request.ScenarioId);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("ReviewDevelopmentCriterion")
+            .WithSummary("Classify a criterion and associate a recorded browser scenario")
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/start",
+            Results<Accepted<CustomAgentDevelopmentPlanResponse>, NotFound, Conflict, ProblemHttpResult> (
+                Guid id, Guid planId, DevelopmentPlanAuthorizationRequest request,
+                ICustomAgentService agents, ILocalCommandExecutor commands, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Development plans can run only in AIPlatform Studio Desktop on Windows.");
+            if (!request.WorkspaceAuthorized || !request.ExecutionAuthorized)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Fresh workspace and local-execution authorization are required.");
+            var plan = agents.StartDevelopmentPlan(
+                id, planId, request.WorkspaceAuthorized, request.ExecutionAuthorized);
+            if (plan is null)
+                return TypedResults.NotFound();
+            return plan.Status == "Running"
+                ? TypedResults.Accepted($"/api/custom-agent-teams/{id}/development-plans/{planId}",
+                    CustomAgentDevelopmentPlanResponse.From(plan))
+                : TypedResults.Conflict();
+        }).WithName("StartCustomAgentDevelopmentPlan").WithSummary("Run a plan using the existing autonomous team workflow")
+            .WithDescription("Only supported Studio projects are allowed. Local commands can execute project code and are not sandboxed.")
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/pause",
+            Results<Ok<CustomAgentDevelopmentPlanResponse>, NotFound, ProblemHttpResult> (
+                Guid id, Guid planId, ICustomAgentService agents, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Development plans can be controlled only in AIPlatform Studio Desktop.");
+            var plan = agents.PauseDevelopmentPlan(id, planId);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("PauseCustomAgentDevelopmentPlan").WithSummary("Pause the current task and preserve pending work");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/resume",
+            Results<Accepted<CustomAgentDevelopmentPlanResponse>, NotFound, Conflict, ProblemHttpResult> (
+                Guid id, Guid planId, ResumeDevelopmentPlanRequest request,
+                ICustomAgentService agents, ILocalCommandExecutor commands, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Development plans can run only in AIPlatform Studio Desktop on Windows.");
+            if (!request.WorkspaceAuthorized || !request.ExecutionAuthorized)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Fresh workspace and local-execution authorization are required.");
+            var plan = agents.ResumeDevelopmentPlan(
+                id, planId, request.WorkspaceAuthorized, request.ExecutionAuthorized,
+                request.TaskOnly, request.TaskInstructions);
+            if (plan is null)
+                return TypedResults.NotFound();
+            return plan.Status == "Running"
+                ? TypedResults.Accepted($"/api/custom-agent-teams/{id}/development-plans/{planId}",
+                    CustomAgentDevelopmentPlanResponse.From(plan))
+                : TypedResults.Conflict();
+        }).WithName("ResumeCustomAgentDevelopmentPlan").WithSummary("Explicitly resume a paused plan after fresh authorization")
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status409Conflict);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/cancel",
+            Results<Ok<CustomAgentDevelopmentPlanResponse>, NotFound, ProblemHttpResult> (
+                Guid id, Guid planId, ICustomAgentService agents, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Development plans can be controlled only in AIPlatform Studio Desktop.");
+            var plan = agents.CancelDevelopmentPlan(id, planId);
+            return plan is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithName("CancelCustomAgentDevelopmentPlan").WithSummary("Cancel a plan and stop its active collaboration task");
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/retry",
+            Results<Accepted<CustomAgentDevelopmentPlanResponse>, NotFound, Conflict, ProblemHttpResult> (
+                Guid id, Guid planId, RetryCustomAgentDevelopmentTaskRequest request,
+                ICustomAgentService agents, ILocalCommandExecutor commands, DesktopSession desktop,
+                CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (!desktop.Enabled || !commands.Available)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Development plans can run only in AIPlatform Studio Desktop on Windows.");
+            if (!request.WorkspaceAuthorized || !request.ExecutionAuthorized)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Fresh workspace and local-execution authorization are required.");
+            var plan = agents.RetryDevelopmentTask(
+                id, planId, request.TaskId, request.WorkspaceAuthorized, request.ExecutionAuthorized,
+                request.TaskOnly, request.CompilationOnly, request.RecordOllamaTrace);
+            if (plan is null)
+                return TypedResults.NotFound();
+            return plan.Status == "Running"
+                ? TypedResults.Accepted($"/api/custom-agent-teams/{id}/development-plans/{planId}",
+                    CustomAgentDevelopmentPlanResponse.From(plan))
+                : TypedResults.Conflict();
+        }).WithName("RetryCustomAgentDevelopmentTask").WithSummary("Retry a failed task without repeating completed tasks")
+            .WithDescription("compilationOnly pauses targeted corrections after builds, without HTTP verification. " +
+                "recordOllamaTrace is off by default and is explicit consent to store exact HTTP bodies locally for this invocation. " +
+                "Prompts may contain private code or secrets; perfect redaction is not guaranteed. Authentication headers are never recorded.")
+            .ProducesProblem(StatusCodes.Status403Forbidden)
+            .ProducesProblem(StatusCodes.Status409Conflict)
+            .ProducesProblem(StatusCodes.Status400BadRequest);
+
+        app.MapPost("/api/custom-agent-teams/{id:guid}/development-plans/{planId:guid}/targeted-corrections",
+            Results<Accepted<CustomAgentDevelopmentPlanResponse>, NotFound, ProblemHttpResult> (
+                Guid id, Guid planId, TargetedDevelopmentCorrectionRequest request,
+                ICustomAgentService agents, DesktopSession desktop) =>
+        {
+            if (!desktop.Enabled)
+                return TypedResults.Problem(statusCode: StatusCodes.Status403Forbidden,
+                    title: "Targeted corrections require Studio Desktop.");
+            var plan = agents.StartTargetedCorrection(id, planId, request.Correction,
+                request.WorkspaceAuthorized, request.ExecutionAuthorized);
+            return plan is null ? TypedResults.NotFound() :
+                TypedResults.Accepted($"/api/custom-agent-teams/{id}/development-plans/{planId}",
+                    CustomAgentDevelopmentPlanResponse.From(plan));
+        }).WithSummary("Append and run one Developer-only snippet correction, then pause");
 
         app.MapPost("/api/custom-agent-teams/{id:guid}/runs",
             Results<Accepted<CustomAgentCollaborationRunResponse>, NotFound> (
@@ -421,6 +691,7 @@ public static class CustomAgentEndpoints
         {
             AgentReactTemplate.Id => CustomAgentProjectType.React,
             AgentDotNetTemplate.Id => CustomAgentProjectType.DotNet,
+            AgentFullStackTemplate.Id => CustomAgentProjectType.FullStack,
             _ => (CustomAgentProjectType)(-1)
         };
         return mission.HasWorkspace && !mission.Deleted && !mission.Archived && Enum.IsDefined(projectType);

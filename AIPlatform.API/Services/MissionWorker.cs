@@ -14,7 +14,7 @@ public sealed class MissionWorker(
             if (store.Get(id)?.IsTerminal != false)
                 continue;
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken, store.Cancellation(id));
-            timeout.CancelAfter(TimeSpan.FromSeconds(options.MissionTimeoutSeconds));
+            timeout.CancelAfter(TimeSpan.FromSeconds(options.ForMission(store.Get(id)!).MissionTimeoutSeconds));
             var entered = false;
             try
             {
@@ -39,7 +39,7 @@ public sealed class MissionWorker(
             catch (Exception exception)
             {
                 logger.LogError(exception, "Mission {MissionId} failed", id);
-                var message = exception is AIPlatform.Core.LlmProviderException or StudioValidationException
+                var message = exception is AIPlatform.Core.LlmProviderException or StudioValidationException or AIPlatform.Core.GenerationBudgetExhaustedException
                     ? exception.Message : "Mission processing failed. Consult the server logs.";
                 CloseActiveSteps(id, StepStatus.Failed, message);
                 store.Update(id, current => current with { Status = MissionStatus.Failed, Error = message,

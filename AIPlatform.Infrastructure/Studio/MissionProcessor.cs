@@ -12,6 +12,7 @@ public sealed class MissionProcessor(
 {
     public async Task ProcessAsync(Guid id, CancellationToken cancellationToken)
     {
+        using var generationScope = store.EnterGenerationScope(id, "Routing");
         var mission = store.Get(id) ?? throw new InvalidOperationException("Mission not found.");
         if (mission.Workflow is not null)
         {

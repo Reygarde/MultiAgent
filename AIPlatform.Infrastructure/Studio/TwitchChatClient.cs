@@ -96,7 +96,7 @@ public sealed class TwitchChatClient(HttpClient http, TimeProvider time) : ITwit
                 var text = notification.GetProperty("message").GetProperty("text").GetString();
                 if (text is null || text.Length > 5000)
                     throw new TwitchIntegrationException("chat_event_invalid", "Twitch sent an invalid chat message.", 502);
-                await onMessage(new(id, sender, text), cancellationToken);
+                await onMessage(new(id, sender, text, HasModeratorBadge(notification)), cancellationToken);
             }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
@@ -126,6 +126,12 @@ public sealed class TwitchChatClient(HttpClient http, TimeProvider time) : ITwit
             socket?.Dispose();
         }
     }
+
+    internal static bool HasModeratorBadge(JsonElement notification) =>
+        notification.TryGetProperty("badges", out var badges) && badges.ValueKind == JsonValueKind.Array &&
+        badges.EnumerateArray().Any(badge => badge.ValueKind == JsonValueKind.Object &&
+            badge.TryGetProperty("set_id", out var setId) && setId.ValueKind == JsonValueKind.String &&
+            setId.GetString() is "moderator" or "broadcaster");
 
     public async Task SendMessageAsync(
         string clientId, string accessToken, string broadcasterId, string senderId,

@@ -1,5 +1,10 @@
 namespace AIPlatform.Core;
 
+public static class ModelContextLimits
+{
+    public const int Maximum = 262144;
+}
+
 public sealed record PlatformConfiguration
 {
     public string RouterAgentId { get; init; } = "";

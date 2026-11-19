@@ -1,3 +1,5 @@
+export const maximumModelContext = 262144
+
 export interface Agent {
   id: string
   description: string
@@ -18,6 +20,9 @@ export interface CustomAgent {
   description: string
   systemPrompt: string
   modelName: string
+  fallbackModels?: string[] | null
+  automaticModelSelection?: boolean
+  generation?: { contextSize: number; maxOutputTokens: number; temperature: number } | null
   createdAt: string
   updatedAt: string
 }
@@ -26,7 +31,10 @@ export interface CustomAgentMessage {
   role: 'user' | 'assistant'
   content: string
   createdAt: string
+  developmentPlanId?: string | null
+  developmentTaskIds?: string[] | null
   proposal?: CustomAgentProposal | null
+  routingDecision?: import('./modelLibraryApi').ModelRoutingDecision | null
 }
 
 export type CustomAgentWorkspaceKind = 'None' | 'Studio' | 'External'
@@ -93,6 +101,9 @@ export interface CustomAgentDraft {
   description: string
   systemPrompt: string
   modelName: string
+  fallbackModels?: string[] | null
+  automaticModelSelection?: boolean
+  generation?: { contextSize: number; maxOutputTokens: number; temperature: number } | null
 }
 
 export type CustomAgentTeamRole = 'Planner' | 'Developer' | 'Reviewer'
@@ -101,6 +112,7 @@ export interface CustomAgentTeamMember {
   agentId: string
   role: CustomAgentTeamRole
   order: number
+  fallbackModels?: string[] | null
 }
 
 export interface CustomAgentTeam {
@@ -109,6 +121,75 @@ export interface CustomAgentTeam {
   members: CustomAgentTeamMember[]
   createdAt: string
   updatedAt: string
+  modelEscalationEnabled?: boolean
+  automaticModelSelection?: boolean
+}
+
+export interface CustomAgentDevelopmentTask {
+  id: string
+  title: string
+  description: string
+  dependencies: string[]
+  acceptanceCriteria: string[]
+  status: string
+  order: number
+  collaborationRunId: string | null
+  attempts: number
+  summary: string | null
+  changedFiles: string[]
+  error: string | null
+  validation: CustomAgentValidationReport | null
+  criterionReviews: CustomAgentCriterionReview[]
+  criterionReviewHistory: CustomAgentCriterionReviewEvent[]
+  modelAttempts?: CustomAgentModelAttempt[]
+}
+
+export interface CustomAgentCriterionReviewEvent {
+  criterionIndex: number
+  category: string
+  status: string
+  evidence: string | null
+  recordedAt: string
+  runId: string | null
+  reportId: string | null
+  scenarioId: string | null
+}
+
+export interface CustomAgentCriterionReview {
+  category: 'Unclassified' | 'User' | 'Technical' | 'Optional'
+  status: 'Unverified' | 'Verified' | 'Failed'
+  evidence: string | null
+  reviewedAt: string | null
+  current: boolean
+  runId: string | null
+  reportId: string | null
+  scenarioId: string | null
+}
+
+export interface CustomAgentProjectMemory {
+  architecture: string
+  completedFeatures: string[]
+  decisions: string[]
+  keyFiles: string[]
+  knownIssues: string[]
+}
+
+export interface CustomAgentDevelopmentPlan {
+  id: string
+  teamId: string
+  goal: string
+  status: string
+  workspace: CustomAgentWorkspace
+  createdAt: string
+  updatedAt: string
+  tasks: CustomAgentDevelopmentTask[]
+  currentTaskId: string | null
+  attempts: number
+  maxAttempts: number
+  memory: CustomAgentProjectMemory
+  error: string | null
+  conversationId?: string | null
+  conversationAgentId?: string | null
 }
 
 export interface CustomAgentContribution {
@@ -158,6 +239,31 @@ export interface CustomAgentCollaborationRun {
   mode?: 'Supervised' | 'Autonomous'
   appliedChanges?: CustomAgentFileChange[]
   executionResults?: CustomAgentExecutionResult[]
+  browserScenarios?: CustomAgentBrowserScenario[]
+  browserTest?: CustomAgentBrowserTestReport | null
+  browserTestHistory?: CustomAgentBrowserTestReport[]
+  modelAttempts?: CustomAgentModelAttempt[]
+}
+
+export interface CustomAgentModelAttempt {
+  id: string
+  runId: string
+  agentId: string
+  role: CustomAgentTeamRole
+  modelName: string
+  selectionReason: string
+  startedAt: string
+  outcome: string
+  failureKind: string | null
+  decision: string | null
+  nextModel: string | null
+  compilationStatus: string
+  taskCategory?: string | null
+  completedAt?: string | null
+  routingDecision?: import('./modelLibraryApi').ModelRoutingDecision | null
+  testsStatus?: string
+  browserStatus?: string
+  rolledBack?: boolean
 }
 
 export interface CustomAgentExecutionResult {
@@ -167,6 +273,47 @@ export interface CustomAgentExecutionResult {
   output: string
   startedAt: string
   completedAt: string
+}
+
+export type CustomAgentBrowserAction = 'fill' | 'select' | 'click' | 'expectVisible' | 'expectHidden' | 'reload'
+export type CustomAgentBrowserLocatorType = 'role' | 'label' | 'placeholder' | 'text'
+
+export interface CustomAgentBrowserStep {
+  action: CustomAgentBrowserAction
+  locatorType: CustomAgentBrowserLocatorType | null
+  locator: string | null
+  value: string | null
+  role: 'button' | 'checkbox' | 'heading' | 'link' | 'listitem' | 'option' | 'radio' | 'textbox' | null
+  index: number | null
+}
+
+export interface CustomAgentBrowserScenario {
+  id: string
+  name: string
+  path: string
+  steps: CustomAgentBrowserStep[]
+}
+
+export interface CustomAgentBrowserScenarioResult {
+  id: string
+  name: string
+  status: 'Passed' | 'Failed'
+  failedStep: string | null
+  error: string | null
+  javaScriptErrors: string[]
+  screenshotId: string | null
+}
+
+export interface CustomAgentBrowserTestReport {
+  id: string
+  status: 'Passed' | 'Failed' | 'InvalidScenario' | 'BrowserUnavailable' |
+    'ServerUnavailable' | 'TimedOut' | 'Unsupported' | 'Cancelled'
+  url: string
+  testedAt: string
+  passed: number
+  failed: number
+  error: string | null
+  scenarios: CustomAgentBrowserScenarioResult[]
 }
 
 export type LocalApplicationStatus = 'Stopped' | 'Starting' | 'Running' | 'Stopping' | 'Error'
@@ -189,20 +336,50 @@ export interface AgentSettings {
 }
 export interface AgentConfiguration { agents: AgentSettings[]; models: Omit<Model, 'assignedAgents'>[] }
 export interface Workflow {
+  automaticReactCorrections?: boolean
+  pendingSoftwareAgentCall?: string | null
+  softwareCorrections?: {
+    id: string; trigger: string; reason: string; completedGroups: number; totalGroups: number
+    reviewerCapacity: number; inFlight: boolean; ready: boolean; decisions: string[]; failure?: string | null
+  }[]
   workflowId: string; missionId: string; version: number
+  automaticModelSelection?: boolean
+  requirePlanApproval?: boolean
+  planApproval?: { version: number; fingerprint: string; approved: boolean | null; decidedAt: string | null } | null
+  planAmendments?: {
+    previousVersion: number; preparedAt: string; previousPlan: NonNullable<Workflow['plan']>
+    previousApproval: { fingerprint: string }; developerModel: string
+    compatibility: { status: string; reason: string }; retainedPaths: string[]; remainingPaths: string[]
+    retainedSourceDiagnostics: { file: string | null; line: number | null; code: string | null; message: string }[]
+  }[]
+  acceptanceCriteria?: { id: string; requirement: string }[]
+  requirementTrace?: { id: string; originalText: string; normalizedText: string; categories: string[]
+    criterionIds: string[]; diagnostic?: string | null }[]
+  criterionExecutions?: { criterionId: string; testFile: string; testName: string; attempt: number
+    version: number; sourceFingerprint: string; provenance: string }[]
   steps: {
     id: string; kind: string; agentId: string; dependsOn: string[]; status: string
     attempts: number; durationMilliseconds: number | null; modelName?: string | null
     input: string | null; output: string | null; error: string | null
     version?: number | null; startedAt?: string | null
+    selectionMode?: string
+    modelSelections?: { key: string; agentId: string; decision: import('./modelLibraryApi').ModelRoutingDecision }[]
+    modelInvocations?: { stepId: string; sequence: string; attempt: CustomAgentModelAttempt }[]
   }[]
-  plan: { name: string; description: string; decisions: string[]; files: { path: string; purpose: string; dependsOn: string[] }[] } | null
+  plan: { name: string; description: string; decisions: string[]; files: { path: string; purpose: string; dependsOn: string[] }[]
+    originalRequest?: string | null
+    acceptanceCriteria?: { id: string; requirement: string }[] | null
+    criterionCoverage?: { criterionId: string; paths: string[]; explanation: string }[] | null } | null
   review: { summary: string; findings: { path: string; severity: string; message: string }[]
     problem?: string | null; modifiedFiles?: string[] | null; justification?: string | null
-    risks?: string[] | null; planCompliance?: string | null; recommendation?: string | null } | null
+    risks?: string[] | null; planCompliance?: string | null; recommendation?: string | null
+    criterionReviews?: { criterionId: string; verdict: 'Satisfied' | 'NotSatisfied' | 'Unverified'
+      explanation: string; defect?: string | null; uncertainty?: string | null
+      evidence: { path: string; quote: string }[] }[] | null } | null
   revisions: { version: number; createdAt: string; reason: string; fingerprint: string; files: string[] }[]
   finalReport: string | null
   correctionLimit?: number | null
+  executionPlanDifferences?: { field: string; expected: string | null; actual: string | null }[] | null
   proposals?: { version: number; createdAt: string; review: Workflow['review'] }[]
 }
 
@@ -224,7 +401,7 @@ export interface Model {
 
 export type MissionKind = 'Chat' | 'Project'
 export type MissionStatus = 'Queued' | 'Running' | 'Completed' | 'GeneratedUnverified' | 'Failed' | 'Cancelled'
-  | 'AwaitingApproval' | 'BuildFailed' | 'TestsFailed' | 'Verified'
+  | 'AwaitingApproval' | 'BuildFailed' | 'TestsFailed' | 'Verified' | 'AwaitingPlanApproval'
 export type StepStatus = 'Running' | 'Succeeded' | 'Failed' | 'Unavailable' | 'Skipped' | 'Cancelled'
 
 export interface MissionEvent {
@@ -279,11 +456,32 @@ export interface Mission {
   archived?: boolean
   archivedAt?: string | null
   completedAt?: string | null
+  maxTotalGenerations?: number | null
+  totalGenerations?: number
+  remainingGenerations?: number | null
+  generationReservations?: { id: string; role: string; model: string; reservedAt: string }[] | null
+  generationBudgetWarning?: string | null
+  sizing?: ProjectSizingProfile | null
 }
 
-export interface MissionCapacity { count: number; limit: number; remaining: number }
+export interface ReviewerCorrectionResumeEligibility {
+  available: boolean
+  inProgress: boolean
+  reason: string
+}
+
+export interface ProjectSizingProfile {
+  id: string; name: string; maxFiles: number; maxPlannedFiles: number; maxFileBytes: number; maxProjectBytes: number
+  maxCriteria: number; maxCorrections: number; maxRepairGroups: number; maxFilesPerRepairGroup: number; missionTimeoutSeconds: number
+}
+export interface MissionCapacity {
+  count: number; limit: number; remaining: number; defaultMaxTotalGenerations?: number
+  sizingProfiles?: ProjectSizingProfile[]
+}
 export interface TwitchSettings { clientId: string; configured: boolean }
-export interface TwitchCommand { name: string; response: string; cooldownSeconds: number; enabled: boolean }
+export interface TwitchCommand {
+  name: string; response: string; cooldownSeconds: number; enabled: boolean; moderatorOnly?: boolean
+}
 export interface TwitchEvent { timestamp: string; kind: string; message: string }
 export interface TwitchBot {
   id: string; name: string; channel: string; state: string; authorized: boolean
@@ -297,6 +495,23 @@ export interface TwitchConnectResult {
 }
 export interface TwitchCommandTestResult {
   matched: boolean; response: string | null; cooldownRemainingSeconds: number
+}
+export interface TwitchSimulationEvent { userId: string; role: 'Viewer' | 'Moderator'; text: string; atSeconds: number }
+export interface TwitchSimulationResult {
+  botId: string
+  steps: { event: TwitchSimulationEvent; outcome: 'Responded' | 'PermissionDenied' | 'Cooldown' | 'NoMatch'
+    response: string | null; cooldownRemainingSeconds: number }[]
+}
+export interface TwitchCommandOperation {
+  action: 'add' | 'update' | 'disable' | 'delete'; name: string; response: string | null
+  cooldownSeconds: number | null; enabled: boolean | null; moderatorOnly: boolean | null
+}
+export interface TwitchCommandProposal {
+  id: string; botId: string; teamId: string; createdAt: string; request: string
+  status: string; operations: TwitchCommandOperation[]; unsupported: string[]
+  before: TwitchCommand[]; after: TwitchCommand[]
+  evidence: { command: string; criterion: string; expected: string; actual: string; passed: boolean }[]
+  error: string | null
 }
 
 export interface LocalModels {
@@ -332,16 +547,37 @@ export interface ProjectAnalysis {
   dockerFiles: string[]; issues: { path: string; message: string }[]
 }
 export interface CreateMission {
+  sizingProfileId?: string
+  automaticReactCorrections?: boolean
   task: string
   kind: MissionKind
   agentId: string | null
   approveSandboxExecution: boolean
   templateId?: string | null
+  automaticModelSelection?: boolean
+  recordPlannerTrace?: boolean
+  requirePlanApproval?: boolean
+  maxTotalGenerations?: number
+}
+
+export interface PlannerAttemptDiagnostic {
+  missionId: string
+  runId: string
+  attemptId: string
+  attemptNumber: number
+  model: string
+  createdAt: string
+  status: string
+  plan: unknown
+  criteria: { id: string; requirement: string }[]
+  errors: { criterionId: string | null; rule: string; field: string; path: string | null; explanation: string }[]
+  rawTraceAvailable: boolean
 }
 export type CustomAgentProjectType = 'React' | 'DotNet'
 
 export const isActive = (mission: Mission) =>
-  mission.status === 'Queued' || mission.status === 'Running' || mission.status === 'AwaitingApproval'
+  mission.status === 'Queued' || mission.status === 'Running' || mission.status === 'AwaitingApproval' ||
+  mission.status === 'AwaitingPlanApproval'
 
 export const statusLabels: Record<MissionStatus, string> = {
   Queued: 'En attente',
@@ -351,6 +587,7 @@ export const statusLabels: Record<MissionStatus, string> = {
   Failed: 'Échec',
   Cancelled: 'Annulée',
   AwaitingApproval: 'Autorisation requise',
+  AwaitingPlanApproval: 'Approbation du plan requise',
   BuildFailed: 'Compilation échouée',
   TestsFailed: 'Tests échoués',
   Verified: 'Vérifié · compilation et tests réussis',

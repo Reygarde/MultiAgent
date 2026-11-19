@@ -1,13 +1,14 @@
 {
   "name": "aiplatform-studio",
   "private": true,
-  "version": "0.6.5",
+  "version": "0.6.6",
   "type": "module",
   "engines": {
     "node": ">=20.14.0"
   },
   "scripts": {
     "dev": "vite --host 127.0.0.1",
+    "studio:dev": "powershell -NoProfile -File scripts/start-studio-dev.ps1",
     "build": "tsc -b && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test": "vitest run",
@@ -18,6 +19,7 @@
     "desktop:prepare": "node scripts/prepare-backend.mjs",
     "desktop:test-backend": "node --test scripts/test-backend.mjs",
     "preview:test-browser": "node --test scripts/preview-browser.test.mjs",
+    "studio:test-browser": "node --test scripts/studio-browser-tests.test.mjs",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build --target x86_64-pc-windows-msvc --bundles nsis"
   },
@@ -45,6 +47,7 @@
     "autoprefixer": "^10.4.22",
     "jsdom": "^26.1.0",
     "postcss": "^8.5.6",
+    "playwright": "^1.56.1",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.9.3",
     "vite": "^6.4.1",

@@ -120,11 +120,29 @@ public static partial class CustomAgentProposalValidator
                     continue;
                 }
                 if (!ResolvesModule(target, paths))
+                {
+                    var stem = specifier.Replace('\\', '/').Split('/').Last();
+                    var candidate = paths.FirstOrDefault(p => IsImportSource(p) &&
+                        string.Equals(Path.GetFileNameWithoutExtension(p), stem, StringComparison.OrdinalIgnoreCase));
+                    var suggestion = candidate is null ? "" : $" Utilisez « {SuggestSpecifier(file.Key, candidate)} » à la place.";
                     Add(diagnostics, new(file.Key, "LOCAL_IMPORT_MISSING",
-                        $"L’import local « {specifier} » ne correspond à aucun fichier du workspace.",
+                        $"L’import local « {specifier} » ne correspond à aucun fichier du workspace (résolu en « {target} » depuis « {file.Key} »).{suggestion}",
                         RelatedPath: target));
+                }
             }
         }
+    }
+
+    private static string SuggestSpecifier(string from, string to)
+    {
+        var fromDir = from.Replace('\\', '/').Split('/').SkipLast(1).ToArray();
+        var toParts = to.Replace('\\', '/').Split('/');
+        var common = 0;
+        while (common < fromDir.Length && common < toParts.Length - 1 && fromDir[common] == toParts[common]) common++;
+        var up = Enumerable.Repeat("..", fromDir.Length - common);
+        var relative = string.Join('/', up.Concat(toParts.Skip(common)));
+        relative = Path.ChangeExtension(relative, null)!.Replace('\\', '/');
+        return relative.StartsWith('.') ? relative : "./" + relative;
     }
 
     private static void ValidateProjectReferences(
@@ -188,9 +206,20 @@ public static partial class CustomAgentProposalValidator
         return ResolveRelativePath(projectPath, normalized);
     }
 
-    private static bool ResolvesModule(string target, HashSet<string> paths)
+    private static bool ResolvesModule(string target, HashSet<string> paths) => ResolveModule(target, paths) is not null;
+
+    internal static IEnumerable<string> ExistingLocalImports(string path, string content, HashSet<string> paths)
     {
-        if (paths.Contains(target)) return true;
+        if (!IsImportSource(path)) yield break;
+        foreach (Match match in LocalImportPattern().Matches(content))
+            if (ResolveRelativePath(path, match.Groups["path"].Value) is { } target &&
+                ResolveModule(target, paths) is { } resolved)
+                yield return resolved;
+    }
+
+    private static string? ResolveModule(string target, HashSet<string> paths)
+    {
+        if (paths.Contains(target)) return target;
         if (Path.HasExtension(target))
         {
             var extension = Path.GetExtension(target);
@@ -198,12 +227,12 @@ public static partial class CustomAgentProposalValidator
                 extension.Equals(".jsx", StringComparison.OrdinalIgnoreCase))
             {
                 var stem = target[..^extension.Length];
-                return paths.Contains(stem + ".ts") || paths.Contains(stem + ".tsx");
+                return paths.Contains(stem + ".ts") ? stem + ".ts" : paths.Contains(stem + ".tsx") ? stem + ".tsx" : null;
             }
-            return false;
+            return null;
         }
-        return ModuleExtensions.Any(extension => paths.Contains(target + extension)) ||
-            ModuleExtensions.Any(extension => paths.Contains($"{target}/index{extension}"));
+        return ModuleExtensions.Select(extension => target + extension).FirstOrDefault(paths.Contains) ??
+            ModuleExtensions.Select(extension => $"{target}/index{extension}").FirstOrDefault(paths.Contains);
     }
 
     private static bool IsSourceFile(string path) =>

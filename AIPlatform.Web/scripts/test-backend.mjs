@@ -1,8 +1,10 @@
 import { spawn } from 'node:child_process'
-import { randomBytes } from 'node:crypto'
+import { createHash, randomBytes } from 'node:crypto'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { createInterface } from 'node:readline'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import path from 'node:path'
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
@@ -54,8 +56,19 @@ async function stop(instance, eof = false) {
   } finally { clearTimeout(timer) }
 }
 
-test('published Desktop backend: occupied port, local auth, CORS, services, shutdown/owner EOF and token rotation',
+test('published Desktop backend: occupied port, local auth, CORS, history integrity, shutdown/owner EOF and token rotation',
   { timeout: 100000 }, async context => {
+    const historyDirectory = path.join(process.env.LOCALAPPDATA, 'AIPlatformStudio', 'StudioData', 'missions')
+    const history = () => Object.fromEntries((existsSync(historyDirectory) ? readdirSync(historyDirectory) : [])
+      .filter(name => name.endsWith('.json')).sort().map(name => {
+        const bytes = readFileSync(path.join(historyDirectory, name))
+        const mission = JSON.parse(bytes.toString('utf8'))
+        assert.ok(!['Queued', 'Running'].includes(mission.status) &&
+          !['Queued', 'Running'].includes(mission.workflow?.reviewerCorrectionResume?.status),
+        'Close active missions before testing the packaged Desktop backend; restart recovery must not change history.')
+        return [name, createHash('sha256').update(bytes).digest('hex')]
+      }))
+    const before = history()
     const occupied = createServer()
     let ownsPort = false
     await new Promise((resolve, reject) => {
@@ -99,11 +112,28 @@ test('published Desktop backend: occupied port, local auth, CORS, services, shut
       assert.ok(agents.some(agent => agent.id === 'GeneralAgent'))
       assert.ok(agents.some(agent => agent.role === 'Planner'))
       assert.ok(agents.some(agent => agent.role === 'Review'))
-      const models = await (await call('/models/local')).json()
-      const sandbox = await (await call('/sandbox')).json()
-      context.diagnostic(`Real services: Ollama=${models.available}; Docker engine=${sandbox.engineAvailable}; sandbox=${sandbox.available}`)
+      const missions = await (await call('/missions')).json()
+      assert.ok(Array.isArray(missions))
+      assert.ok(missions.every(mission => Object.hasOwn(before, mission.id.replaceAll('-', '') + '.json')))
       await stop(instance, eof)
+      assert.deepEqual(history(), before)
       context.diagnostic(`Owned backend stopped with code 0 using ${eof ? 'owner EOF' : 'shutdown command'}.`)
+      context.diagnostic('Historical missions unchanged. No Ollama or Docker service was contacted.')
       previousToken = instance.token
     }
   })
+
+test('packaged React helpers resolve their bundled TypeScript without executing application sources', async () => {
+  const helperDirectory = path.resolve(cwd, '..', 'studio-browser')
+  const { checkReactSources } = await import(pathToFileURL(path.join(helperDirectory, 'react-source-check.mjs')))
+  const { repairReactSources } = await import(pathToFileURL(path.join(helperDirectory, 'react-source-repair.mjs')))
+  const files = [
+    { path: 'package.json', content: '{"dependencies":{},"devDependencies":{"vitest":"4.1.12"}}' },
+    { path: 'src/App.test.ts', content: 'const save = jest.fn();' },
+  ]
+  assert.ok(checkReactSources(files).some(issue => issue.code === 'REACT_JEST'))
+  const repaired = repairReactSources({ files, allowedPaths: ['src/App.test.ts'], trustedSetup: '' })
+  assert.ok(repaired.edits.length > 0)
+  assert.ok(!repaired.issues.some(issue => issue.code === 'REACT_JEST'))
+  assert.equal(files[1].content, 'const save = jest.fn();')
+})

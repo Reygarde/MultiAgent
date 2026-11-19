@@ -255,7 +255,9 @@ public sealed class StudioApiTests
                      "/api/twitch/settings", "/api/twitch/bots", "/api/twitch/bots/{id}",
                      "/api/twitch/bots/{id}/connect", "/api/twitch/bots/{id}/connect/poll",
                      "/api/twitch/bots/{id}/start", "/api/twitch/bots/{id}/stop",
-                     "/api/twitch/bots/{id}/commands/test" })
+                     "/api/twitch/bots/{id}/commands/test", "/api/twitch/bots/{id}/simulation",
+                     "/api/twitch/bots/{id}/command-proposals", "/api/twitch/bots/{id}/command-proposals/{proposalId}/apply",
+                     "/api/twitch/bots/{id}/command-proposals/{proposalId}/restore" })
             Assert.True(paths.TryGetProperty(path, out _), path);
     }
 
@@ -277,6 +279,75 @@ public sealed class StudioApiTests
         Assert.DoesNotContain("accessToken", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("refreshToken", json, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("secret", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task TwitchSimulationApiReturnsActualOutcomesAndRejectsInvalidRoles()
+    {
+        using var fixture = new StudioFixture();
+        using var factory = Factory(fixture, tokenVault: new ForbiddenTwitchVault());
+        using var client = factory.CreateClient();
+        var id = Guid.NewGuid();
+        factory.Services.GetRequiredService<ITwitchBotStore>().Save(
+            new(id, "Studio Bot", "samplechannel", [new("!hello", "Salut le chat !", 5)]));
+        using var response = await client.PostAsJsonAsync($"/api/twitch/bots/{id}/simulation", new
+        {
+            events = new[]
+            {
+                new { userId = "viewer", role = "Viewer", text = "!hello", atSeconds = 0 },
+                new { userId = "viewer", role = "Viewer", text = "!hello", atSeconds = 0 }
+            }
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var result = (await response.Content.ReadFromJsonAsync<TwitchSimulationResponse>(JsonOptions))!;
+        Assert.Equal("Salut le chat !", result.Steps[0].Response);
+        Assert.Equal("Cooldown", result.Steps[1].Outcome);
+        using var invalid = await client.PostAsJsonAsync($"/api/twitch/bots/{id}/simulation", new
+        {
+            events = new[] { new { userId = "viewer", role = "admin", text = "!hello", atSeconds = 0 } }
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, invalid.StatusCode);
+    }
+
+    [Fact]
+    public async Task TwitchProposalApiRequiresExplicitApprovalAndKeepsEvidenceOffline()
+    {
+        using var fixture = new StudioFixture();
+        var provider = new FakeProvider((request, _) => Task.FromResult(
+            request.ResponseSchema?.GetProperty("properties").TryGetProperty("summary", out var ignored) == true
+                ? """{"summary":"Plan","unsupported":[]}"""
+                : """{"unsupported":[],"operations":[{"action":"add","name":"!hello","response":"Bonjour","cooldownSeconds":null,"enabled":true,"moderatorOnly":false}]}"""));
+        using var factory = Factory(fixture, provider, tokenVault: new ForbiddenTwitchVault());
+        using var client = factory.CreateClient();
+        var bots = factory.Services.GetRequiredService<ITwitchBotStore>();
+        var agents = factory.Services.GetRequiredService<ICustomAgentStore>();
+        var botId = Guid.NewGuid();
+        bots.Save(new(botId, "Test Bot", "samplechannel", []));
+        var now = DateTimeOffset.UtcNow;
+        var planner = new CustomAgentProfile(Guid.NewGuid(), "Planner", "", "Plan.", "qwen3:4b", now, now);
+        var developer = new CustomAgentProfile(Guid.NewGuid(), "Developer", "", "Implement.", "qwen2.5-coder:7b", now, now);
+        var reviewer = new CustomAgentProfile(Guid.NewGuid(), "Reviewer", "", "Review.", "qwen3:4b", now, now);
+        agents.AddAgent(planner);
+        agents.AddAgent(developer);
+        agents.AddAgent(reviewer);
+        var teamId = Guid.NewGuid();
+        agents.SaveTeam(new(teamId, "Team", [new(planner.Id, "Planner", 0), new(developer.Id, "Developer", 1),
+            new(reviewer.Id, "Reviewer", 2)], now, now));
+        using var generated = await client.PostAsJsonAsync($"/api/twitch/bots/{botId}/command-proposals",
+            new { teamId, request = "Ajoute !hello" });
+        Assert.Equal(HttpStatusCode.OK, generated.StatusCode);
+        var proposal = (await generated.Content.ReadFromJsonAsync<TwitchCommandProposalResponse>(JsonOptions))!;
+        Assert.Empty(bots.Get(botId)!.Commands);
+        using var rejected = await client.PostAsJsonAsync(
+            $"/api/twitch/bots/{botId}/command-proposals/{proposal.Id}/apply", new { approved = false });
+        Assert.Equal(HttpStatusCode.BadRequest, rejected.StatusCode);
+        using var applied = await client.PostAsJsonAsync(
+            $"/api/twitch/bots/{botId}/command-proposals/{proposal.Id}/apply", new { approved = true });
+        Assert.Equal(HttpStatusCode.OK, applied.StatusCode);
+        var result = (await applied.Content.ReadFromJsonAsync<TwitchCommandProposalResponse>(JsonOptions))!;
+        Assert.Equal("Applied", result.Status);
+        Assert.All(result.Evidence, item => Assert.True(item.Passed));
+        Assert.Equal("Bonjour", Assert.Single(bots.Get(botId)!.Commands).Response);
     }
 
     [Fact]
@@ -510,6 +581,14 @@ public sealed class StudioApiTests
         public TwitchStoredCredentials? Read(Guid botId) => null;
         public void Save(Guid botId, TwitchStoredCredentials credentials) { }
         public void Delete(Guid botId) { }
+    }
+
+    private sealed class ForbiddenTwitchVault : ITwitchTokenVault
+    {
+        public bool IsAvailable => throw new InvalidOperationException("Simulation must not access the token vault.");
+        public TwitchStoredCredentials? Read(Guid botId) => throw new InvalidOperationException("Simulation must not read tokens.");
+        public void Save(Guid botId, TwitchStoredCredentials credentials) => throw new InvalidOperationException();
+        public void Delete(Guid botId) => throw new InvalidOperationException();
     }
 
     private static async Task<MissionResponse> WaitForTerminal(HttpClient client, Guid id)

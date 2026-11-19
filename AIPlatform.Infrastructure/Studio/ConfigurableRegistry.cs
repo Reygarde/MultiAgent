@@ -69,7 +69,7 @@ public sealed class ConfigurableRegistry : IAgentRegistry, IAgentConfigurationSe
                 agent.AllowedTools is null || agent.AllowedTools.Count > 5 || agent.TaskTypes is null || agent.TaskTypes.Count > 2) ||
             configuration.Models.Any(model => model is null || model.Id is null || model.Id.Length > 80 ||
                 model.Provider != "Ollama" || string.IsNullOrWhiteSpace(model.Name) || model.Name.Length > 120 ||
-                model.ContextSize is < 2048 or > 32768 || model.MaxOutputTokens < 256 ||
+                model.ContextSize is < 2048 or > ModelContextLimits.Maximum || model.MaxOutputTokens < 256 ||
                 !model.Name.All(character => char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or ':' or '.' or '/')))
             throw new StudioValidationException("Invalid bounded local agent/model configuration.");
         if (configuration.Agents.Where(agent => agent.Enabled &&

@@ -23,7 +23,8 @@ public static class AgentAnswer
         ILLMProvider provider, ModelDefinition model, AgentDefinition agent,
         string task, CancellationToken cancellationToken)
     {
-        var completion = await provider.CompleteAsync(new(model,
+        using var generationRole = LlmGenerationScope.ForRole(agent.Role);
+        var completion = await BudgetedLlmProvider.Wrap(provider).CompleteAsync(new(model,
         [
             new("system", agent.SystemPrompt +
                 "\nReturn a JSON object with exactly one property, response. " +

@@ -15,6 +15,310 @@ namespace AIPlatform.Tests;
 
 public sealed class WorkflowApiTests
 {
+    [Fact]
+    public async Task SizingProfileIsSelectedByIdAndFrozenInTheHttpResponseWithoutCallingAModel()
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var capacity = (await client.GetFromJsonAsync<MissionCapacityResponse>("/api/missions/capacity"))!;
+        Assert.Contains(capacity.SizingProfiles!, profile => profile.Id == "complex");
+        foreach (var invalid in new[]
+        {
+            new CreateMissionRequest("Display item", MissionKind.Chat, SizingProfileId: "small"),
+            new CreateMissionRequest("Display item", MissionKind.Project, SizingProfileId: "small"),
+            new CreateMissionRequest("Display item", MissionKind.Project,
+                TemplateId: MissionReactTemplate.Id, SizingProfileId: "unknown")
+        })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/missions", invalid)).StatusCode);
+        var response = await client.PostAsJsonAsync("/api/missions", new CreateMissionRequest(
+            "Display item", MissionKind.Project, TemplateId: MissionReactTemplate.Id, SizingProfileId: "complex",
+            MaxTotalGenerations: 9));
+        Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+        var mission = (await response.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        Assert.Equal("complex", mission.Sizing!.Id);
+        Assert.Equal(12, mission.Workflow!.CorrectionLimit);
+        Assert.Equal(9, mission.MaxTotalGenerations);
+        Assert.Equal(0, mission.TotalGenerations);
+        Assert.False(mission.SandboxApproved);
+        Assert.Empty(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Fact]
+    public async Task GenerationBudgetRoundTripsAndStopsBeforeReviewerWithoutChangingTheLimit()
+    {
+        using var fixture = new WorkflowFixture(responseOverride: MissionReactContractTests.Respond);
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        foreach (var invalid in new[] { 0, -1, 1001 })
+            Assert.Equal(HttpStatusCode.BadRequest, (await client.PostAsJsonAsync("/api/missions",
+                new CreateMissionRequest("Display information", MissionKind.Project,
+                    TemplateId: MissionReactTemplate.Id, MaxTotalGenerations: invalid))).StatusCode);
+        var response = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest("Display information", MissionKind.Project,
+                TemplateId: MissionReactTemplate.Id, MaxTotalGenerations: 4));
+        response.EnsureSuccessStatusCode();
+        var created = (await response.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        Assert.Equal(4, created.MaxTotalGenerations);
+        Assert.Equal(0, created.TotalGenerations);
+        Assert.Equal(4, created.RemainingGenerations);
+        await Assert.ThrowsAsync<GenerationBudgetExhaustedException>(() =>
+            factory.Services.GetRequiredService<CollaborativeProcessor>().ProcessAsync(created.Id, default));
+        var final = (await client.GetFromJsonAsync<MissionResponse>($"/api/missions/{created.Id}", JsonOptions))!;
+        Assert.Equal(4, final.MaxTotalGenerations);
+        Assert.Equal(4, final.TotalGenerations);
+        Assert.Equal(0, final.RemainingGenerations);
+        Assert.Equal(4, final.GenerationReservations!.Count);
+        Assert.Equal(MissionStatus.Failed, final.Status);
+        Assert.StartsWith("GenerationBudgetExhausted", final.Error);
+        var defaults = (await client.GetFromJsonAsync<MissionCapacityResponse>("/api/missions/capacity"))!;
+        Assert.Equal(fixture.Options.DefaultMaxTotalGenerations, defaults.DefaultMaxTotalGenerations);
+        Assert.Throws<StudioValidationException>(() => factory.Services.GetRequiredService<MissionStore>()
+            .Update(created.Id, mission => mission with { MaxTotalGenerations = 20 }));
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PlanApprovalRequiresTheSavedFingerprintAndDoesNotAuthorizeExecution(bool approved)
+    {
+        using var fixture = new WorkflowFixture(corrections: 0, responseOverride: MissionReactContractTests.Respond);
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        if (approved)
+        {
+            var openApi = await client.GetAsync("/openapi/v1.json");
+            openApi.EnsureSuccessStatusCode();
+            Assert.Contains("/api/missions/{id}/plan-approval", await openApi.Content.ReadAsStringAsync());
+        }
+        var creation = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest("Display requested information", MissionKind.Project,
+                TemplateId: MissionReactTemplate.Id, RequirePlanApproval: true));
+        creation.EnsureSuccessStatusCode();
+        var mission = (await creation.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        var store = factory.Services.GetRequiredService<MissionStore>();
+        await factory.Services.GetRequiredService<CollaborativeProcessor>().ProcessAsync(mission.Id, default);
+        var waiting = (await client.GetFromJsonAsync<MissionResponse>($"/api/missions/{mission.Id}", JsonOptions))!;
+        Assert.Equal(MissionStatus.AwaitingPlanApproval, waiting.Status);
+        Assert.True(waiting.Workflow!.RequirePlanApproval);
+        Assert.NotNull(waiting.Workflow.Plan);
+        Assert.Single(fixture.Provider.Requests);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/missions/{mission.Id}/resume", new { })).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync($"/api/missions/{mission.Id}/approval",
+            new DecideMissionApprovalRequest(true, waiting.Workflow.PlanApproval!.Fingerprint))).StatusCode);
+        var endpoint = $"/api/missions/{mission.Id}/plan-approval";
+        Assert.Equal(HttpStatusCode.NotFound, (await client.PostAsJsonAsync($"/api/missions/{Guid.NewGuid()}/plan-approval",
+            new DecidePlanApprovalRequest(approved, "unknown"))).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(endpoint,
+            new DecidePlanApprovalRequest(approved, "stale"))).StatusCode);
+        var history = JsonSerializer.Serialize(store.Get(mission.Id));
+        await client.GetAsync($"/api/missions/{mission.Id}/workflow");
+        Assert.Equal(history, JsonSerializer.Serialize(store.Get(mission.Id)));
+        var decision = new DecidePlanApprovalRequest(approved, waiting.Workflow.PlanApproval.Fingerprint);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsJsonAsync(endpoint, decision)).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict, (await client.PostAsJsonAsync(endpoint, decision)).StatusCode);
+        var current = store.Get(mission.Id)!;
+        Assert.Equal(approved ? MissionStatus.Queued : MissionStatus.Cancelled, current.Status);
+        Assert.Equal(approved, current.Workflow!.PlanApproval!.Approved);
+        Assert.False(current.SandboxApproved);
+        Assert.Null(current.ApprovalFingerprint);
+        Assert.Single(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Fact]
+    public async Task PrivateReviewerInspectionAndDeletionPreservePlannerHistoryAndBudgets()
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var creation = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest("Counter initial value 0", MissionKind.Project, TemplateId: MissionReactTemplate.Id));
+        creation.EnsureSuccessStatusCode();
+        var mission = (await creation.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        var missions = factory.Services.GetRequiredService<MissionStore>();
+        var diagnostics = factory.Services.GetRequiredService<OllamaDiagnosticStore>();
+        var context = new LlmDiagnosticContext(mission.Id, mission.Workflow!.WorkflowId, "review-1", Guid.NewGuid());
+        diagnostics.BeginReviewer(context, "simulated-reviewer", 1, "source-hash", null);
+        using var report = JsonDocument.Parse("""{"summary":"Rejected report","criterionReviews":[]}""");
+        diagnostics.RecordReviewerResult(context, report.RootElement);
+        diagnostics.FinishReviewer(context, "Rejected",
+            [new("C1", "QuoteMismatch", "criterionReviews[0].evidence[0].quote", "src/App.tsx", "bad quote", "Copy source exactly.")]);
+        var planner = context with { AttemptId = Guid.NewGuid(), TaskId = "plan" };
+        diagnostics.BeginPlanner(planner, "simulated-planner", 1, missions.Get(mission.Id)!.Workflow!.AcceptanceCriteria, false);
+        diagnostics.FinishPlanner(planner, "Accepted", []);
+        var response = await client.GetAsync($"/api/missions/{mission.Id}/reviewer-diagnostics");
+        response.EnsureSuccessStatusCode();
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        var entry = Assert.Single((await response.Content.ReadFromJsonAsync<ReviewerAttemptDiagnostic[]>())!);
+        Assert.Equal("Rejected", entry.Status);
+        Assert.Equal("bad quote", Assert.Single(entry.Errors).Quote);
+        Assert.Equal("Rejected report", entry.Report!.Value.GetProperty("summary").GetString());
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.GetAsync($"/api/missions/{Guid.NewGuid()}/reviewer-diagnostics")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,
+            (await client.DeleteAsync($"/api/missions/{mission.Id}/reviewer-diagnostics")).StatusCode);
+        missions.Update(mission.Id, item => item with { Status = MissionStatus.Failed });
+        var history = JsonSerializer.Serialize(missions.Get(mission.Id));
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await client.DeleteAsync($"/api/missions/{mission.Id}/reviewer-diagnostics")).StatusCode);
+        Assert.Empty(diagnostics.ReviewerAttempts(mission.Id));
+        Assert.Single(diagnostics.PlannerAttempts(mission.Id));
+        Assert.Equal(history, JsonSerializer.Serialize(missions.Get(mission.Id)));
+        Assert.Null(missions.Get(mission.Id)!.Workflow!.Review);
+        Assert.Empty(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+        var openApi = await client.GetStringAsync("/openapi/v1.json");
+        Assert.Contains("/api/missions/{id}/reviewer-diagnostics", openApi);
+    }
+
+    [Fact]
+    public async Task ReviewerCorrectionResumeApiChecksEligibilityAndQueuesIdempotently()
+    {
+        using var fixture = new WorkflowFixture(available: false,
+            responseOverride: MissionReactContractTests.Respond);
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        const string requestText =
+            "Initial value 0\nButton +1 increments\nButton -1 decrements\nReset returns to 0\nReadable interface";
+        var creation = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest(requestText, MissionKind.Project, TemplateId: MissionReactTemplate.Id));
+        creation.EnsureSuccessStatusCode();
+        var created = (await creation.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        var store = factory.Services.GetRequiredService<MissionStore>();
+        await factory.Services.GetRequiredService<CollaborativeProcessor>().ProcessAsync(created.Id, default);
+        var generated = store.Get(created.Id)!;
+        var workflow = generated.Workflow!;
+        var review = workflow.Steps.Single(step => step.Kind == "Review");
+        var fingerprint = WorkflowSourceFingerprint.Compute(generated);
+        var diagnostics = factory.Services.GetRequiredService<OllamaDiagnosticStore>();
+        var context = new LlmDiagnosticContext(created.Id, workflow.WorkflowId, review.Id, Guid.NewGuid());
+        diagnostics.BeginReviewer(context, "simulated-reviewer", 2, fingerprint, null);
+        using var rejected = JsonDocument.Parse("""{"summary":"Original rejected report"}""");
+        diagnostics.RecordReviewerResult(context, rejected.RootElement);
+        diagnostics.FinishReviewer(context, "Rejected",
+        [
+            new("C2", "MissingCriterion", "criterionReviews", null, null, "C2 is missing."),
+            new("C3", "MissingCriterion", "criterionReviews", null, null, "C3 is missing."),
+            new("C4", "MissingCriterion", "criterionReviews", null, null, "C4 is missing."),
+            new("C5", "MissingCriterion", "criterionReviews", null, null, "C5 is missing.")
+        ]);
+        await Task.Delay(2);
+        store.Update(created.Id, current => current with
+        {
+            Status = MissionStatus.Failed,
+            Error = "Agent ReviewAgent context budget exceeded for ReadSources: 12730 characters, limit 10240",
+            Workflow = current.Workflow! with
+            {
+                Review = null,
+                Steps = current.Workflow.Steps.Select(step => step.Id == review.Id
+                    ? step with
+                    {
+                        Status = WorkflowStatus.Failed,
+                        Error = "Agent ReviewAgent context budget exceeded for ReadSources: 12730 characters, limit 10240"
+                    } : step).ToArray()
+            }
+        });
+
+        var endpoint = $"/api/missions/{created.Id}/reviewer-correction-resume";
+        var availability = await client.GetAsync(endpoint);
+        availability.EnsureSuccessStatusCode();
+        Assert.True(availability.Headers.CacheControl!.NoStore);
+        var eligibility = (await availability.Content.ReadFromJsonAsync<ReviewerCorrectionResumeEligibilityResponse>())!;
+        Assert.True(eligibility.Available, eligibility.Reason);
+
+        var before = store.Get(created.Id)!;
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync(endpoint, null)).StatusCode);
+        Assert.Equal(HttpStatusCode.Accepted, (await client.PostAsync(endpoint, null)).StatusCode);
+        var queued = store.Get(created.Id)!;
+        Assert.Equal(MissionStatus.Queued, queued.Status);
+        Assert.Equal(before.Workflow!.Version, queued.Workflow!.Version);
+        Assert.Equal(review.Id, queued.Workflow.ReviewerCorrectionResume!.StepId);
+        Assert.Equal(before.GenerationReservations!.Count, queued.GenerationReservations!.Count);
+        Assert.Equal(5, fixture.Provider.Requests.Count);
+        Assert.Empty(fixture.Sandbox.Calls);
+        Assert.Contains("/api/missions/{id}/reviewer-correction-resume",
+            await client.GetStringAsync("/openapi/v1.json"));
+    }
+
+    [Fact]
+    public async Task PrivatePlannerInspectionAndDeletionDoNotChangeHistoryOrExposeRawResponses()
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var creation = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest("Counter initial value 0", MissionKind.Project,
+                TemplateId: MissionReactTemplate.Id, RecordPlannerTrace: true));
+        creation.EnsureSuccessStatusCode();
+        var mission = (await creation.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        var missions = factory.Services.GetRequiredService<MissionStore>();
+        Assert.True(missions.Get(mission.Id)!.Workflow!.RecordPlannerTrace);
+        var diagnostics = factory.Services.GetRequiredService<OllamaDiagnosticStore>();
+        var context = new LlmDiagnosticContext(mission.Id, mission.Workflow!.WorkflowId, "plan", Guid.NewGuid());
+        diagnostics.BeginPlanner(context, "simulated-planner", 1,
+            missions.Get(mission.Id)!.Workflow!.AcceptanceCriteria, true);
+        using var plan = JsonDocument.Parse("{\"name\":\"Rejected counter\",\"files\":[]}");
+        diagnostics.RecordPlannerResult(context, plan.RootElement);
+        diagnostics.RecordResponse(context, 200, "{\"raw-private-body\":true}"u8.ToArray());
+        diagnostics.FinishPlanner(context, "Rejected",
+            [new("C1", "MissingTest", "criterionCoverage.paths", null, "A recognized business test is required.")]);
+        var response = await client.GetAsync($"/api/missions/{mission.Id}/planner-diagnostics");
+        response.EnsureSuccessStatusCode();
+        Assert.True(response.Headers.CacheControl!.NoStore);
+        var text = await response.Content.ReadAsStringAsync();
+        Assert.DoesNotContain("raw-private-body", text);
+        var entry = Assert.Single((await response.Content.ReadFromJsonAsync<PlannerAttemptDiagnostic[]>())!);
+        Assert.Equal("Rejected", entry.Status);
+        Assert.Equal("C1", entry.Errors.Single().CriterionId);
+        Assert.True(entry.RawTraceAvailable);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await client.GetAsync($"/api/missions/{mission.Id}/planner-diagnostics/{context.AttemptId}/raw")).StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.GetAsync($"/api/missions/{Guid.NewGuid()}/planner-diagnostics")).StatusCode);
+        Assert.Equal(HttpStatusCode.Conflict,
+            (await client.DeleteAsync($"/api/missions/{mission.Id}/planner-diagnostics")).StatusCode);
+        missions.Update(mission.Id, item => item with { Status = MissionStatus.Failed });
+        var history = JsonSerializer.Serialize(missions.Get(mission.Id));
+        Assert.Equal(HttpStatusCode.NoContent,
+            (await client.DeleteAsync($"/api/missions/{mission.Id}/planner-diagnostics")).StatusCode);
+        Assert.Empty(diagnostics.PlannerAttempts(mission.Id));
+        Assert.Equal(history, JsonSerializer.Serialize(missions.Get(mission.Id)));
+        Assert.Null(missions.Get(mission.Id)!.Workflow!.Plan);
+        Assert.Empty(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task MissionRoutingOptInRoundTripsWithoutStartingGenerationOrChangingManualDefaults(bool automatic)
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var response = await client.PostAsJsonAsync("/api/missions",
+            new CreateMissionRequest("Create a .NET app", MissionKind.Project, AutomaticModelSelection: automatic));
+        response.EnsureSuccessStatusCode();
+        var result = (await response.Content.ReadFromJsonAsync<MissionResponse>(JsonOptions))!;
+        Assert.Equal(automatic, result.Workflow!.AutomaticModelSelection);
+        Assert.False(result.SandboxApproved);
+        Assert.All(result.Workflow.Steps, step => Assert.Equal(automatic ? "Automatic" : "Manual", step.SelectionMode));
+        var saved = factory.Services.GetRequiredService<IMissionService>().Get(result.Id)!;
+        Assert.Equal(automatic, saved.Workflow!.AutomaticModelSelection);
+        Assert.Empty(saved.Workflow.ModelInvocations);
+        Assert.Empty(fixture.Provider.Requests);
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     { Converters = { new JsonStringEnumConverter() } };
 
@@ -37,6 +341,7 @@ public sealed class WorkflowApiTests
         var response = await client.PostAsJsonAsync($"/api/missions/{mission.Id}/manual-backend-revision",
             new ManualBackendRevisionRequest(oldPlan.Fingerprint, replacements));
 
+        Assert.True(response.IsSuccessStatusCode, await response.Content.ReadAsStringAsync());
         response.EnsureSuccessStatusCode();
         var plan = (await response.Content.ReadFromJsonAsync<ExecutionPlanResponse>())!;
         var current = factory.Services.GetRequiredService<MissionStore>().Get(mission.Id)!;
@@ -265,11 +570,11 @@ public sealed class WorkflowApiTests
     {
         public void Create(Guid id) => inner.Create(id);
         public void Delete(Guid id) => inner.Delete(id);
-        public void ValidateFiles(IReadOnlyList<GeneratedFile> files, string? templateId = null, bool allowPartialTemplate = false) =>
-            inner.ValidateFiles(files, templateId, allowPartialTemplate);
-        public Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken token, string? templateId = null) =>
-            inner.WriteAsync(id, files, token, templateId);
-        public IReadOnlyList<WorkspaceFile> List(Guid id) => inner.List(id);
+        public void ValidateFiles(IReadOnlyList<GeneratedFile> files, string? templateId = null, bool allowPartialTemplate = false,
+            ProjectSizingProfile? sizing = null) => inner.ValidateFiles(files, templateId, allowPartialTemplate, sizing);
+        public Task WriteAsync(Guid id, IReadOnlyList<GeneratedFile> files, CancellationToken token, string? templateId = null,
+            ProjectSizingProfile? sizing = null) => inner.WriteAsync(id, files, token, templateId, sizing);
+        public IReadOnlyList<WorkspaceFile> List(Guid id, ProjectSizingProfile? sizing = null) => inner.List(id, sizing);
         public Task<WorkspaceContent> ReadAsync(Guid id, string path, CancellationToken token) => inner.ReadAsync(id, path, token);
         public Task<IReadOnlyList<GeneratedFile>> ApplyReviewedChangesAsync(
             Guid id, string? templateId, IReadOnlyList<ReviewedWorkspaceChange> changes,
@@ -575,7 +880,7 @@ public sealed class WorkflowApiTests
                 services.RemoveAll<StudioOptions>();
                 services.AddSingleton(fixture.Options);
                 services.RemoveAll<SandboxOptions>();
-                services.AddSingleton(new SandboxOptions());
+                services.AddSingleton(fixture.SandboxOptions);
                 services.RemoveAll<IAgentRegistry>();
                 services.AddSingleton<IAgentRegistry>(registry);
                 services.RemoveAll<IAgentConfigurationService>();

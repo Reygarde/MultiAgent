@@ -36,18 +36,22 @@ public sealed class DockerSandboxRunner(
     {
         var templateId = missions?.Get(workspaceId)?.TemplateId;
         if (templateId is not null && templateId != DiscordTemplate.Id && templateId != ReactTemplate.Id &&
+            templateId != MissionReactTemplate.Id &&
             templateId != TwitchTemplate.Id && templateId != FullStackTemplate.Id)
             throw new StudioValidationException("Unknown project template.");
-        return await GetAvailabilityAsync(templateId == ReactTemplate.Id ? ReactTemplate.Image :
+        return await GetAvailabilityAsync(templateId is ReactTemplate.Id or MissionReactTemplate.Id ? ReactTemplate.Image :
             templateId == DiscordTemplate.Id ? DiscordTemplate.Image :
             templateId == TwitchTemplate.Id ? TwitchTemplate.Image :
             templateId == FullStackTemplate.Id ? FullStackTemplate.Image : options.Image, cancellationToken);
     }
 
-    private async Task<SandboxAvailability> GetAvailabilityAsync(string imageName, CancellationToken cancellationToken)
+    internal async Task<SandboxAvailability> GetAvailabilityAsync(string imageName, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         if (Volatile.Read(ref cleanupFaulted))
             return new(false, "Container cleanup could not be confirmed. Sandbox disabled until inspection and server restart.");
+        if (!options.Enabled)
+            return new(false, "Sandbox disabled in configuration. No Docker probe, build or test was executed.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(8));
         try
@@ -55,8 +59,6 @@ public sealed class DockerSandboxRunner(
             var info = await process.RunAsync(["info", "--format", "{{.OSType}}"], timeout.Token);
             if (info.ExitCode != 0 || info.Output.Trim() != "linux")
                 return new(false, "Docker Linux engine unavailable. No build or test will run on the host.");
-            if (!options.Enabled)
-                return new(false, "Sandbox disabled in configuration. Enable only after reviewing the isolation settings.", true);
             var image = await process.RunAsync(["image", "inspect", "--format", "{{.Id}}", imageName], timeout.Token);
             return image.ExitCode == 0
                 ? new(true, "Offline Docker image available. Explicit human approval is still required per mission.", true)
@@ -84,9 +86,10 @@ public sealed class DockerSandboxRunner(
         if (stage is not ("TypeScript" or "Build" or "Tests") &&
             !(fullStack && FullStackBuildProfile.IsStage(stage)))
             throw new ArgumentException("Unknown validation stage.", nameof(stage));
-        if (stage == "TypeScript" && mission?.TemplateId is not (ReactTemplate.Id or FullStackTemplate.Id))
+        if (stage == "TypeScript" && mission?.TemplateId is not (ReactTemplate.Id or MissionReactTemplate.Id or FullStackTemplate.Id))
             throw new StudioValidationException("TypeScript validation requires a React or full-stack profile.");
         if (mission?.TemplateId is not null && mission.TemplateId != DiscordTemplate.Id && mission.TemplateId != ReactTemplate.Id &&
+            mission.TemplateId != MissionReactTemplate.Id &&
             mission.TemplateId != TwitchTemplate.Id && mission.TemplateId != FullStackTemplate.Id)
             throw new StudioValidationException("Unknown project template.");
         if (stage != "TypeScript" && FullStackBuildProfile.IsStage(stage) &&
@@ -121,6 +124,24 @@ public sealed class DockerSandboxRunner(
         SafePaths.RejectLinks(directory);
         // Enumerate all entries before mounting; refuse junctions even in unused subdirectories.
         workspaces.List(workspaceId);
+        return await RunContainerAsync(directory, stage, image, mission?.TemplateId, approvedFiles, cancellationToken);
+    }
+
+    internal async Task<VerificationResult> RunIndependentReactAsync(string directory, string stage, string image,
+        IReadOnlyList<ExecutionPlanFile> files, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (!options.Enabled || Volatile.Read(ref cleanupFaulted))
+            throw new StudioValidationException("Sandbox execution is disabled or previous cleanup could not be confirmed.");
+        if (!Regex.IsMatch(image, @"\Asha256:[a-f0-9]{64}\z", RegexOptions.CultureInvariant))
+            throw new StudioValidationException("Independent React validation requires a pinned Docker image ID.");
+        SafePaths.RejectLinks(directory);
+        return await RunContainerAsync(directory, stage, image, MissionReactTemplate.Id, files, token);
+    }
+
+    private async Task<VerificationResult> RunContainerAsync(string directory, string stage, string image,
+        string? templateId, IReadOnlyList<ExecutionPlanFile>? approvedFiles, CancellationToken cancellationToken)
+    {
         if (directory.Contains(',') || directory.Contains('\n') || directory.Contains('\r'))
             throw new StudioValidationException("The configured workspace root is not a valid Docker mount path.");
         var name = "aiplatform-" + Guid.NewGuid().ToString("N");
@@ -129,7 +150,7 @@ public sealed class DockerSandboxRunner(
         ContainerProcessResult result;
         try
         {
-            result = await process.RunAsync(CreateArguments(name, directory, stage, image, mission?.TemplateId, approvedFiles), timeout.Token);
+            result = await process.RunAsync(CreateArguments(name, directory, stage, image, templateId, approvedFiles), timeout.Token);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
@@ -154,15 +175,15 @@ public sealed class DockerSandboxRunner(
 
         var warnings = CountDiagnostics("Warning", result.Output);
         var errors = CountDiagnostics("Error", result.Output);
-        var reactCounts = stage == "Tests" && mission?.TemplateId == ReactTemplate.Id
+        var reactCounts = stage == "Tests" && templateId is (ReactTemplate.Id or MissionReactTemplate.Id)
             ? ReactBuildProfile.TestCounts(result.Output) : null;
-        var fullStackCounts = mission?.TemplateId == FullStackTemplate.Id &&
+        var fullStackCounts = templateId == FullStackTemplate.Id &&
             stage is ("FrontendTests" or "Integration")
                 ? FullStackBuildProfile.TestCounts(result.Output) : null;
         var testStage = stage is "Tests" or "BackendTests" or "FrontendTests" or "Integration";
-        var counts = testStage ? mission?.TemplateId switch
+        var counts = testStage ? templateId switch
         {
-            ReactTemplate.Id => reactCounts is { } react ? new TestCounts(react.Total, react.Failed) : null,
+            ReactTemplate.Id or MissionReactTemplate.Id => reactCounts is { } react ? new TestCounts(react.Total, react.Failed) : null,
             FullStackTemplate.Id when stage == "BackendTests" => GetTestCounts(result.Output),
             FullStackTemplate.Id => fullStackCounts is { } full ? new TestCounts(full.Total, full.Failed) : null,
             _ => GetTestCounts(result.Output)
@@ -182,15 +203,20 @@ public sealed class DockerSandboxRunner(
     {
         if (templateId == FullStackTemplate.Id && !FullStackBuildProfile.IsStage(stage) ||
             templateId != FullStackTemplate.Id && stage is not ("Build" or "Tests") &&
-            !(stage == "TypeScript" && templateId == ReactTemplate.Id))
+            !(stage == "TypeScript" && templateId is (ReactTemplate.Id or MissionReactTemplate.Id)))
             throw new ArgumentException("Unauthorized container stage.", nameof(stage));
-        var command = templateId == ReactTemplate.Id ? ReactBuildProfile.Command(stage) :
+        var command = templateId is ReactTemplate.Id or MissionReactTemplate.Id ? ReactBuildProfile.Command(stage) :
             templateId == FullStackTemplate.Id ? FullStackBuildProfile.Command(stage) :
             DotNetCommand(stage, templateId == TwitchTemplate.Id);
         if (approvedFiles is not null)
         {
-            if (templateId != FullStackTemplate.Id || approvedFiles.Count == 0 ||
-                approvedFiles.Any(file => file.Path != "Generated.slnx" && !FullStackTemplate.IsPath(file.Path)))
+            if (approvedFiles.Count == 0 || approvedFiles.Any(file => templateId switch
+                {
+                    FullStackTemplate.Id => file.Path != "Generated.slnx" && !FullStackTemplate.IsPath(file.Path),
+                    MissionReactTemplate.Id => !MissionReactTemplate.IsEditable(file.Path) &&
+                        !MissionReactTemplate.Files.Any(baseline => baseline.Path == file.Path),
+                    _ => true
+                }))
                 throw new StudioValidationException("Invalid approved file manifest.");
             var manifest = string.Join("\n", approvedFiles.Select(file => $"{file.Sha256.ToLowerInvariant()}  {file.Path}")) + "\n";
             var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(manifest));
