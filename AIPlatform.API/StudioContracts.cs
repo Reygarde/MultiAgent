@@ -13,7 +13,8 @@ public sealed record CreateMissionRequest(
 /// <summary>Source-free progress of an isolated software correction, never execution proof.</summary>
 public sealed record ReactSoftwareCorrectionResponse(Guid Id, string Trigger, string Reason,
     int CompletedGroups, int TotalGroups, int ReviewerCapacity, bool InFlight, bool Ready,
-    IReadOnlyList<string> Decisions, string? Failure);
+    IReadOnlyList<string> Decisions, string? Failure,
+    ReactSoftwareCorrectionCallState CallState = ReactSoftwareCorrectionCallState.Prepared);
 
 /// <summary>Approves or refuses an exact saved generation plan, without authorizing code execution.</summary>
 public sealed record DecidePlanApprovalRequest(bool Approved, string Fingerprint);
@@ -37,6 +38,9 @@ public sealed record PlannerRawResponse(string ResponseBody);
 
 /// <summary>Eligibility and current state for a source-bound Reviewer correction retry.</summary>
 public sealed record ReviewerCorrectionResumeEligibilityResponse(bool Available, bool InProgress, string Reason);
+
+/// <summary>Read-only assessment of whether explicit mission resumption is safe.</summary>
+public sealed record MissionResumeEligibilityResponse(bool Available, string Reason);
 
 /// <summary>Immutable view of a persisted Studio mission.</summary>
 public sealed record MissionResponse(
@@ -81,7 +85,8 @@ public sealed record WorkflowResponse(Guid WorkflowId, Guid MissionId, int Versi
     IReadOnlyList<ReactRequirementTrace>? RequirementTrace = null,
     IReadOnlyList<PlanAmendmentResponse>? PlanAmendments = null,
     bool AutomaticReactCorrections = false, string? PendingSoftwareAgentCall = null,
-    IReadOnlyList<ReactSoftwareCorrectionResponse>? SoftwareCorrections = null)
+    IReadOnlyList<ReactSoftwareCorrectionResponse>? SoftwareCorrections = null,
+    SoftwareAgentCallDeliveryState PendingSoftwareCallDeliveryState = SoftwareAgentCallDeliveryState.Unknown)
 {
     public static WorkflowResponse From(MissionWorkflow flow)
     {
@@ -112,7 +117,8 @@ public sealed record WorkflowResponse(Guid WorkflowId, Guid MissionId, int Versi
         flow.PlanAmendments.Select(item => PlanAmendmentResponse.From(item, flow.Plan!)).ToArray(),
         flow.AutomaticReactCorrections, flow.PendingSoftwareAgentCall,
         flow.SoftwareCorrections.Select(item => new ReactSoftwareCorrectionResponse(item.Id, item.Trigger, item.Reason,
-            item.CompletedGroups, item.Calls.Count, item.ReviewerCapacity, item.InFlight, item.Ready, item.Decisions, item.Failure)).ToArray());
+            item.CompletedGroups, item.Calls.Count, item.ReviewerCapacity, item.InFlight, item.Ready, item.Decisions,
+            item.Failure, item.CallState)).ToArray(), flow.PendingSoftwareCallDeliveryState);
     }
 
     private static int? StepVersion(WorkflowStep step, int? previousVersion)

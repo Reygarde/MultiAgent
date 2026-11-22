@@ -6,6 +6,7 @@
     <EmbeddedResource Include="..\sandbox\react\package.json" LogicalName="React.package.json" />
     <EmbeddedResource Include="..\sandbox\react\package-lock.json" LogicalName="React.package-lock.json" />
     <EmbeddedResource Include="Studio\model-catalog.json" LogicalName="Studio.model-catalog.json" />
+    <EmbeddedResource Include="..\sandbox\provisioning-recipes.json" LogicalName="AIPlatform.Infrastructure.Studio.sandbox-provisioning-recipes.json" />
   </ItemGroup>
 
   <PropertyGroup>

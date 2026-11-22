@@ -9,13 +9,14 @@ import { mission } from './test/fixtures'
 import type { AgentConfiguration, Mission, MissionStatus } from './types'
 
 vi.mock('./api', () => ({
-  api: { configuration: vi.fn(), saveConfiguration: vi.fn(), resume: vi.fn(), revalidate: vi.fn(), files: vi.fn(), file: vi.fn(),
+  api: { configuration: vi.fn(), saveConfiguration: vi.fn(), resume: vi.fn(), resumeEligibility: vi.fn(), revalidate: vi.fn(), files: vi.fn(), file: vi.fn(),
     renameProject: vi.fn(), deleteProject: vi.fn(), revision: vi.fn(), exportProject: vi.fn(), analysis: vi.fn(),
     executionPlan: vi.fn(), approve: vi.fn() },
   errorMessage: (error: unknown) => error instanceof Error ? error.message : 'Error',
 }))
 beforeEach(() => {
   vi.clearAllMocks()
+  vi.mocked(api.resumeEligibility).mockResolvedValue({ available: true, reason: 'Reprise sûre.' })
   vi.mocked(api.files).mockResolvedValue([])
   vi.mocked(api.executionPlan).mockResolvedValue({ fingerprint: 'approved', image: 'offline',
     operations: [], cpuCount: 2, memoryMegabytes: 2048, timeoutSeconds: 120, maxCorrectionAttempts: 3 })
@@ -74,9 +75,35 @@ it('shows actual workflow context and permits controlled resumption', async () =
   await userEvent.click(screen.getByText(/Revue · ReviewAgent · état enregistré : Failed/))
   expect(screen.getByText('Contexte transmis : Plan and sources only')).toBeVisible()
   expect(screen.getByRole('alert')).toHaveTextContent('Invalid review JSON')
-  await userEvent.click(screen.getByRole('button', { name: 'Reprendre · nouvelle autorisation requise' }))
+  const resumeButton = screen.getByRole('button', { name: 'Reprendre · nouvelle autorisation requise' })
+  await waitFor(() => expect(resumeButton).toBeEnabled())
+  await userEvent.click(resumeButton)
+  expect(api.resume).not.toHaveBeenCalled()
+  await userEvent.click(screen.getByRole('button', { name: 'Confirmer la reprise de la mission' }))
   await waitFor(() => expect(api.resume).toHaveBeenCalledWith(mission.id))
   expect(refresh).toHaveBeenCalledOnce()
+})
+
+it('blocks an ambiguous interrupted call and explains why without attempting resumption', async () => {
+  vi.mocked(api.resumeEligibility).mockResolvedValue({
+    available: false, reason: "Un appel Ollama peut avoir été envoyé et ne sera pas rejoué.",
+  })
+  render(<MissionDetails mission={{ ...workflowMission, status: 'Cancelled' }}
+    cancel={vi.fn()} busy={false} refresh={vi.fn()} />)
+  expect(await screen.findByText(/peut avoir été envoyé/)).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Reprendre · nouvelle autorisation requise' })).toBeDisabled()
+  expect(api.resume).not.toHaveBeenCalled()
+})
+
+it('surfaces a refusal after the eligibility check becomes stale', async () => {
+  vi.mocked(api.resume).mockRejectedValue(new Error('Preuve devenue ambiguë : reprise refusée.'))
+  render(<MissionDetails mission={workflowMission} cancel={vi.fn()} busy={false} refresh={vi.fn()} />)
+  const button = screen.getByRole('button', { name: 'Reprendre · nouvelle autorisation requise' })
+  await waitFor(() => expect(button).toBeEnabled())
+  await userEvent.click(button)
+  await userEvent.click(screen.getByRole('button', { name: 'Confirmer la reprise de la mission' }))
+  expect(await screen.findByText('Preuve devenue ambiguë : reprise refusée.')).toBeVisible()
+  expect(button).toBeDisabled()
 })
 
 it('shows React template and separate TypeScript results without claiming verification', () => {

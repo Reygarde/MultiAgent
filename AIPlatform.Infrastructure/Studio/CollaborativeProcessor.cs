@@ -114,10 +114,10 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                         {
                             if (workflow.AutomaticModelSelection) modelRouting!.CompleteStep(id, step.Id);
                             store.PauseForPlanApproval(id, plan, plannedDraft);
-                            Update(flow => flow with { PendingSoftwareAgentCall = null });
+                            Update(ClearPendingSoftwareAgentCall);
                             return;
                         }
-                        Update(flow => flow with { Plan = plan, Draft = plannedDraft, PendingSoftwareAgentCall = null });
+                        Update(flow => ClearPendingSoftwareAgentCall(flow) with { Plan = plan, Draft = plannedDraft });
                         store.Update(id, mission => mission with { ProjectName = plan.Name, ProjectDescription = plan.Description });
                         Complete(JsonSerializer.Serialize(plan));
                         break;
@@ -153,9 +153,10 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                         {
                             var lastRevision = workflow.Revisions?.LastOrDefault()
                                 ?? throw new StudioValidationException("A committed revision is required before correction.");
-                            var currentExecutionPlan = await plans.GetAsync(id, token, lastRevision.Version);
+                            var currentExecutionPlan = await ReviewPlan(lastRevision.Version);
                             var planDifferences = ExecutionPlanRevisionGuard.Compare(
-                                lastRevision, currentExecutionPlan, Current().TemplateId);
+                                lastRevision, currentExecutionPlan, Current().TemplateId,
+                                staticReview: Current().TemplateId == MissionReactTemplate.Id);
                             Update(flow => flow with
                             {
                                 ExecutionPlanDifferences = planDifferences.Count == 0 ? null : planDifferences
@@ -197,8 +198,8 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                                 throw new StudioValidationException("An agent attempted to modify an unauthorized file.");
                             draft[file.Path] = generated;
                             Update(flow => correction
-                                ? flow with { Proposal = draft.Values.ToArray(), PendingSoftwareAgentCall = null }
-                                : flow with { Draft = draft.Values.ToArray(), PendingSoftwareAgentCall = null });
+                                ? ClearPendingSoftwareAgentCall(flow) with { Proposal = draft.Values.ToArray() }
+                                : ClearPendingSoftwareAgentCall(flow) with { Draft = draft.Values.ToArray() });
                             store.AddEvent(id, step.Kind, StepStatus.Running, $"Generated authorized file: {file.Path}");
                             remaining.Remove(file);
                             processed.Add(file.Path);
@@ -275,7 +276,7 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                             store.Update(id, mission => mission with { HasWorkspace = true });
                         }
                         await workspaces.WriteAsync(id, draft.Values.ToArray(), token, Current().TemplateId, Current().Sizing);
-                        var generatedPlan = await plans.GetAsync(id, token);
+                        var generatedPlan = await ReviewPlan();
                         var version = workflow.Version;
                         var revisionFiles = draft.Values.ToArray();
                         Update(flow => flow with { Revisions = [.. flow.Revisions ?? [],
@@ -312,7 +313,7 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                         var proposal = reviewMission.Workflow!.Proposal;
                         if (proposal is not null)
                             reviewMission = reviewMission with { Workflow = reviewMission.Workflow! with { Draft = proposal } };
-                        var reviewedPlan = await plans.GetAsync(id, token);
+                        var reviewedPlan = await ReviewPlan();
                         var reviewedFingerprint = reviewedPlan.Fingerprint;
                         if (workflow.AutomaticReactCorrections &&
                             Remaining(id) < WorkflowAgents.PreviewReactReview(reviewMission, token).Count)
@@ -342,7 +343,7 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                                 previous.FirstOrDefault(old => old.Path == file.Path)?.Content != file.Content)
                                 .Select(file => file.Path).ToArray() };
                         }
-                        Update(flow => flow with { Review = review, PendingSoftwareAgentCall = null,
+                        Update(flow => ClearPendingSoftwareAgentCall(flow) with { Review = review,
                             Proposals = flow.Proposals?.Select(item => item.Version == flow.Version
                                 ? item with { Review = review } : item).ToArray() });
                         if (workflow.AutomaticModelSelection) modelRouting!.RecordReview(id, review);
@@ -362,20 +363,20 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                         }
                         else
                         {
-                            if ((await plans.GetAsync(id, token)).Fingerprint != reviewedFingerprint)
+                            if ((await ReviewPlan()).Fingerprint != reviewedFingerprint)
                                 throw new StudioValidationException("Workspace changed during review; review must be repeated.");
                             if (proposal is not null)
                             {
                                 var lastRevision = Current().Workflow!.Revisions?.LastOrDefault()
                                     ?? throw new StudioValidationException("Committed revision missing.");
-                                if ((await plans.GetAsync(id, token, lastRevision.Version)).Fingerprint != lastRevision.Fingerprint &&
+                                if ((await ReviewPlan(lastRevision.Version)).Fingerprint != lastRevision.Fingerprint &&
                                     !await IsInterruptedProposalAsync(id, lastRevision.Files, proposal, token))
                                     throw new StudioValidationException("Workspace changed since the proposal was prepared.");
                                 workspaces.ValidateFiles(proposal, Current().TemplateId, sizing: Current().Sizing);
                                 if (Current().TemplateId == MissionReactTemplate.Id && reactSourceCheck is not null)
                                     await RequireCleanReactSources(proposal);
                                 await workspaces.WriteAsync(id, proposal, token, Current().TemplateId, Current().Sizing);
-                                var newPlan = await plans.GetAsync(id, token);
+                                var newPlan = await ReviewPlan();
                                 Update(flow => flow with { Draft = proposal, Proposal = null,
                                     Revisions = [.. flow.Revisions ?? [], new(flow.Version, DateTimeOffset.UtcNow,
                                         flow.Diagnostics ?? "Correction", newPlan.Fingerprint, proposal,
@@ -405,6 +406,34 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                             Complete(availability.Reason, WorkflowStatus.Skipped);
                             Finish(MissionStatus.GeneratedUnverified, availability.Reason);
                             break;
+                        }
+                        if (Current().TemplateId == MissionReactTemplate.Id)
+                        {
+                            var revision = Current().Workflow!.Revisions?.LastOrDefault()
+                                ?? throw new StudioValidationException("Reviewed revision is missing.");
+                            var staticPlan = await ReviewPlan();
+                            if (revision.Version != Current().Workflow!.Version ||
+                                ExecutionPlanRevisionGuard.Compare(revision, staticPlan, MissionReactTemplate.Id, staticReview: true).Count > 0)
+                                throw new StudioValidationException("Sources or settings changed after static review.");
+                            ExecutionPlan executionPlan;
+                            try { executionPlan = await plans.GetAsync(id, token); }
+                            catch (SandboxPrerequisiteException exception)
+                            {
+                                Complete(exception.Message, WorkflowStatus.Skipped);
+                                Finish(MissionStatus.GeneratedUnverified, exception.Message);
+                                break;
+                            }
+                            if (executionPlan.ReactDescriptor?.ImageDigest is not { } digest ||
+                                !System.Text.RegularExpressions.Regex.IsMatch(digest, @"^sha256:[a-f0-9]{64}$") ||
+                                executionPlan.Image != digest || executionPlan.ReactDescriptor.EffectiveImage != digest ||
+                                staticPlan.ReactDescriptor is not { } reviewedDescriptor ||
+                                reviewedDescriptor.CompareTo(executionPlan.ReactDescriptor).Any(difference =>
+                                    difference.Field is not ("effectiveImage" or "imageDigest")) ||
+                                executionPlan.ReactDescriptor.CompareManifest(revision.Files).Count > 0 ||
+                                executionPlan.ReactDescriptor.ComputeFingerprint(revision.Files) != executionPlan.Fingerprint)
+                                throw new StudioValidationException("A verified source-bound image identity is required for execution approval.");
+                            Update(flow => flow with { Revisions = flow.Revisions!.Select(item =>
+                                item == revision ? item with { PreparedExecutionPlan = executionPlan } : item).ToArray() });
                         }
                         SetStep(step.Id, item => item with { Status = WorkflowStatus.WaitingForApproval });
                         store.Update(id, mission => mission with { Status = MissionStatus.AwaitingApproval,
@@ -545,7 +574,7 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
                 {
                     if (exception is StudioValidationException { PlannerDiagnostics.Count: > 0 } or
                         StudioValidationException { ReviewerDiagnostics.Count: > 0 })
-                        Update(flow => flow with { PendingSoftwareAgentCall = null });
+                        Update(ClearPendingSoftwareAgentCall);
                     else retry = false;
                 }
                 if (boundedPlanner)
@@ -594,6 +623,8 @@ public sealed partial class CollaborativeProcessor(MissionStore store, IWorkflow
         }
 
         MissionSnapshot Current() => store.Get(id) ?? throw new InvalidOperationException("Mission missing.");
+        Task<ExecutionPlan> ReviewPlan(int? version = null) => Current().TemplateId == MissionReactTemplate.Id
+            ? plans.GetStaticAsync(id, token, version) : plans.GetAsync(id, token, version);
         async Task RequireCleanReactSources(IReadOnlyList<GeneratedFile> files)
         {
             var expected = Current().Workflow!.Plan!.Files.Select(file => file.Path).ToHashSet(StringComparer.Ordinal);

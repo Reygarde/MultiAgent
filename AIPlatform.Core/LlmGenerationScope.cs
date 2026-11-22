@@ -3,22 +3,39 @@ namespace AIPlatform.Core;
 /// <summary>Propagates one mission's durable reservation boundary through asynchronous agent calls.</summary>
 public sealed class LlmGenerationScope : IDisposable
 {
-    private sealed record Context(Action<LlmRequest, string> Reserve, string Role);
+    private sealed record Context(Action<LlmRequest, string, Guid> Reserve,
+        Action<Guid, bool> RecordDelivery, string Role);
     private static readonly AsyncLocal<Context?> Current = new();
     private readonly Context? previous = Current.Value;
 
-    public LlmGenerationScope(Action<LlmRequest, string> reserve, string role) =>
-        Current.Value = new(reserve, role);
+    public LlmGenerationScope(Action<LlmRequest, string, Guid> reserve,
+        Action<Guid, bool> recordDelivery, string role) =>
+        Current.Value = new(reserve, recordDelivery, role);
 
     private LlmGenerationScope(string role) =>
         Current.Value = previous is null ? null : previous with { Role = role };
 
     public static IDisposable ForRole(string role) => new LlmGenerationScope(role);
 
-    public static void Reserve(LlmRequest request, CancellationToken token)
+    public static Guid? Reserve(LlmRequest request, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (Current.Value is { } context) context.Reserve(request, context.Role);
+        if (Current.Value is not { } context) return null;
+        var reservationId = Guid.NewGuid();
+        context.Reserve(request, context.Role, reservationId);
+        return reservationId;
+    }
+
+    public static void MarkRequestMayHaveBeenSent(Guid? reservationId) =>
+        RecordDelivery(reservationId, true);
+
+    public static void MarkRequestDefinitelyNotSent(Guid? reservationId) =>
+        RecordDelivery(reservationId, false);
+
+    private static void RecordDelivery(Guid? reservationId, bool mayHaveBeenSent)
+    {
+        if (reservationId is { } id && Current.Value is { } context)
+            context.RecordDelivery(id, mayHaveBeenSent);
     }
 
     public void Dispose() => Current.Value = previous;

@@ -8,6 +8,9 @@ POST {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/prepare
 ### Read the latest technical report (null when no run exists)
 GET {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/report
 
+### Read technical validation history without starting a validation
+GET {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/reports
+
 ### Denial example: returns 409 and does not run Docker
 POST {{baseUrl}}/api/missions/{{mission}}/react-revision-validation/authorize
 Content-Type: application/json

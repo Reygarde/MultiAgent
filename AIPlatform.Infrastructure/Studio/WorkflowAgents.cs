@@ -76,7 +76,16 @@ public sealed class WorkflowAgents(ILLMProviderResolver providers, StudioOptions
                   """{"criterionId":"C1","paths":["src/App.tsx","src/App.test.tsx"],"explanation":"Implementer le comportement demande et le verifier par un test de composant cible."} """ +
                   "Return the complete plan object matching the supplied response schema; criterionCoverage is an array of such entries, " +
                   "not a replacement for the complete plan. Before responding, check implementation AND test coverage for EVERY criterion; " +
-                  "coverage is a plan declaration, not proof of implementation or execution. No new dependencies or configuration. " +
+                  "coverage is a plan declaration, not proof of implementation or execution. " +
+                  "List every scaffold package used in the dependencies field; only package names in that field's schema enum " +
+                  "are available, and no new packages, installs, versions or configuration are supported. " +
+                  $"Exact allowed npm package names: {string.Join(", ", MissionReactTemplate.AllowedDependencies)}. " +
+                  "dependencies contains npm packages; files[].dependsOn contains only exact paths of OTHER files declared in files. " +
+                  "Never put npm packages in files[].dependsOn. A file without internal file dependencies uses []. " +
+                  "Minimal valid plan example for one supplied criterion (adapt name, behaviors and coverage to the actual request): " +
+                  """{"name":"Counter","description":"Simple counter","decisions":["Use the locked scaffold and Vitest"],"dependencies":["react","vitest","@testing-library/react"],"files":[{"path":"src/App.tsx","purpose":"Counter component","dependsOn":[]},{"path":"src/App.test.tsx","purpose":"Counter component tests","dependsOn":["src/App.tsx"]}],"criterionCoverage":[{"criterionId":"C1","paths":["src/App.tsx","src/App.test.tsx"],"explanation":"Implement and test the requested counter behavior."}]} """ +
+                  "Tests use Vitest, not Jest; do not propose Jest APIs/imports or jest-dom/extend-expect. " +
+                  "Use the scaffold's @testing-library/jest-dom/vitest integration where DOM matchers are needed. " +
                   "Business test titles must include the corresponding criterion ID in brackets, e.g. [C1]. French summaries."
                 : mission.TemplateId == FullStackTemplate.Id
                 ? "Plan a full-stack React + ASP.NET Core .NET 10 application. The system supplies one immutable OpenAPI contract " +
@@ -132,7 +141,13 @@ public sealed class WorkflowAgents(ILLMProviderResolver providers, StudioOptions
                 result = result with { Files = TwitchTemplate.PlannedFiles };
             if (mission.TemplateId == FullStackTemplate.Id)
                 result = result with { Files = FullStackTemplate.PlannedFiles };
-            if (genericReact) result = MissionReactTemplate.Prepare(result, mission);
+            if (genericReact)
+            {
+                result = MissionReactTemplate.NormalizePlanDependencies(result, out var normalizations);
+                if (normalizations.Count > 0 && plannerContext is not null)
+                    diagnostics.RecordPlannerNormalizations(plannerContext, normalizations);
+                result = MissionReactTemplate.Prepare(result, mission);
+            }
             ValidatePlan(result, mission.TemplateId, mission.Sizing);
             if (plannerContext is not null) diagnostics.FinishPlanner(plannerContext, "Accepted", []);
             return result;
@@ -280,6 +295,10 @@ public sealed class WorkflowAgents(ILLMProviderResolver providers, StudioOptions
               Corrections must be minimal and preserve existing business tests and behavior; never weaken assertions.
               No new packages, commands, secrets, @ts-ignore, @ts-nocheck, eval or markdown fences.
               Output only the authorized file, concise but complete; avoid redundant comments or repeated markup.
+              src/App.tsx contains only the React application component and its exports: no Vitest, Testing Library,
+              test declarations or embedded tests. src/App.test.tsx contains only Vitest tests, imports the real
+              default App from './App', and renders that imported App. Never redefine or copy App in tests.
+              Each file must implement its own role; do not repeat the application component in the test file.
               """
             : mission.TemplateId == FullStackTemplate.Id
             ? """

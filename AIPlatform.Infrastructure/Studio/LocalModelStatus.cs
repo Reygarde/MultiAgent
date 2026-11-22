@@ -21,11 +21,16 @@ public sealed class LocalModelStatus(
             if (tags?.Models is null || running?.Models is null)
                 return new(false, "Ollama returned incomplete model telemetry.", []);
             var active = providers.OfType<OllamaProvider>().Select(provider => provider.ActiveModel).ToHashSet();
-            return new(true, null, registry.Models.Select(model => new LocalModelState(
-                model.Name,
-                tags.Models.Any(local => local.Name == model.Name),
-                running.Models.Any(local => local.Name == model.Name),
-                active.Contains(model.Name))).ToArray());
+            var models = registry.Models.Select(model => model.Name)
+                .Concat(tags.Models.Select(local => local.Name))
+                .Concat(running.Models.Select(local => local.Name))
+                .Distinct(StringComparer.Ordinal)
+                .Select(name => new LocalModelState(
+                    name,
+                    tags.Models.Any(local => local.Name == name),
+                    running.Models.Any(local => local.Name == name),
+                    active.Contains(name))).ToArray();
+            return new(true, null, models);
         }
         catch (Exception exception) when (exception is HttpRequestException or JsonException or IOException)
         {

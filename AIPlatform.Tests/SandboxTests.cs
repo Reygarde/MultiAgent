@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using AIPlatform.API.Services;
 using AIPlatform.Core.Studio;
 using AIPlatform.Infrastructure.Studio;
 
@@ -37,6 +38,23 @@ public sealed class SandboxTests
         var runner = new DockerSandboxRunner(new() { Enabled = true }, fixture.Workspaces, process);
         Assert.False((await runner.GetAvailabilityAsync(CancellationToken.None)).Available);
         Assert.DoesNotContain(process.Calls, arguments => arguments.Contains("pull") || arguments.Contains("run"));
+    }
+
+    [Fact]
+    public async Task UnverifiedManifestIsNotReportedAsAnImageMismatch()
+    {
+        using var fixture = new StudioFixture();
+        var imageId = "sha256:" + new string('a', 64);
+        var process = new ProcessStub((arguments, _) => Task.FromResult(arguments[0] == "info"
+            ? new ContainerProcessResult(0, "linux\n") : new(0, imageId)));
+        var runner = new DockerSandboxRunner(new() { Enabled = true }, fixture.Workspaces, process,
+            imageTrust: new SandboxImageCatalog());
+
+        var result = await runner.GetAvailabilityAsync(CancellationToken.None);
+
+        Assert.False(result.Available);
+        Assert.Contains("manifest has not been verified", result.Reason);
+        Assert.DoesNotContain(process.Calls, arguments => arguments[0] == "run");
     }
 
     [Fact]

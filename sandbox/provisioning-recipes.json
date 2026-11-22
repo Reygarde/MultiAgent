@@ -1,0 +1,84 @@
+{
+  "formatVersion": 1,
+  "packageVersion": "1.0.0",
+  "platform": "windows-x64",
+  "archiveFile": "aiplatform-sandbox-images-1.0.0.tar",
+  "images": [
+    {
+      "imageReference": "aiplatform-sandbox:net10",
+      "version": "net10-v1",
+      "dockerfile": "Dockerfile",
+      "buildContext": ".",
+      "sourceFingerprint": "c9f3eaa9d8179c9a08e64cc5e01323a13c7eb53f7167102c4106d77afb689d3e",
+      "templates": ["dotnet", "twitch"],
+      "dependencies": [".NET SDK 10.0", "xUnit 2.9.3", "Microsoft.NET.Test.Sdk 17.14.1"],
+      "sourceFiles": ["sandbox/.dockerignore", "sandbox/Dockerfile", "sandbox/SandboxPackages.csproj"],
+      "pullPinnedBase": true
+    },
+    {
+      "imageReference": "aiplatform-sandbox:discord-net10",
+      "version": "discord-net10-v1",
+      "dockerfile": "Discord.Dockerfile",
+      "buildContext": ".",
+      "sourceFingerprint": "b2aee68b8a064d285dfbb08e237ee8e6809302b121fe6edc93bba2a0f187ca54",
+      "templates": ["discord"],
+      "dependencies": [".NET SDK 10.0", "Discord.Net 3.20.2", "xUnit 2.9.3"],
+      "sourceFiles": [
+        "sandbox/.dockerignore", "sandbox/Dockerfile", "sandbox/SandboxPackages.csproj",
+        "sandbox/Discord.Dockerfile", "sandbox/DiscordSandboxPackages.csproj", "sandbox/DiscordNuGet.Config"
+      ],
+      "pullPinnedBase": false
+    },
+    {
+      "imageReference": "aiplatform-react-sandbox:1.0.0",
+      "version": "react-v1",
+      "dockerfile": "react/Dockerfile",
+      "buildContext": "react",
+      "sourceFingerprint": "75dce199a7a367d1998d19011d34463cb5f7ec1ebbd9eef59c291affc793c167",
+      "templates": ["react", "fullstack"],
+      "dependencies": ["Node.js 22", "React/Vite/Vitest package-lock"],
+      "sourceFiles": [
+        "sandbox/react/.dockerignore", "sandbox/react/Dockerfile",
+        "sandbox/react/package.json", "sandbox/react/package-lock.json"
+      ],
+      "pullPinnedBase": true
+    },
+    {
+      "imageReference": "aiplatform-fullstack-sandbox:1.0.0",
+      "version": "fullstack-v2",
+      "dockerfile": "FullStack.Dockerfile",
+      "buildContext": ".",
+      "sourceFingerprint": "67c5216f1b15857f3cf5b2e2730c000338b79090db0f5b4651e8694dc0d1abcb",
+      "templates": ["fullstack"],
+      "dependencies": [".NET SDK 10.0", "Node.js 22", "SQLite 10.0.15", "pinned NuGet packages"],
+      "sourceFiles": [
+        "sandbox/.dockerignore", "sandbox/Dockerfile", "sandbox/SandboxPackages.csproj",
+        "sandbox/react/.dockerignore", "sandbox/react/Dockerfile", "sandbox/react/package.json",
+        "sandbox/react/package-lock.json", "sandbox/FullStack.Dockerfile",
+        "sandbox/FullStackSandboxPackages.csproj", "sandbox/FullStackNuGet.Config",
+        "sandbox/FullStackRestore.sh", "sandbox/packages.lock.json",
+        "sandbox/fullstack-feed/SHA512SUMS",
+        "sandbox/fullstack-feed/microsoft.codecoverage.17.14.1.nupkg",
+        "sandbox/fullstack-feed/microsoft.data.sqlite.10.0.15.nupkg",
+        "sandbox/fullstack-feed/microsoft.data.sqlite.core.10.0.15.nupkg",
+        "sandbox/fullstack-feed/microsoft.net.test.sdk.17.14.1.nupkg",
+        "sandbox/fullstack-feed/microsoft.testplatform.objectmodel.17.14.1.nupkg",
+        "sandbox/fullstack-feed/microsoft.testplatform.testhost.17.14.1.nupkg",
+        "sandbox/fullstack-feed/newtonsoft.json.13.0.3.nupkg",
+        "sandbox/fullstack-feed/sqlitepclraw.bundle_e_sqlite3.2.1.13.nupkg",
+        "sandbox/fullstack-feed/sqlitepclraw.core.2.1.13.nupkg",
+        "sandbox/fullstack-feed/sqlitepclraw.lib.e_sqlite3.2.1.13.nupkg",
+        "sandbox/fullstack-feed/sqlitepclraw.provider.e_sqlite3.2.1.13.nupkg",
+        "sandbox/fullstack-feed/xunit.2.9.3.nupkg",
+        "sandbox/fullstack-feed/xunit.abstractions.2.0.3.nupkg",
+        "sandbox/fullstack-feed/xunit.analyzers.1.18.0.nupkg",
+        "sandbox/fullstack-feed/xunit.assert.2.9.3.nupkg",
+        "sandbox/fullstack-feed/xunit.core.2.9.3.nupkg",
+        "sandbox/fullstack-feed/xunit.extensibility.core.2.9.3.nupkg",
+        "sandbox/fullstack-feed/xunit.extensibility.execution.2.9.3.nupkg",
+        "sandbox/fullstack-feed/xunit.runner.visualstudio.3.1.4.nupkg"
+      ],
+      "pullPinnedBase": false
+    }
+  ]
+}

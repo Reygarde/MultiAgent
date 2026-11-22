@@ -832,7 +832,7 @@ internal sealed class WorkflowFixture : IDisposable
 
     public WorkflowFixture(bool available = true, int corrections = 3,
         Func<LlmRequest, string>? responseOverride = null, bool fullStack = false, int maxOutputTokens = 2048,
-        IReactSourceCheck? sourceCheck = null, int contextSize = 8192)
+        IReactSourceCheck? sourceCheck = null, int contextSize = 8192, int developerPromptPadding = 0)
     {
         Options = new() { DataDirectory = Path.Combine(Path.GetTempPath(), "AIPlatform-workflow-" + Guid.NewGuid().ToString("N")),
             CollaborativeWorkflows = true, MaxCorrectionAttempts = corrections, DefaultMaxTotalGenerations = 100 };
@@ -843,7 +843,8 @@ internal sealed class WorkflowFixture : IDisposable
         {
             Models = original.Models.Select(model => model with { ContextSize = contextSize, MaxOutputTokens = maxOutputTokens }).ToList(),
             Agents = [.. original.Agents.Select(agent => agent.Id == "DeveloperAgent"
-                ? agent with { Role = "Developer", AllowedTools = ["GenerateFiles"], TaskTypes = ["Chat", "Project"] } : agent),
+                ? agent with { Role = "Developer", SystemPrompt = agent.SystemPrompt + new string('x', developerPromptPadding),
+                    AllowedTools = ["GenerateFiles"], TaskTypes = ["Chat", "Project"] } : agent),
                 .. workflowRoles.Select(role => new AgentDefinition
                 {
                     Id = role + "Agent", Role = role, Description = role, SystemPrompt = role,

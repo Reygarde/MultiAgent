@@ -25,6 +25,8 @@ export function MissionDetails({ mission, cancel, busy, refresh, openProject }: 
 }) {
   const [resumeError, setResumeError] = useState<string | null>(null)
   const [resuming, setResuming] = useState(false)
+  const [resumeEligibility, setResumeEligibility] = useState<{ available: boolean; reason: string } | null>(null)
+  const [confirmResume, setConfirmResume] = useState(false)
   const [reviewerResumeEligibility, setReviewerResumeEligibility] =
     useState<ReviewerCorrectionResumeEligibility | null>(null)
   const [reviewerResumeError, setReviewerResumeError] = useState<string | null>(null)
@@ -33,8 +35,24 @@ export function MissionDetails({ mission, cancel, busy, refresh, openProject }: 
     mission.workflow?.steps.some(step => step.kind === 'Review' && step.status === 'Failed') === true
   const canRevalidate = mission.status === 'GeneratedUnverified' && mission.templateId === 'fullstack-react-dotnet' &&
     mission.workflow?.review != null && !mission.workflow.review.findings.some(finding => finding.severity === 'Error')
+  const canCheckResume = !!mission.workflow && !isActive(mission) && !mission.deleted &&
+    !['Verified', 'Completed'].includes(mission.status) &&
+    (!mission.workflow.requirePlanApproval || !mission.workflow.plan || mission.workflow.planApproval?.approved === true)
   const finishedAt = missionFinishedAt(mission)
   const duration = formatMissionDuration(mission.createdAt, finishedAt)
+  useEffect(() => {
+    let active = true
+    setResumeEligibility(null)
+    setResumeError(null)
+    setConfirmResume(false)
+    if (!canCheckResume || canRevalidate) return () => { active = false }
+    void api.resumeEligibility(mission.id).then(result => {
+      if (active) setResumeEligibility(result)
+    }).catch(error => {
+      if (active) setResumeError(errorMessage(error))
+    })
+    return () => { active = false }
+  }, [canCheckResume, canRevalidate, mission.id, mission.updatedAt])
   useEffect(() => {
     let active = true
     setReviewerResumeEligibility(null)
@@ -106,24 +124,30 @@ export function MissionDetails({ mission, cancel, busy, refresh, openProject }: 
       <Approval key={`${mission.id}:${mission.workflow?.version ?? 'legacy'}`} id={mission.id} refresh={refresh} />}
     {mission.status === 'AwaitingPlanApproval' &&
       <PlanApproval key={`${mission.id}:${mission.workflow?.planApproval?.fingerprint}`} mission={mission} refresh={refresh} />}
-    {mission.templateId === 'react-typescript-vite-v2' && !mission.deleted && mission.hasWorkspace &&
+    {mission.templateId === 'react-typescript-vite-v2' && !mission.deleted &&
       !!mission.workflow?.revisions.length &&
-      <ReactRevisionValidation key={mission.id} id={mission.id} canPrepare={!isActive(mission)}
+      <ReactRevisionValidation key={mission.id} id={mission.id} canPrepare={!isActive(mission) && mission.hasWorkspace}
         currentRevision={mission.workflow?.revisions.at(-1)?.fingerprint} onPublished={refresh} />}
     {mission.workflow && <section aria-label="Workflow collaboratif">
       <h3>Workflow · version {mission.workflow.version}</h3>
+      <p>Statut du workflow : {statusLabels[mission.status]} ({mission.status})</p>
+      {(mission.workflow.pendingSoftwareAgentCall || mission.workflow.pendingSoftwareCallDeliveryState === 'MayHaveBeenSent') &&
+        <p role="status">Opération en cours ou résultat à clarifier :
+        {' '}{mission.workflow.pendingSoftwareAgentCall ?? 'identifiant indisponible'}
+        {mission.workflow.pendingSoftwareCallDeliveryState && ` · ${mission.workflow.pendingSoftwareCallDeliveryState}`}.
+        Un appel ambigu ne sera pas rejoué automatiquement.</p>}
       {mission.workflow.automaticReactCorrections && <section aria-label="Corrections logicielles autonomes">
         <h4>Corrections logicielles autonomes</h4>
         <p>AST puis Developer et réévaluation Reviewer ; limite partagée : {mission.workflow.correctionLimit ?? 'non renseignée'}.
           Aucune exécution du projet sur l’hôte.</p>
-        {mission.workflow.pendingSoftwareAgentCall && <p role="status">Opération en cours ou résultat à clarifier :
-          {' '}{mission.workflow.pendingSoftwareAgentCall}. Un appel ambigu ne sera pas rejoué automatiquement.</p>}
         {mission.workflow.softwareCorrections?.map(correction => <article key={correction.id}>
           <p>{correction.trigger} · {correction.completedGroups}/{correction.totalGroups} groupes Developer contrôlés
             {' · '}{correction.reviewerCapacity} appels Reviewer prévus.</p>
           <p>{correction.inFlight ? 'Correction en cours ou interrompue sans résultat confirmé.'
             : correction.ready ? 'Candidat statiquement contrôlé ; ce n’est pas une preuve d’exécution.'
               : 'Préparation ou reprise du candidat isolé.'}</p>
+          {correction.callState === 'MayHaveBeenSent' && <p role="status">Appel Developer ambigu : MayHaveBeenSent.
+            Aucun rejeu automatique.</p>}
           <p>{correction.reason}</p>
           {correction.failure && <p role="alert">Correction refusée : {correction.failure}</p>}
           <ul>{correction.decisions.map((decision, index) => <li key={index}>{decision}</li>)}</ul>
@@ -131,9 +155,9 @@ export function MissionDetails({ mission, cancel, busy, refresh, openProject }: 
         <p>{mission.status === 'AwaitingApproval' ? 'Décision requise : autoriser Docker pour cette révision et son empreinte.'
           : mission.status === 'AwaitingPlanApproval' ? 'Décision requise : approuver le plan avant Developer.'
             : mission.error ?? mission.workflow.finalReport ?? 'Les étapes logicielles autorisées s’enchaînent automatiquement.'}</p>
-        <p>Validations réellement exécutées : {mission.verification.length
+        <p>Validations enregistrées dans le workflow : {mission.verification.length
           ? mission.verification.map(result => `${result.stage} : ${result.status}`).join(' · ')
-          : 'aucune compilation ni aucun test du projet exécuté.'}</p>
+          : 'aucune compilation ni aucun test du projet enregistré dans le workflow ; voir la validation indépendante.'}</p>
       </section>}
       <p>Sélection des modèles : {mission.workflow.automaticModelSelection ? 'automatique (heuristique)' : 'manuelle'}</p>
       {!!mission.workflow.executionPlanDifferences?.length && <section aria-label="Différences du plan d’exécution">
@@ -233,14 +257,30 @@ export function MissionDetails({ mission, cancel, busy, refresh, openProject }: 
               setReviewerResumeError(errorMessage(error))).finally(() => setResumingReviewer(false))
           }}>{resumingReviewer ? 'Mise en file…' : 'Reprendre la correction Reviewer'}</button>}
       </section>}
-      {!isActive(mission) && !mission.deleted && !['Verified', 'Completed'].includes(mission.status) &&
-        (!mission.workflow.requirePlanApproval || !mission.workflow.plan || mission.workflow.planApproval?.approved === true) &&
+      {canCheckResume &&
         !reviewerResumeEligibility?.available && !reviewerResumeEligibility?.inProgress &&
-        <button className="button secondary full" disabled={resuming} onClick={() => {
-          setResuming(true); setResumeError(null)
-          const prepare = canRevalidate ? api.revalidate(mission.id) : api.resume(mission.id)
-          void prepare.then(refresh).catch(error => setResumeError(errorMessage(error))).finally(() => setResuming(false))
-        }}>{canRevalidate ? 'Préparer une nouvelle validation · sans régénération' : 'Reprendre · nouvelle autorisation requise'}</button>}
+        <section aria-label="Reprise de mission">
+          {!canRevalidate && <p role="status">{resumeEligibility?.reason ??
+            (resumeError ? 'Éligibilité indisponible : la reprise reste désactivée.' : 'Vérification de la reprise sûre…')}</p>}
+          <button className="button secondary full" disabled={busy || resuming || (!canRevalidate && !resumeEligibility?.available)}
+            onClick={() => {
+              if (!canRevalidate) { setConfirmResume(true); return }
+              setResuming(true); setResumeError(null)
+              void api.revalidate(mission.id).then(refresh).catch(error => setResumeError(errorMessage(error)))
+                .finally(() => setResuming(false))
+            }}>{canRevalidate ? 'Préparer une nouvelle validation · sans régénération' : 'Reprendre · nouvelle autorisation requise'}</button>
+          {confirmResume && resumeEligibility?.available && <div className="notice warning">
+            <p>La reprise peut lancer des agents et consommer des générations. Les anciens accords d'exécution sont abandonnés ;
+              Docker nécessite une nouvelle autorisation distincte.</p>
+            <button disabled={busy || resuming} onClick={() => {
+              setResuming(true); setResumeError(null)
+              void api.resume(mission.id).then(refresh).catch(error => {
+                setResumeError(errorMessage(error)); setResumeEligibility(null); setConfirmResume(false)
+              }).finally(() => setResuming(false))
+            }}>Confirmer la reprise de la mission</button>
+            <button disabled={resuming} onClick={() => setConfirmResume(false)}>Annuler</button>
+          </div>}
+        </section>}
       {resumeError && <p role="alert" className="notice danger">{resumeError}</p>}
     </section>}
     <Chronology mission={mission} />
@@ -364,6 +404,9 @@ function PlannerDiagnostics({ mission }: { mission: Mission }) {
       <p>Mission {attempt.missionId} · run {attempt.runId} · tentative {attempt.attemptId}</p>
       <p>Résultat structuré non exécutable :</p><pre>{JSON.stringify(attempt.plan, null, 2)}</pre>
       <ul>{attempt.criteria.map(criterion => <li key={criterion.id}>{criterion.id} : {criterion.requirement}</li>)}</ul>
+      {attempt.dependencyNormalizations?.map((item, index) => <p key={`normalization-${index}`}>
+        Normalisation déterministe · {item.path} · champ {item.field} : package npm {item.package} retiré des dépendances internes.
+      </p>)}
       {attempt.errors.map((item, index) => <p key={index}>
         {item.criterionId ?? 'Plan'} · {item.rule} · champ {item.field}{item.path && ` · ${item.path}`} : {item.explanation}
       </p>)}

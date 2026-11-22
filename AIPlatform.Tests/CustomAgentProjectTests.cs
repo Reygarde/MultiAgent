@@ -2278,6 +2278,8 @@ internal sealed class FakeLocalCommandExecutor(
     public LocalApplicationSnapshot GetApplication(Guid workspaceId, CustomAgentProjectType projectType) =>
         new(workspaceId, "Stopped", null, null, [], null, null, DateTimeOffset.UtcNow);
 
+    public IReadOnlyList<LocalApplicationSnapshot> GetRunningApplications() => [];
+
     public Task<LocalApplicationSnapshot> StartApplicationAsync(
         Guid workspaceId, CustomAgentProjectType projectType, bool executionAuthorized,
         CancellationToken cancellationToken) =>

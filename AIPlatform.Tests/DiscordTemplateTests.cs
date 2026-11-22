@@ -64,12 +64,16 @@ public sealed class DiscordTemplateTests
         fixture.Workspaces.Create(mission.Id);
         await fixture.Workspaces.WriteAsync(mission.Id, DiscordTemplate.Files, default, DiscordTemplate.Id);
         var process = new ImageProcess();
-        var service = new ExecutionPlanService(fixture.Workspaces, new(), fixture.Options, fixture.Store, process);
+        var service = new ExecutionPlanService(fixture.Workspaces,
+            new SandboxOptions { Enabled = true }, fixture.Options, fixture.Store, process);
         var first = await service.GetAsync(mission.Id, default);
         Assert.Equal("sha256:" + new string('a', 64), first.Image);
         Assert.Contains(first.Operations, operation => operation.Contains("Discord.Net.WebSocket 3.20.2"));
+        Assert.Single(process.Calls, arguments => arguments[0] == "image" && arguments[1] == "inspect");
         process.ImageId = "sha256:" + new string('b', 64);
         var second = await service.GetAsync(mission.Id, default);
+        Assert.Equal(2, process.Calls.Count(arguments => arguments[0] == "image" && arguments[1] == "inspect"));
+        Assert.Equal("sha256:" + new string('b', 64), second.Image);
         Assert.NotEqual(first.Fingerprint, second.Fingerprint);
     }
 

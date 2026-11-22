@@ -12,7 +12,7 @@ function walk(node, visit) {
   ts.forEachChild(node, child => walk(child, visit))
 }
 
-export function repairReactSources({ files, allowedPaths, trustedSetup }) {
+export function repairReactSources({ files, allowedPaths, trustedSetup, templateId }) {
   const allowed = new Set(allowedPaths)
   for (const name of allowed) {
     if (!name.startsWith('src/') || !/\.tsx?$/.test(name) || name.includes('\\') ||
@@ -30,7 +30,8 @@ export function repairReactSources({ files, allowedPaths, trustedSetup }) {
     getSourceFile: (file, version) => contents.has(file) ? ts.createSourceFile(file, contents.get(file), version, true) : undefined }
   const program = ts.createProgram([...contents.keys()].filter(file => /\.tsx?$/.test(file)), options, host)
   const checker = program.getTypeChecker()
-  const before = checkReactSources(files), edits = [], refusals = []
+  const checkOptions = { missionReactV2: templateId === 'react-typescript-vite-v2' }
+  const before = checkReactSources(files, checkOptions), edits = [], refusals = []
   function typeOnly(file, specifier) {
     const symbol = checker.getSymbolAtLocation(specifier.name)
     if (!symbol) return false
@@ -52,6 +53,10 @@ export function repairReactSources({ files, allowedPaths, trustedSetup }) {
     if (!allowed.has(source.path)) return { ...source }
     const issues = before.filter(issue => issue.file === source.path)
     if (!issues.length) return { ...source }
+    if (issues.some(issue => /^(?:REACT_APP_TEST_|REACT_TEST_APP_|REACT_DUPLICATE_APPLICATION)/.test(issue.code))) {
+      refusals.push({ file: source.path, reason: 'Application/test role violations require a Developer correction; no AST transformation applied.' })
+      return { ...source }
+    }
     const file = program.getSourceFile('/' + source.path)
     if (program.getSyntacticDiagnostics(file).length) {
       refusals.push({ file: source.path, reason: 'Syntax recovery is ambiguous; no AST transformation applied.' })
@@ -136,7 +141,7 @@ export function repairReactSources({ files, allowedPaths, trustedSetup }) {
     for (const edit of edits.filter(edit => edit.file === source.path)) edit.candidateSha256 = hash(content)
     return { ...source, content }
   })
-  const issues = checkReactSources(candidate), known = new Set(before.map(signature))
+  const issues = checkReactSources(candidate, checkOptions), known = new Set(before.map(signature))
   if (issues.some(issue => !known.has(signature(issue)))) throw Error('AST edits introduced a new diagnostic; candidate rejected')
   return { files: candidate, before, issues, edits, refusals }
 }

@@ -29,3 +29,4 @@ TestResults/
 *.log
 coverage/
 sandbox/fullstack-feed/
+**/src-tauri/resources/sandbox-provisioning/*.tar

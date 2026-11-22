@@ -13,6 +13,7 @@ public sealed record LlmRequest(
     LlmDiagnosticContext? DiagnosticContext = null)
 {
     public bool RequireAutomaticAdmissibility { get; init; }
+    public Guid? CallId { get; init; }
 }
 
 public interface ILLMProvider

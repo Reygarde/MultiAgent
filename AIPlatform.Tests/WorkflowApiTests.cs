@@ -16,6 +16,114 @@ namespace AIPlatform.Tests;
 public sealed class WorkflowApiTests
 {
     [Fact]
+    public async Task ValidationHistoryEndpointReadsLegacyReportWithoutResumingCancelledWorkflow()
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<MissionStore>();
+        var mission = store.Submit(new("Display initial value 0", MissionKind.Project,
+            TemplateId: MissionReactTemplate.Id, MaxTotalGenerations: 12));
+        store.Update(mission.Id, item => item with
+        {
+            Status = MissionStatus.Cancelled, Workflow = item.Workflow! with
+            {
+                Version = 2, PendingSoftwareAgentCall = "resume-review-8",
+                PendingSoftwareCallDeliveryState = SoftwareAgentCallDeliveryState.MayHaveBeenSent,
+                SoftwareCorrections = [new ReactSoftwareCorrection(Guid.NewGuid(), "correction", "pending", [], [], [], 0, [])
+                { CallState = ReactSoftwareCorrectionCallState.MayHaveBeenSent }]
+            }
+        });
+        var plan = new ReactRevisionValidationPlan(mission.Id, 1, "revision", 13, ReactTemplate.Image,
+            "sha256:" + new string('a', 64), 120, [], "plan");
+        var report = new ReactRevisionValidationReport(Guid.NewGuid(), plan, "Succeeded", DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow, [new("Tests", "Succeeded", 0, "", 5, FailedTests: 0)]);
+        var path = Path.Combine(fixture.Options.DataDirectory, "react-revision-validation", $"{mission.Id:N}.json");
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(report, new JsonSerializerOptions(JsonSerializerDefaults.Web)));
+        var missionPath = Path.Combine(fixture.Options.DataDirectory, "missions", $"{mission.Id:N}.json");
+        var before = File.ReadAllBytes(missionPath);
+        var response = await client.GetAsync($"/api/missions/{mission.Id}/react-revision-validation/reports");
+        response.EnsureSuccessStatusCode();
+        var result = (await response.Content.ReadFromJsonAsync<ReactRevisionValidationReportsResponse>())!;
+        Assert.Equal(report.RunId, Assert.Single(result.Reports).RunId);
+        Assert.Equal("Succeeded", result.Reports[0].Status);
+        var savedMission = (await client.GetFromJsonAsync<MissionResponse>($"/api/missions/{mission.Id}", JsonOptions))!;
+        Assert.Equal(MissionStatus.Cancelled, savedMission.Status);
+        Assert.Equal(SoftwareAgentCallDeliveryState.MayHaveBeenSent, savedMission.Workflow!.PendingSoftwareCallDeliveryState);
+        Assert.Equal(ReactSoftwareCorrectionCallState.MayHaveBeenSent, Assert.Single(savedMission.Workflow.SoftwareCorrections!).CallState);
+        Assert.Equal(HttpStatusCode.NotFound,
+            (await client.GetAsync($"/api/missions/{Guid.NewGuid()}/react-revision-validation/reports")).StatusCode);
+        Assert.Equal(before, File.ReadAllBytes(missionPath));
+        Assert.Empty(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task RestartedMissionReportsAndEnforcesOllamaDeliveryEvidence(bool mayHaveBeenSent)
+    {
+        using var fixture = new WorkflowFixture();
+        using var factory = Factory(fixture).WithWebHostBuilder(builder => builder.ConfigureServices(services =>
+            services.RemoveAll<Microsoft.Extensions.Hosting.IHostedService>()));
+        using var client = factory.CreateClient();
+        var store = factory.Services.GetRequiredService<MissionStore>();
+        var mission = store.Submit(new("Display initial value 0", MissionKind.Project,
+            TemplateId: MissionReactTemplate.Id, MaxTotalGenerations: 12, AutomaticReactCorrections: true));
+        store.Update(mission.Id, item => item with
+        {
+            Status = MissionStatus.Running,
+            SandboxApproved = true,
+            ApprovalFingerprint = "old-approval",
+            Workflow = item.Workflow! with
+            {
+                PendingSoftwareAgentCall = "plan",
+                PendingSoftwareReservationCount = item.GenerationReservations!.Count,
+                Steps = item.Workflow.Steps.Select(step => step.Kind == "Plan"
+                    ? step with { Status = WorkflowStatus.Running } : step).ToArray()
+            }
+        });
+        using (store.EnterGenerationScope(mission.Id, "Planner"))
+        {
+            var reservation = LlmGenerationScope.Reserve(TestSupport.Request(), CancellationToken.None);
+            if (mayHaveBeenSent) LlmGenerationScope.MarkRequestMayHaveBeenSent(reservation);
+            else LlmGenerationScope.MarkRequestDefinitelyNotSent(reservation);
+        }
+        using var restarted = new MissionStore(fixture.Options, fixture.Platform, fixture.Registry, fixture.Workspaces);
+        var interrupted = restarted.Get(mission.Id)!;
+        Assert.Equal(MissionStatus.Cancelled, interrupted.Status);
+        Assert.False(interrupted.SandboxApproved);
+        Assert.Null(interrupted.ApprovalFingerprint);
+        var path = Path.Combine(fixture.Options.DataDirectory, "missions", mission.Id.ToString("N") + ".json");
+        var saved = File.ReadAllBytes(path);
+        var eligibility = (await client.GetFromJsonAsync<MissionResumeEligibilityResponse>(
+            $"/api/missions/{mission.Id}/resume-eligibility"))!;
+        Assert.Equal(!mayHaveBeenSent, eligibility.Available);
+        Assert.Equal(saved, File.ReadAllBytes(path));
+        var response = await client.PostAsync($"/api/missions/{mission.Id}/resume", null);
+        if (mayHaveBeenSent)
+        {
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            var problem = await response.Content.ReadFromJsonAsync<JsonElement>();
+            Assert.Contains("peut avoir été envoyé", problem.GetProperty("detail").GetString());
+            Assert.Equal(saved, File.ReadAllBytes(path));
+        }
+        else
+        {
+            Assert.Equal(HttpStatusCode.Accepted, response.StatusCode);
+            var resumed = store.Get(mission.Id)!;
+            Assert.Equal(MissionStatus.Queued, resumed.Status);
+            Assert.Single(resumed.GenerationReservations!);
+            Assert.False(resumed.SandboxApproved);
+            Assert.Null(resumed.ApprovalFingerprint);
+        }
+        Assert.Empty(fixture.Provider.Requests);
+        Assert.Empty(fixture.Sandbox.Calls);
+    }
+
+    [Fact]
     public async Task SizingProfileIsSelectedByIdAndFrozenInTheHttpResponseWithoutCallingAModel()
     {
         using var fixture = new WorkflowFixture();

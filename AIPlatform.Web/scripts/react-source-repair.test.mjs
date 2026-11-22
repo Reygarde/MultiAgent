@@ -15,6 +15,18 @@ const files = sources => [
 const repair = (sources, allowedPaths = sources.filter(file => file.path.startsWith('src/')).map(file => file.path)) =>
   repairReactSources({ files: sources, allowedPaths, trustedSetup: setup })
 
+test('React v2 role violations are retained for Developer, never hidden by AST normalization', () => {
+  const content = "import '@testing-library/jest-dom/extend-expect'; import { test } from 'vitest'; " +
+    'export default function App() { return null } test("zero", () => {});'
+  const original = files({ 'App.tsx': content, 'App.test.tsx': content })
+  const result = repairReactSources({ files: original, allowedPaths: ['src/App.tsx', 'src/App.test.tsx'],
+    trustedSetup: setup, templateId: 'react-typescript-vite-v2' })
+  assert.deepEqual(result.files, original)
+  assert.equal(result.edits.length, 0)
+  assert.equal(result.refusals.length, 2)
+  assert.ok(result.issues.some(issue => issue.code === 'REACT_DUPLICATE_APPLICATION'))
+})
+
 test('stdio repair invokes only its own entrypoint, not the imported checker CLI', () => {
   const input = files({ 'View.test.tsx': 'const handler = jest.fn();' })
   const child = spawnSync(process.execPath, [fileURLToPath(new URL('./react-source-repair.mjs', import.meta.url)), '--stdio'],

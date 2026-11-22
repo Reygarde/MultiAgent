@@ -28,14 +28,14 @@ public sealed class ReactSourceCheck(string node, string helper) : IReactSourceC
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public async Task<IReadOnlyList<ReactSourceIssue>> CheckAsync(IReadOnlyList<GeneratedFile> files, CancellationToken token) =>
-        await RunAsync<ReactSourceIssue[]>(files, helper, token);
+        await RunAsync<ReactSourceIssue[]>(new { files, templateId = MissionReactTemplate.Id }, helper, token);
 
     public Task<ReactSourceRepairResult> RepairAsync(IReadOnlyList<GeneratedFile> files, IReadOnlyList<string> allowedPaths, CancellationToken token)
     {
         if (allowedPaths.Any(path => !MissionReactTemplate.IsEditable(path) || files.All(file => file.Path != path)))
             throw new StudioValidationException("AST repair targets must be existing editable React sources.");
         MissionReactTemplate.Validate(files);
-        return RunAsync<ReactSourceRepairResult>(new { files, allowedPaths,
+        return RunAsync<ReactSourceRepairResult>(new { files, allowedPaths, templateId = MissionReactTemplate.Id,
             trustedSetup = MissionReactTemplate.Files.Single(file => file.Path == "test-setup.ts").Content },
             Path.Combine(Path.GetDirectoryName(helper)!, "react-source-repair.mjs"), token);
     }

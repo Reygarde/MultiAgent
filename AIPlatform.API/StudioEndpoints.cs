@@ -123,12 +123,27 @@ public static class StudioEndpoints
         }).WithName("GetRevisionComparison").WithSummary("Compare revisions and correction proposals")
             .WithDescription("Returns changed files and their before/after content, including unapplied proposals; deleted projects return 404.");
 
-        app.MapPost("/api/missions/{id:guid}/resume", Results<Accepted, NotFound, Conflict> (
+        app.MapGet("/api/missions/{id:guid}/resume-eligibility",
+            Results<Ok<MissionResumeEligibilityResponse>, NotFound> (
+                Guid id, IMissionService missions, HttpResponse response, CancellationToken token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            response.Headers.CacheControl = "no-store";
+            var result = missions.GetResumeEligibility(id);
+            return result is null ? TypedResults.NotFound() :
+                TypedResults.Ok(new MissionResumeEligibilityResponse(result.Available, result.Reason));
+        }).WithName("GetMissionResumeEligibility")
+            .WithSummary("Check whether an interrupted mission can be safely resumed")
+            .WithDescription("Read-only assessment; no agent, reservation or generated code is started.");
+
+        app.MapPost("/api/missions/{id:guid}/resume", Results<Accepted, NotFound, ProblemHttpResult> (
             Guid id, IMissionService missions, CancellationToken token) =>
         {
             token.ThrowIfCancellationRequested();
-            if (missions.Get(id) is null) return TypedResults.NotFound();
-            return missions.Resume(id) ? TypedResults.Accepted($"/api/missions/{id}") : TypedResults.Conflict();
+            var result = missions.ResumeWithReason(id);
+            if (result is null) return TypedResults.NotFound();
+            return result.Available ? TypedResults.Accepted($"/api/missions/{id}") :
+                TypedResults.Problem(statusCode: 409, title: "Reprise indisponible", detail: result.Reason);
         }).WithName("ResumeMission").WithSummary("Explicitly resume an interrupted collaborative mission")
             .WithDescription("Retains prior results, discards prior approvals and rereviews existing files. Verified, deleted and legacy missions cannot resume.");
 
@@ -312,6 +327,11 @@ public static class StudioEndpoints
             if (mission.Status != MissionStatus.AwaitingApproval)
                 return TypedResults.Conflict();
             var plan = await plans.GetAsync(id, token);
+            if (mission.TemplateId == "react-typescript-vite-v2" &&
+                (mission.Workflow?.Revisions?.LastOrDefault() is not { PreparedExecutionPlan: { } prepared } revision ||
+                 revision.Version != mission.Workflow.Version || revision.ExecutionFingerprint != plan.Fingerprint ||
+                 prepared.ReactDescriptor?.CompareManifest(revision.Files).Count != 0))
+                return TypedResults.Conflict();
             if (mission.TemplateId == "fullstack-react-dotnet" &&
                 (mission.Workflow?.Revisions?.LastOrDefault() is not { ExecutionPlan: { } saved } ||
                  saved.Fingerprint != plan.Fingerprint || saved.Canonical?.WorkflowVersion != mission.Workflow.Version ||
@@ -347,7 +367,8 @@ public static class StudioEndpoints
                 return TypedResults.Conflict();
             if (request.Approved && mission.Workflow is { } flow &&
                 (flow.Revisions?.LastOrDefault() is not { } revision ||
-                 revision.Version != flow.Version || revision.Fingerprint != plan.Fingerprint))
+                 revision.Version != flow.Version ||
+                 (mission.TemplateId == "react-typescript-vite-v2" ? revision.ExecutionFingerprint : revision.Fingerprint) != plan.Fingerprint))
                 return TypedResults.Conflict();
             if (request.Approved && mission.TemplateId == "fullstack-react-dotnet" &&
                 (mission.Workflow?.Revisions?.LastOrDefault()?.ExecutionPlan is not { Canonical: { } canonical } saved ||

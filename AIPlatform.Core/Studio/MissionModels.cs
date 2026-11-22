@@ -17,7 +17,7 @@ public sealed record MissionSubmission(
 
 /// <summary>A durably reserved generation unit; never automatically refunded, including uncertain sends.</summary>
 public sealed record MissionGenerationReservation(Guid Id, string Role, string Model, DateTimeOffset ReservedAt,
-    Guid? CapacityId = null);
+    Guid? CapacityId = null, Guid? CallId = null);
 
 public sealed record MissionEvent(
     int Sequence, DateTimeOffset Timestamp, string Step, StepStatus Status, string Message, double? DurationMilliseconds = null);
@@ -161,12 +161,16 @@ public sealed record ExecutionPlan(
 public interface IExecutionPlanService
 {
     Task<ExecutionPlan> GetAsync(Guid id, CancellationToken cancellationToken, int? workflowVersion = null);
+    Task<ExecutionPlan> GetStaticAsync(Guid id, CancellationToken cancellationToken, int? workflowVersion = null)
+        => GetAsync(id, cancellationToken, workflowVersion);
 }
 public sealed record WorkspaceFile(string Path, long Size);
 public sealed record WorkspaceContent(string Path, string Content);
 public sealed record SandboxAvailability(bool Available, string Reason, bool EngineAvailable = false);
 public sealed record LocalModelState(string Name, bool Installed, bool Loaded, bool InUse);
 public sealed record LocalModelsSnapshot(bool Available, string? Error, IReadOnlyList<LocalModelState> Models);
+
+public sealed record MissionResumeEligibility(bool Available, string Reason);
 
 public interface IMissionService
 {
@@ -180,6 +184,8 @@ public interface IMissionService
     bool DecideApproval(Guid id, bool approved, string fingerprint);
     bool DecidePlanApproval(Guid id, bool approved, string fingerprint);
     bool Resume(Guid id);
+    MissionResumeEligibility? GetResumeEligibility(Guid id);
+    MissionResumeEligibility? ResumeWithReason(Guid id);
     bool PrepareRevalidation(Guid id, DateTimeOffset expectedUpdatedAt, ExecutionPlan plan);
     bool RenameProject(Guid id, string name, string description);
     bool DeleteProject(Guid id);
@@ -234,17 +240,24 @@ public interface ISandboxRunner
     Task<VerificationResult> RunAsync(Guid workspaceId, string stage, CancellationToken cancellationToken);
 }
 
+public interface ISandboxImageTrust
+{
+    string? GetExpectedImageId(string imageReference);
+    bool IsTrustedImage(string imageReference, string imageId);
+}
+
 public interface ILocalModelStatus
 {
     Task<LocalModelsSnapshot> GetAsync(CancellationToken cancellationToken);
 }
 
-public sealed class StudioValidationException(string message) : Exception(message)
+public class StudioValidationException(string message) : Exception(message)
 {
     public IReadOnlyList<PlannerValidationDiagnostic>? PlannerDiagnostics { get; init; }
     public IReadOnlyList<ReviewerValidationDiagnostic>? ReviewerDiagnostics { get; init; }
 }
 public sealed class StudioCapacityException(string message) : Exception(message);
+public sealed class SandboxPrerequisiteException(string message) : StudioValidationException(message);
 
 public sealed record StudioOptions
 {

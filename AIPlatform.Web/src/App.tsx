@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   Activity, ArrowRight, Bot, ChevronRight, CircleDot, Cpu, FolderOpen, Layers3,
-  LayoutDashboard, LoaderCircle, MessageSquare, Plus, Send, ShieldCheck, Sparkles, Workflow,
+  HardDrive, LayoutDashboard, LoaderCircle, MessageSquare, Plus, Send, ShieldCheck, Sparkles, Workflow,
 } from 'lucide-react'
 import { api, errorMessage } from './api'
 import { Markdown } from './Markdown'
@@ -11,6 +11,8 @@ import { ConfigurationEditor } from './ConfigurationEditor'
 import { TwitchBots } from './TwitchBots'
 import { CustomAgents } from './CustomAgents'
 import { ModelLibrary } from './ModelLibrary'
+import { StudioBackupPanel } from './StudioBackupPanel'
+import { EnvironmentPage } from './EnvironmentPage'
 import type { Agent, LocalModels, Mission, MissionCapacity, MissionKind, Model, Sandbox } from './types'
 import { isActive } from './types'
 import { groupMissionsByDay, missionSearchText, missionTitle } from './missionPresentation'
@@ -20,6 +22,7 @@ const navigation = [
   { id: 'Twitch', label: 'Twitch', icon: Bot, subtitle: 'Bots Twitch configurables' },
   { id: 'Agents', label: 'Agents', icon: Bot, subtitle: 'Votre équipe spécialisée' },
   { id: 'Models', label: 'Bibliothèque de modèles', icon: Cpu, subtitle: 'Intelligence locale' },
+  { id: 'Environment', label: 'Environnement', icon: HardDrive, subtitle: 'Préparer un nouveau PC' },
   { id: 'Projects', label: 'Projets', icon: FolderOpen, subtitle: 'Du prompt aux fichiers' },
   { id: 'Missions', label: 'Missions', icon: Workflow, subtitle: 'Chaque étape, en transparence' },
 ] as const
@@ -215,7 +218,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
       <div className="sidebar-bottom">
         <div className="local-card"><span className={`status-dot ${local?.available ? 'green' : 'amber'}`} /><strong>{local?.available ? 'Ollama connecté' : 'État Ollama non disponible'}</strong>
           <p>Exécution locale · aucun cloud</p><div className="local-card-line"><Cpu size={13} /> Une mission IA active maximum</div></div>
-        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · 0.6.6</small></span><ShieldCheck size={16} /></div>
+        <div className="profile"><div className="avatar">AI</div><span>Environnement local<small>AIPlatform Studio · 0.6.12</small></span><ShieldCheck size={16} /></div>
       </div>
     </aside>
     <main>
@@ -408,6 +411,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
             </article>
           })}</div></>}
 
+        {page === 'Environment' && <EnvironmentPage />}
         {page === 'Twitch' && <TwitchBots />}
         {page === 'Projects' && <Projects missions={missions} selectedId={selectedId} onSelect={setSelectedId} refresh={refresh}
           onOpenMission={id => {
@@ -468,6 +472,7 @@ export default function App({ restartBackend }: { restartBackend?: () => Promise
           </section>{selectedVisibleMission && <MissionDetails mission={selectedVisibleMission} cancel={id => void cancel(id)} busy={busy}
             refresh={refresh} openProject={id => { setSelectedId(id); setPage('Projects') }} />}
         </div>}
+        {page === 'Missions' && restartBackend && <StudioBackupPanel restartBackend={restartBackend} />}
         <footer className="page-footer"><span>AIPlatform Studio</span><span>Les modèles peuvent se tromper. Vérifiez le code avant toute utilisation.</span></footer>
       </div>
     </main>

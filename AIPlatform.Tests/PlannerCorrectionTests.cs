@@ -9,6 +9,170 @@ namespace AIPlatform.Tests;
 public sealed class PlannerCorrectionTests
 {
     [Theory]
+    [InlineData("react", "", 1)]
+    [InlineData("react-dom", "", 1)]
+    [InlineData("vitest", "", 1)]
+    [InlineData("@testing-library/react", "", 1)]
+    [InlineData("react|@testing-library/react", "", 2)]
+    [InlineData("src/model.ts", "src/model.ts", 0)]
+    [InlineData("react|src/model.ts|vitest", "src/model.ts", 2)]
+    [InlineData("react|react-dom|vitest|@testing-library/react|src/model.ts", "src/model.ts", 4)]
+    public void OnlyExactScaffoldPackagesAreRemovedFromInternalDependencies(
+        string dependencies, string retained, int removed)
+    {
+        var plan = DependencyPlan(dependencies.Split('|'));
+        var normalized = MissionReactTemplate.NormalizePlanDependencies(plan, out var changes);
+
+        Assert.Equal(retained.Length == 0 ? [] : retained.Split('|'), normalized.Files[0].DependsOn);
+        Assert.Equal(new[] { "src/App.tsx" }, normalized.Files[1].DependsOn);
+        Assert.Equal(plan.Dependencies, normalized.Dependencies);
+        Assert.Equal(dependencies.Split('|'), plan.Files[0].DependsOn);
+        Assert.Equal(removed, changes.Count);
+        Assert.All(changes, change =>
+        {
+            Assert.Equal("src/App.tsx", change.Path);
+            Assert.Contains(change.Package, MissionReactTemplate.AllowedDependencies);
+        });
+        MissionReactTemplate.ValidatePlan(normalized);
+    }
+
+    [Theory]
+    [InlineData("unknown", "UnknownDependency")]
+    [InlineData("case", "UnknownDependency")]
+    [InlineData("whitespace", "UnknownDependency")]
+    [InlineData("ambiguous", "DuplicatePlannedPath")]
+    [InlineData("collision", "UnauthorizedPath")]
+    [InlineData("cycle", "CyclicDependencies")]
+    [InlineData("oversized", "InvalidDependencies")]
+    public void NormalizationNeverHidesUnknownAmbiguousCyclicOrOversizedDependencies(string defect, string rule)
+    {
+        var dependency = defect switch
+        {
+            "unknown" => "react-testing-library",
+            "case" => "React",
+            "whitespace" => " react",
+            "cycle" => "src/App.test.tsx",
+            "collision" => "react",
+            _ => "src/model.ts"
+        };
+        var plan = DependencyPlan(defect == "oversized"
+            ? Enumerable.Repeat("react", 13).ToArray() : [dependency]);
+        if (defect == "ambiguous")
+            plan = plan with { Files = [.. plan.Files, plan.Files[2] with { Path = "src/MODEL.ts" }] };
+        if (defect == "collision")
+            plan = plan with { Files = [.. plan.Files, new("react", "Ambiguous package/file name", [])] };
+
+        var normalized = MissionReactTemplate.NormalizePlanDependencies(plan, out var changes);
+
+        Assert.Empty(changes);
+        Assert.Equal(plan.Files[0].DependsOn, normalized.Files[0].DependsOn);
+        var error = Assert.Throws<StudioValidationException>(() => MissionReactTemplate.ValidatePlan(normalized));
+        Assert.Contains(error.PlannerDiagnostics!, diagnostic => diagnostic.Rule == rule);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("src/missing.ts")]
+    [InlineData("react-testing-library")]
+    public async Task NormalizedPlansUseNoExtraCallUnlessAnotherValidationStillFails(string? unknownReference)
+    {
+        var calls = 0;
+        using var fixture = new WorkflowFixture(responseOverride: request =>
+        {
+            Assert.True(IsPlan(request));
+            calls++;
+            var result = JsonNode.Parse(Response(request, false))!;
+            if (calls == 1)
+            {
+                result["files"]![0]!["dependsOn"] = new JsonArray("react", "react-dom", "src/model.ts");
+                result["files"]![1]!["dependsOn"] = unknownReference is not null
+                    ? new JsonArray("vitest", "@testing-library/react", "src/App.tsx", unknownReference)
+                    : new JsonArray("vitest", "@testing-library/react", "src/App.tsx");
+            }
+            else
+            {
+                using var input = JsonDocument.Parse(request.Messages.Last().Content);
+                var error = Assert.Single(input.RootElement.GetProperty("validationErrors").EnumerateArray());
+                Assert.Equal("UnknownDependency", error.GetProperty("rule").GetString());
+                Assert.Equal("files[1].dependsOn", error.GetProperty("field").GetString());
+                Assert.Equal(unknownReference, error.GetProperty("path").GetString());
+                var explanation = error.GetProperty("explanation").GetString()!;
+                Assert.Contains("exact paths of other planned files, not npm packages", explanation);
+                Assert.Contains("Unknown names are not converted", explanation);
+                foreach (var package in MissionReactTemplate.AllowedDependencies)
+                    Assert.Contains(package, explanation);
+                Assert.Contains(unknownReference!, input.RootElement.GetProperty("rejectedPlan")
+                    .GetProperty("files")[1].GetProperty("dependsOn").EnumerateArray()
+                    .Select(value => value.GetString()));
+            }
+            Assert.Contains("Never put npm packages in files[].dependsOn", request.Messages[0].Content);
+            var schema = request.ResponseSchema!.Value.GetProperty("properties");
+            Assert.Contains("npm package names", schema.GetProperty("dependencies").GetProperty("description").GetString());
+            Assert.Contains("No npm packages", schema.GetProperty("files").GetProperty("items")
+                .GetProperty("properties").GetProperty("dependsOn").GetProperty("description").GetString());
+            Assert.Equal(MissionReactTemplate.AllowedDependencies, schema.GetProperty("dependencies")
+                .GetProperty("items").GetProperty("enum").EnumerateArray().Select(value => value.GetString()));
+            Assert.Contains($"Exact allowed npm package names: {string.Join(", ", MissionReactTemplate.AllowedDependencies)}.",
+                request.Messages[0].Content);
+            var exampleStart = request.Messages[0].Content.IndexOf("{\"name\":\"Counter\"", StringComparison.Ordinal);
+            Assert.True(exampleStart >= 0);
+            var exampleEnd = request.Messages[0].Content.IndexOf(" Tests use Vitest", exampleStart, StringComparison.Ordinal);
+            Assert.True(exampleEnd > exampleStart);
+            var example = JsonSerializer.Deserialize<ProjectPlan>(
+                request.Messages[0].Content[exampleStart..exampleEnd], new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+            MissionReactTemplate.ValidatePlan(example with
+            {
+                OriginalRequest = "Initial value 0",
+                AcceptanceCriteria = [new("C1", "Initial value 0")]
+            });
+            return result.ToJsonString();
+        });
+        var mission = fixture.Store.Submit(new("Initial value 0", MissionKind.Project,
+            TemplateId: MissionReactTemplate.Id, RequirePlanApproval: true, MaxTotalGenerations: 12));
+
+        await fixture.Processor.ProcessAsync(mission.Id, default);
+
+        var current = fixture.Store.Get(mission.Id)!;
+        var expected = unknownReference is not null ? 2 : 1;
+        Assert.Equal(MissionStatus.AwaitingPlanApproval, current.Status);
+        Assert.Equal(expected, calls);
+        Assert.Equal(expected, current.GenerationReservations!.Count);
+        Assert.Equal(12 - expected, current.MaxTotalGenerations - current.GenerationReservations.Count);
+        Assert.Equal(expected - 1, current.CorrectionAttempts);
+        Assert.Equal(new[] { "src/model.ts" }, current.Workflow!.Plan!.Files[0].DependsOn);
+        Assert.Equal(new[] { "src/App.tsx" }, current.Workflow.Plan.Files[1].DependsOn);
+        Assert.Equal(4, current.Workflow.Plan.Dependencies!.Count);
+        Assert.Null(current.Workflow.Draft?.SingleOrDefault(file => file.Path == "src/App.tsx"));
+        Assert.Empty(fixture.Sandbox.Calls);
+        var attempts = new OllamaDiagnosticStore(fixture.Options, TimeProvider.System).PlannerAttempts(mission.Id);
+        Assert.Equal(expected, attempts.Count);
+        Assert.Equal(unknownReference is not null ? "Rejected" : "Accepted", attempts[0].Status);
+        Assert.Equal(4, attempts[0].DependencyNormalizations!.Count);
+        Assert.Equal("files[0].dependsOn[0]", attempts[0].DependencyNormalizations![0].Field);
+        Assert.Equal("react", attempts[0].Plan!.Value.GetProperty("files")[0].GetProperty("dependsOn")[0].GetString());
+        Assert.False(attempts[0].RawTraceAvailable);
+        using var reopened = new MissionStore(fixture.Options, fixture.Platform, fixture.Registry, fixture.Workspaces);
+        Assert.Equal(current.GenerationReservations, reopened.Get(mission.Id)!.GenerationReservations);
+        Assert.Equal(current.MaxTotalGenerations, reopened.Get(mission.Id)!.MaxTotalGenerations);
+        Assert.Equal(attempts[0].DependencyNormalizations,
+            new OllamaDiagnosticStore(fixture.Options, TimeProvider.System).PlannerAttempts(mission.Id)[0].DependencyNormalizations);
+    }
+
+    private static ProjectPlan DependencyPlan(IReadOnlyList<string> dependencies) =>
+        new("Counter", "Requested counter", ["Use Vitest."],
+        [
+            new("src/App.tsx", "Counter component", dependencies),
+            new("src/App.test.tsx", "Counter tests", ["src/App.tsx"]),
+            new("src/model.ts", "Counter state", [])
+        ])
+        {
+            OriginalRequest = "Initial value 0",
+            AcceptanceCriteria = [new("C1", "Initial value 0")],
+            Dependencies = ["react", "vitest"],
+            CriterionCoverage = [new("C1", ["src/App.tsx", "src/App.test.tsx"], "Implement and test initial value.")]
+        };
+
+    [Theory]
     [InlineData(0, false)]
     [InlineData(1, false)]
     [InlineData(2, false)]

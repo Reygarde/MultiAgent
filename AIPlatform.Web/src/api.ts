@@ -1,4 +1,4 @@
-import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentBrowserScenario, CustomAgentBrowserTestReport, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDevelopmentPlan, CustomAgentDraft, CustomAgentProjectType, CustomAgentTeam, CustomAgentTeamMember, CustomAgentWorkspace, CustomAgentWorkspaceFile, ExecutionPlan, FileContent, LocalApplication, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, ReviewerCorrectionResumeEligibility, RevisionComparison, Sandbox, TwitchBot, TwitchCommand, TwitchCommandProposal, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, TwitchSimulationEvent, TwitchSimulationResult, WorkspaceFile } from './types'
+import type { Agent, AgentConfiguration, CreateMission, CustomAgent, CustomAgentBrowserScenario, CustomAgentBrowserTestReport, CustomAgentCollaborationRun, CustomAgentConversation, CustomAgentConversationSummary, CustomAgentDevelopmentPlan, CustomAgentDraft, CustomAgentProjectType, CustomAgentTeam, CustomAgentTeamMember, CustomAgentWorkspace, CustomAgentWorkspaceFile, EnvironmentImageCheck, ExecutionPlan, FileContent, LocalApplication, LocalModels, Mission, MissionCapacity, Model, ProjectAnalysis, ProvisioningPackageCheck, ReviewerCorrectionResumeEligibility, RevisionComparison, Sandbox, StudioEnvironmentReport, TwitchBot, TwitchCommand, TwitchCommandProposal, TwitchCommandTestResult, TwitchConnectResult, TwitchDeviceAuthorization, TwitchSettings, TwitchSimulationEvent, TwitchSimulationResult, WorkspaceFile } from './types'
 import { fetchApi } from './desktop/transport'
 import type { PlannerAttemptDiagnostic } from './types'
 
@@ -37,9 +37,21 @@ export const api = {
   configuration: () => request<AgentConfiguration>('/agents/configuration'),
   saveConfiguration: (configuration: AgentConfiguration) => request<AgentConfiguration>('/agents/configuration',
     { method: 'PUT', body: JSON.stringify(configuration) }),
+  resumeEligibility: (id: string) =>
+    request<{ available: boolean; reason: string }>(
+      `/missions/${encodeURIComponent(id)}/resume-eligibility`, { cache: 'no-store' }),
   resume: async (id: string) => {
     const response = await fetchApi(`/missions/${encodeURIComponent(id)}/resume`, { method: 'POST' })
-    if (!response.ok) throw new Error(`Reprise refusée (HTTP ${response.status}).`)
+    if (!response.ok) {
+      let detail = `Reprise refusée (HTTP ${response.status}).`
+      try {
+        const problem: { detail?: string; title?: string } = await response.json()
+        detail = problem.detail || problem.title || detail
+      } catch {
+        // Keep the HTTP failure when a proxy does not return Problem Details.
+      }
+      throw new Error(detail)
+    }
   },
   reviewerCorrectionResumeEligibility: (id: string) =>
     request<ReviewerCorrectionResumeEligibility>(
@@ -267,6 +279,12 @@ export const api = {
     { method: 'POST', body: JSON.stringify({ approved: true }) }),
   localModels: (signal?: AbortSignal) => request<LocalModels>('/models/local', { signal }),
   sandbox: (signal?: AbortSignal) => request<Sandbox>('/sandbox', { signal }),
+  environment: (signal?: AbortSignal) => request<StudioEnvironmentReport>('/environment', { signal }),
+  verifySandboxProvisioning: () => request<ProvisioningPackageCheck>('/environment/sandbox-provisioning/verify',
+    { method: 'POST' }),
+  importSandboxProvisioning: (fingerprint: string) =>
+    request<EnvironmentImageCheck[]>('/environment/sandbox-provisioning/import',
+      { method: 'POST', body: JSON.stringify({ confirmed: true, fingerprint }) }),
   create: (input: CreateMission) => request<Mission>('/missions', { method: 'POST', body: JSON.stringify(input) }),
   executionPlan: (id: string, signal?: AbortSignal) =>
     request<ExecutionPlan>(`/missions/${encodeURIComponent(id)}/execution-plan`, { signal }),

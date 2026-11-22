@@ -41,6 +41,7 @@ public interface ILocalCommandExecutor
         Guid authorizationId, Guid workspaceId, CustomAgentProjectType projectType,
         LocalCommandKind command, CancellationToken cancellationToken);
     LocalApplicationSnapshot GetApplication(Guid workspaceId, CustomAgentProjectType projectType);
+    IReadOnlyList<LocalApplicationSnapshot> GetRunningApplications();
     Task<LocalApplicationSnapshot> StartApplicationAsync(
         Guid workspaceId, CustomAgentProjectType projectType, bool executionAuthorized,
         CancellationToken cancellationToken);
@@ -177,6 +178,10 @@ public sealed class LocalCommandExecutor(
             ? LocalCommandKind.NpmRunDev : LocalCommandKind.DotNetRun);
         return new(workspaceId, "Stopped", null, command, [], null, null, DateTimeOffset.UtcNow);
     }
+
+    public IReadOnlyList<LocalApplicationSnapshot> GetRunningApplications() =>
+        applications.Values.Where(session => !session.IsCompleted)
+            .Select(session => session.Snapshot).ToArray();
 
     public async Task<LocalApplicationSnapshot> StartApplicationAsync(
         Guid workspaceId, CustomAgentProjectType projectType, bool executionAuthorized,

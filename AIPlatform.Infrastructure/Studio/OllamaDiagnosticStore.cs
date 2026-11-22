@@ -32,6 +32,11 @@ public sealed class OllamaDiagnosticStore(StudioOptions options, TimeProvider ti
         Update(context, entry => entry with
         { Planner = entry.Planner! with { Plan = result.Clone(), Status = "Unvalidated" } });
 
+    public void RecordPlannerNormalizations(LlmDiagnosticContext context,
+        IReadOnlyList<PlannerDependencyNormalization> normalizations) =>
+        Update(context, entry => entry with
+        { Planner = entry.Planner! with { DependencyNormalizations = normalizations } });
+
     public void FinishPlanner(LlmDiagnosticContext context, string status, IReadOnlyList<PlannerValidationDiagnostic> errors)
     {
         try

@@ -39,12 +39,13 @@ public sealed class OllamaProvider : IGenerationBudgetedProvider, IDisposable
         if (request.Model.ContextSize is < 256 or > ModelContextLimits.Maximum ||
             request.Model.MaxOutputTokens < 1 || request.Model.MaxOutputTokens >= request.Model.ContextSize)
             throw new LlmContextException("Invalid bounded context/output profile; no generation was requested.");
-        LlmGenerationScope.Reserve(request, cancellationToken);
+        var reservationId = LlmGenerationScope.Reserve(request, cancellationToken);
 
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(TimeSpan.FromSeconds(options.RequestTimeoutSeconds));
         var acquired = false;
         var operationAcquired = false;
+        var mayHaveBeenSent = false;
         try
         {
             await requests.WaitAsync(deadline.Token);
@@ -96,6 +97,8 @@ public sealed class OllamaProvider : IGenerationBudgetedProvider, IDisposable
             }
             using var content = new ByteArrayContent(bytes);
             content.Headers.ContentType = new MediaTypeHeaderValue("application/json") { CharSet = "utf-8" };
+            LlmGenerationScope.MarkRequestMayHaveBeenSent(reservationId);
+            mayHaveBeenSent = true;
             using var response = await client.PostAsync(new Uri(new Uri(options.BaseUrl), "/api/chat"), content, deadline.Token);
             ChatResponse? completion;
             if (request.DiagnosticContext is { } diagnosticContext)
@@ -127,19 +130,28 @@ public sealed class OllamaProvider : IGenerationBudgetedProvider, IDisposable
         }
         catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
+            if (!mayHaveBeenSent) LlmGenerationScope.MarkRequestDefinitelyNotSent(reservationId);
             throw new LlmTimeoutException("The Ollama request exceeded its configured timeout.", exception);
         }
         catch (HttpRequestException exception)
         {
+            if (!mayHaveBeenSent) LlmGenerationScope.MarkRequestDefinitelyNotSent(reservationId);
             throw new LlmProviderException("Ollama is unavailable or rejected the request.", exception);
         }
         catch (JsonException exception)
         {
+            if (!mayHaveBeenSent) LlmGenerationScope.MarkRequestDefinitelyNotSent(reservationId);
             throw new LlmProviderException("Ollama returned an invalid response.", exception);
         }
         catch (IOException exception)
         {
+            if (!mayHaveBeenSent) LlmGenerationScope.MarkRequestDefinitelyNotSent(reservationId);
             throw new LlmProviderException("The Ollama response was interrupted.", exception);
+        }
+        catch
+        {
+            if (!mayHaveBeenSent) LlmGenerationScope.MarkRequestDefinitelyNotSent(reservationId);
+            throw;
         }
         finally
         {

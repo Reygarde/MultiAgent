@@ -25,7 +25,8 @@ public sealed record SandboxOptions
 
 public sealed class DockerSandboxRunner(
     SandboxOptions options, IWorkspaceStore workspaces, IContainerProcess process,
-    IMissionService? missions = null, IExecutionPlanService? plans = null) : ISandboxRunner
+    IMissionService? missions = null, IExecutionPlanService? plans = null,
+    ISandboxImageTrust? imageTrust = null) : ISandboxRunner
 {
     private bool cleanupFaulted;
 
@@ -60,9 +61,16 @@ public sealed class DockerSandboxRunner(
             if (info.ExitCode != 0 || info.Output.Trim() != "linux")
                 return new(false, "Docker Linux engine unavailable. No build or test will run on the host.");
             var image = await process.RunAsync(["image", "inspect", "--format", "{{.Id}}", imageName], timeout.Token);
-            return image.ExitCode == 0
-                ? new(true, "Offline Docker image available. Explicit human approval is still required per mission.", true)
-                : new(false, $"The required offline sandbox image {imageName} is not installed. No image is downloaded automatically.", true);
+            if (image.ExitCode != 0)
+                return new(false, $"The required offline sandbox image {imageName} is not installed. No image is downloaded automatically.", true);
+            if (imageTrust is not null)
+            {
+                if (imageTrust.GetExpectedImageId(imageName) is null)
+                    return new(false, $"The provisioning manifest has not been verified for sandbox image {imageName}.", true);
+                if (!imageTrust.IsTrustedImage(imageName, image.Output.Trim()))
+                    return new(false, $"The installed image {imageName} does not match the verified Studio provisioning manifest.", true);
+            }
+            return new(true, "Offline Docker image available. Explicit human approval is still required per mission.", true);
         }
         catch (Win32Exception)
         {
@@ -119,6 +127,11 @@ public sealed class DockerSandboxRunner(
                     throw new StudioValidationException("The container command differs from the approved canonical plan.");
             }
             image = plan.Image;
+            if (imageTrust is not null && !imageTrust.IsTrustedImage(
+                    mission.TemplateId is ReactTemplate.Id or MissionReactTemplate.Id ? ReactTemplate.Image :
+                    mission.TemplateId == DiscordTemplate.Id ? DiscordTemplate.Image :
+                    mission.TemplateId == TwitchTemplate.Id ? TwitchTemplate.Image : FullStackTemplate.Image, image))
+                throw new StudioValidationException("The approved image no longer matches the verified Studio provisioning manifest.");
         }
         var directory = workspaces.GetDirectory(workspaceId);
         SafePaths.RejectLinks(directory);
@@ -135,6 +148,8 @@ public sealed class DockerSandboxRunner(
             throw new StudioValidationException("Sandbox execution is disabled or previous cleanup could not be confirmed.");
         if (!Regex.IsMatch(image, @"\Asha256:[a-f0-9]{64}\z", RegexOptions.CultureInvariant))
             throw new StudioValidationException("Independent React validation requires a pinned Docker image ID.");
+        if (imageTrust is not null && !imageTrust.IsTrustedImage(ReactTemplate.Image, image))
+            throw new StudioValidationException("The React image does not match the verified Studio provisioning manifest.");
         SafePaths.RejectLinks(directory);
         return await RunContainerAsync(directory, stage, image, MissionReactTemplate.Id, files, token);
     }

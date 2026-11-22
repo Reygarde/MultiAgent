@@ -48,6 +48,11 @@ if (!studio.CollaborativeWorkflows && !registry.Agents.Any(agent => agent.Id == 
     throw new InvalidOperationException("The Studio developer agent must be a registered execution agent.");
 var sandboxOptions = builder.Configuration.GetSection("Sandbox").Get<SandboxOptions>() ?? new();
 sandboxOptions.Validate();
+var sandboxProvisioningDirectory = builder.Configuration["SandboxProvisioning:Directory"] ??
+    (desktop.Enabled
+        ? Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "sandbox-provisioning"))
+        : Path.GetFullPath(Path.Combine(builder.Environment.ContentRootPath, "..", "AIPlatform.Web",
+            "src-tauri", "resources", "sandbox-provisioning")));
 var ollama = builder.Configuration.GetSection("Ollama").Get<OllamaOptions>()
     ?? throw new InvalidOperationException("The Ollama configuration is required.");
 ollama.Validate();
@@ -85,6 +90,28 @@ builder.Services.AddSingleton<IAgentRouter, LlmAgentRouter>();
 builder.Services.AddSingleton<IMissionOrchestrator, MissionOrchestrator>();
 builder.Services.AddSingleton<MissionExecutionGate>();
 builder.Services.AddSingleton(studio);
+builder.Services.AddSingleton<SandboxImageCatalog>();
+builder.Services.AddSingleton<ISandboxProvisioningService>(services => new SandboxProvisioningService(
+    sandboxProvisioningDirectory, services.GetRequiredService<IContainerProcess>(),
+    services.GetRequiredService<SandboxImageCatalog>()));
+if (desktop.Enabled)
+{
+    builder.Services.AddSingleton<StudioMaintenanceGate>();
+    builder.Services.AddSingleton<ISandboxImageTrust>(services => services.GetRequiredService<SandboxImageCatalog>());
+    builder.Services.AddSingleton<IEnvironmentHostProbe, WindowsEnvironmentHostProbe>();
+    builder.Services.AddSingleton<StudioEnvironmentService>();
+    builder.Services.AddSingleton(services => new StudioBackupService(
+        studio,
+        configuration,
+        services.GetRequiredService<StudioMaintenanceGate>(),
+        services.GetRequiredService<MissionExecutionGate>(),
+        services.GetRequiredService<OllamaModelOperations>(),
+        services.GetRequiredService<IMissionService>(),
+        services.GetRequiredService<ICustomAgentStore>(),
+        services.GetRequiredService<ITwitchBotService>(),
+        services.GetRequiredService<ILocalCommandExecutor>(),
+        localAppData));
+}
 builder.Services.AddSingleton(sandboxOptions);
 builder.Services.AddSingleton<MissionStore>();
 builder.Services.AddSingleton<IMissionService>(services => services.GetRequiredService<MissionStore>());
@@ -206,6 +233,20 @@ app.Use(async (context, next) =>
     }
     await next(context);
 });
+if (desktop.Enabled)
+{
+    app.Use(async (context, next) =>
+    {
+        if (context.Request.Path.StartsWithSegments("/api/studio-backup"))
+        {
+            await next(context);
+            return;
+        }
+        using var requestLease = await context.RequestServices.GetRequiredService<StudioMaintenanceGate>()
+            .EnterRequestAsync(context.RequestAborted);
+        await next(context);
+    });
+}
 if (app.Environment.IsDevelopment())
     app.MapOpenApi();
 app.MapAgents();
@@ -216,6 +257,11 @@ app.MapStudio();
 app.MapReactRevisionValidation();
 app.MapTwitch();
 app.MapPreview();
+if (desktop.Enabled)
+{
+    app.MapStudioBackup();
+    app.MapStudioEnvironment();
+}
 app.MapGet("/api/health", (CancellationToken token) =>
 {
     token.ThrowIfCancellationRequested();

@@ -5,8 +5,10 @@ namespace AIPlatform.Infrastructure.Studio;
 public static class ExecutionPlanRevisionGuard
 {
     public static IReadOnlyList<ExecutionPlanDifference> Compare(
-        ProjectRevision revision, ExecutionPlan current, string? templateId)
+        ProjectRevision revision, ExecutionPlan current, string? templateId, bool staticReview = false)
     {
+        if (!staticReview && templateId == MissionReactTemplate.Id && revision.PreparedExecutionPlan is { } prepared)
+            revision = revision with { Fingerprint = prepared.Fingerprint, ExecutionPlan = prepared };
         if (templateId is not (ReactTemplate.Id or MissionReactTemplate.Id) ||
             revision.ExecutionPlan?.ReactDescriptor is not { } expected)
             return CompareFingerprint(revision.Fingerprint, current.Fingerprint);

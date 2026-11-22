@@ -1,0 +1,39 @@
+{
+    "formatVersion":  1,
+    "packageVersion":  "1.0.0",
+    "platform":  "windows-x64",
+    "createdAt":  "2026-11-20T00:25:11.7965168+00:00",
+    "archiveFile":  "aiplatform-sandbox-images-1.0.0.tar",
+    "archiveSizeBytes":  679819264,
+    "archiveSha256":  "312dec41f2022b1c769a1cc1871b522343a684cb95c9a12083719870c3aa57f0",
+    "images":  [
+                   {
+                       "imageReference":  "aiplatform-sandbox:net10",
+                       "version":  "net10-v1",
+                       "dockerfile":  "Dockerfile",
+                       "sourceFingerprint":  "c9f3eaa9d8179c9a08e64cc5e01323a13c7eb53f7167102c4106d77afb689d3e",
+                       "imageId":  "sha256:e0783983bdac598931946fee36ccec671330738b98f76acb583231b630b7b3b4"
+                   },
+                   {
+                       "imageReference":  "aiplatform-sandbox:discord-net10",
+                       "version":  "discord-net10-v1",
+                       "dockerfile":  "Discord.Dockerfile",
+                       "sourceFingerprint":  "b2aee68b8a064d285dfbb08e237ee8e6809302b121fe6edc93bba2a0f187ca54",
+                       "imageId":  "sha256:ed0c95016895e99753eb99b1a84f5aed4eef608c2abd492005a3b20383b0720b"
+                   },
+                   {
+                       "imageReference":  "aiplatform-react-sandbox:1.0.0",
+                       "version":  "react-v1",
+                       "dockerfile":  "react/Dockerfile",
+                       "sourceFingerprint":  "75dce199a7a367d1998d19011d34463cb5f7ec1ebbd9eef59c291affc793c167",
+                       "imageId":  "sha256:06fa73721c0587de65efb1342bf86cc65e331b2ac375d00c334fa0fd1910fde6"
+                   },
+                   {
+                       "imageReference":  "aiplatform-fullstack-sandbox:1.0.0",
+                       "version":  "fullstack-v2",
+                       "dockerfile":  "FullStack.Dockerfile",
+                       "sourceFingerprint":  "67c5216f1b15857f3cf5b2e2730c000338b79090db0f5b4651e8694dc0d1abcb",
+                       "imageId":  "sha256:0f0048afea53a935aa47e03da3e9cf4e823bb247ba75d21ddc31e1cc5bc201de"
+                   }
+               ]
+}

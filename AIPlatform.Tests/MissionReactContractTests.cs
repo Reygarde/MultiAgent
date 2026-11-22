@@ -293,6 +293,15 @@ public sealed class MissionReactContractTests
             Assert.Contains("nonblank explanation of at most 500 characters", prompt);
             Assert.Contains("complete plan object matching the supplied response schema", prompt);
             Assert.Contains("criterionCoverage is an array", prompt);
+            Assert.Contains("package names in that field's schema enum", prompt);
+            Assert.Contains("Tests use Vitest, not Jest", prompt);
+            var schema = request.ResponseSchema!.Value;
+            var allowedDependencies = schema.GetProperty("properties").GetProperty("dependencies")
+                .GetProperty("items").GetProperty("enum").EnumerateArray()
+                .Select(dependency => dependency.GetString()).ToArray();
+            Assert.Contains("vitest", allowedDependencies);
+            Assert.Contains("@testing-library/jest-dom", allowedDependencies);
+            Assert.DoesNotContain("axios", allowedDependencies);
             var start = prompt.IndexOf("{\"criterionId\":", StringComparison.Ordinal);
             Assert.True(start >= 0);
             var end = prompt.IndexOf('}', start);
@@ -312,6 +321,33 @@ public sealed class MissionReactContractTests
         Assert.Single(fixture.Provider.Requests);
         Assert.Empty(fixture.Sandbox.Calls);
         Assert.False(fixture.Store.Get(mission.Id)!.HasWorkspace);
+    }
+
+    [Theory]
+    [InlineData("axios", "UnsupportedDependency")]
+    [InlineData("Jest", "UnsupportedTestRunner")]
+    public async Task PlannerRejectsDependenciesAndTestRunnersOutsideTheLockedReactScaffold(
+        string invalidValue, string expectedRule)
+    {
+        using var fixture = new WorkflowFixture(corrections: 0, responseOverride: request =>
+        {
+            var response = JsonNode.Parse(Respond(request))!;
+            if (expectedRule == "UnsupportedDependency")
+                response["dependencies"] = new JsonArray(invalidValue);
+            else
+                response["decisions"]![0] = "Use Jest for the business tests.";
+            return response.ToJsonString();
+        });
+        var mission = fixture.Store.Submit(new("Display the requested information", MissionKind.Project,
+            TemplateId: MissionReactTemplate.Id));
+        var agents = new WorkflowAgents(new LlmProviderResolver([fixture.Provider]), fixture.Options);
+
+        var error = await Assert.ThrowsAsync<StudioValidationException>(() =>
+            agents.PlanAsync(mission, mission.Workflow!.Agents.Single(agent => agent.Role == "Planner"), default));
+
+        Assert.Contains(error.PlannerDiagnostics!, diagnostic => diagnostic.Rule == expectedRule);
+        Assert.Null(fixture.Store.Get(mission.Id)!.Workflow!.Plan);
+        Assert.Empty(fixture.Sandbox.Calls);
     }
 
     [Fact]
@@ -813,8 +849,12 @@ public sealed class MissionReactContractTests
         Assert.Empty(descriptor.CompareManifest(revision.Files));
         Assert.Equal(MissionReactTemplate.Id, descriptor.TemplateId);
         Assert.Equal(ReactTemplate.Image, descriptor.ImageReference);
-        Assert.Equal("sha256:" + new string('a', 64), descriptor.EffectiveImage);
-        Assert.Equal(descriptor.EffectiveImage, descriptor.ImageDigest);
+        Assert.Equal(ReactTemplate.Image, descriptor.EffectiveImage);
+        Assert.Null(descriptor.ImageDigest);
+        var prepared = revision.PreparedExecutionPlan!;
+        Assert.Equal("sha256:" + new string('a', 64), prepared.ReactDescriptor!.ImageDigest);
+        Assert.Equal(prepared.Fingerprint, prepared.ReactDescriptor.ComputeFingerprint(revision.Files));
+        Assert.Equal(prepared.Fingerprint, revision.ExecutionFingerprint);
         Assert.True(descriptor.SandboxEnabled);
         Assert.Equal(3, descriptor.Commands.Count);
 
@@ -892,7 +932,7 @@ public sealed class MissionReactContractTests
         var current = await fixture.Plans.GetAsync(mission.Id, default, revision.Version);
         Assert.Empty(ExecutionPlanRevisionGuard.Compare(revision, current, MissionReactTemplate.Id));
 
-        var legacy = revision with { ExecutionPlan = null };
+        var legacy = revision with { ExecutionPlan = null, PreparedExecutionPlan = null, Fingerprint = current.Fingerprint };
         Assert.Empty(ExecutionPlanRevisionGuard.Compare(legacy, current, MissionReactTemplate.Id));
         Assert.Null(legacy.ExecutionPlan);
         Assert.Contains(ExecutionPlanRevisionGuard.Compare(legacy,
@@ -1048,6 +1088,7 @@ public sealed class MissionReactContractTests
                  new("src/App.test.tsx", "Requested behavior tests", ["src/App.tsx"]),
                  new("src/model.ts", "Mission implementation", [])])
             {
+                Dependencies = ["react", "react-dom", "vitest", "@testing-library/react"],
                 CriterionCoverage = criteria.Select(item => new PlannedCriterionCoverage(item.Id,
                     ["src/App.tsx", "src/App.test.tsx"], "Implement and test the original requirement.")).ToArray()
             } : WorkflowFixture.Plan;
@@ -1059,8 +1100,10 @@ public sealed class MissionReactContractTests
             {
                 "src/App.tsx" => App,
                 "src/model.ts" => "export const initial = 0",
-                _ => "import { test, expect } from 'vitest';\n" + string.Join("\n",
-                    criteria.Select(item => $"test('[{item.Id}] simulated assertion', () => expect(1).toBe(1))"))
+                _ => "import { test, expect } from 'vitest';\n" +
+                    "import { render, screen } from '@testing-library/react';\nimport App from './App';\n" +
+                    string.Join("\n", criteria.Select(item =>
+                        $"test('[{item.Id}] simulated assertion', () => {{ render(<App />); expect(screen.getByText('Mission')).toBeTruthy(); }})"))
             }) : ReactTemplate.Files.Single(file => file.Path == path);
         }
         else

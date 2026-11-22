@@ -352,7 +352,23 @@ public sealed partial class MissionStore : IMissionService, IDisposable
                 return false;
             if (approved && current.Workflow is { } pending &&
                 (pending.Revisions?.LastOrDefault() is not { } revision ||
-                 revision.Version != pending.Version || revision.Fingerprint != fingerprint))
+                 revision.Version != pending.Version ||
+                 (current.TemplateId == MissionReactTemplate.Id ? revision.ExecutionFingerprint : revision.Fingerprint) != fingerprint))
+                return false;
+            if (approved && current.TemplateId == MissionReactTemplate.Id &&
+                (current.Workflow?.Revisions?.LastOrDefault()?.PreparedExecutionPlan is not { ReactDescriptor: { } descriptor } prepared ||
+                 prepared.Fingerprint != fingerprint || descriptor.ImageDigest is not { } digest ||
+                 !System.Text.RegularExpressions.Regex.IsMatch(digest, @"^sha256:[a-f0-9]{64}$") ||
+                 prepared.Image != digest || descriptor.EffectiveImage != digest || !descriptor.SandboxEnabled ||
+                 current.Workflow.Revisions.Last().ExecutionPlan?.ReactDescriptor is not { } reviewedDescriptor ||
+                 reviewedDescriptor.CompareTo(descriptor).Any(difference =>
+                     difference.Field is not ("effectiveImage" or "imageDigest")) ||
+                 descriptor.CompareManifest(current.Workflow.Revisions.Last().Files).Count > 0 ||
+                 descriptor.ComputeFingerprint(current.Workflow.Revisions.Last().Files) != fingerprint))
+                return false;
+            if (approved && current.TemplateId == MissionReactTemplate.Id &&
+                current.Workflow is { RequirePlanApproval: true } planWorkflow &&
+                planWorkflow.PlanApproval?.Approved != true)
                 return false;
             if (approved && current.TemplateId == FullStackTemplate.Id &&
                 (current.Workflow?.Revisions?.LastOrDefault()?.ExecutionPlan is not { Canonical: { } canonical } saved ||
@@ -490,7 +506,7 @@ public sealed partial class MissionStore : IMissionService, IDisposable
             throw new StudioValidationException("The saved plan has no matching human approval. Generation and review are blocked.");
     }
 
-    private static string PlanFingerprint(MissionSnapshot mission, int planVersion)
+    internal static string PlanFingerprint(MissionSnapshot mission, int planVersion)
     {
         var original = Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -627,36 +643,123 @@ public sealed partial class MissionStore : IMissionService, IDisposable
         }
     }
 
-    public bool Resume(Guid id)
+    public bool Resume(Guid id) => ResumeWithReason(id)?.Available == true;
+
+    public MissionResumeEligibility? GetResumeEligibility(Guid id) => ResumeCore(id, false);
+
+    public MissionResumeEligibility? ResumeWithReason(Guid id) => ResumeCore(id, true);
+
+    private MissionResumeEligibility? ResumeCore(Guid id, bool commit)
     {
         lock (sync)
         {
             using var persistence = new PersistenceLock(persistenceMutexName);
-            if (missions.GetValueOrDefault(id)?.Workflow?.AutomaticReactCorrections == true)
-                missions[id] = ReadLatestForRepair(id);
+            if (!missions.TryGetValue(id, out var current)) return null;
+            if (current.Workflow?.AutomaticReactCorrections == true)
+                current = ReadLatestForRepair(id);
             if (ReadRepairCheckpoint(id) is { } repair)
             {
-                if (!repair.Ready) return false;
-                missions[id] = ReadLatestForRepair(id);
+                if (!repair.Ready) return new(false, "Le checkpoint de réparation n'est pas prêt ; conservez les preuves et ne relancez pas cette mission.");
+                current = ReadLatestForRepair(id);
             }
-            if (!missions.TryGetValue(id, out var current) || !current.IsTerminal ||
-                current.Status is MissionStatus.Verified or MissionStatus.Completed || current.Deleted || current.Workflow is not { } flow ||
-                current.GenerationBudgetExhausted || current.MaxTotalGenerations is { } limit &&
+            if (!current.IsTerminal || current.Status is MissionStatus.Verified or MissionStatus.Completed ||
+                current.Deleted || current.Workflow is not { } flow)
+                return new(false, "Cette mission n'est pas dans un état permettant une reprise.");
+            if (current.GenerationBudgetExhausted || current.MaxTotalGenerations is { } limit &&
                 current.GenerationReservations!.Count >= limit)
-                return false;
+                return new(false, "Le budget de générations est épuisé ; aucune réservation ne sera remboursée.");
             if (flow.AutomaticReactCorrections)
             {
-                if (flow.SoftwareCorrections.LastOrDefault() is { InFlight: true } or { Failure: not null } ||
-                    flow.PendingSoftwareAgentCall is not null &&
-                    current.GenerationReservations!.Count > flow.PendingSoftwareReservationCount)
-                    return false;
-                flow = flow with { PendingSoftwareAgentCall = null };
+                var correction = flow.SoftwareCorrections.LastOrDefault();
+                if (flow.PendingSoftwareAgentCall is not null &&
+                    (flow.PendingSoftwareCallDeliveryState != SoftwareAgentCallDeliveryState.DefinitelyNotSent ||
+                     flow.PendingSoftwareCallReservationId is not { } reservationId ||
+                     flow.PendingSoftwareCallReservationCount != current.GenerationReservations!.Count ||
+                     current.GenerationReservations!.Count != flow.PendingSoftwareReservationCount + 1 ||
+                     current.GenerationReservations![^1].Id != reservationId))
+                    return new(false, "Un appel Ollama interrompu peut avoir été envoyé ou sa preuve de non-envoi est insuffisante. " +
+                        "Il ne sera pas rejoué. Conservez la mission et ses checkpoints ; aucune reprise automatique sûre n'est disponible. " +
+                        "Vous pouvez consulter les preuves et exporter les sources depuis Projets, sans les exécuter.");
+                if (correction is { Ready: true } &&
+                    !ReactCorrectionPatches.HasReadyCandidate(current, correction, flow.Proposal ?? flow.Draft ?? []) &&
+                    !HasPublishedReadyCandidateForInterruptedReview(current, correction))
+                    return new(false, "L'intégrité du candidat enregistré ne peut pas être établie ; conservez les preuves.");
+                if (correction is { Ready: true, Calls.Count: 0 } &&
+                    flow.ReadyCandidateResumptions.LastOrDefault(item => item.ReadyCorrectionId == correction.Id) is { } pendingReady &&
+                    flow.Steps.Any(step => step.Kind == "Generate" && step.Status != WorkflowStatus.Completed) &&
+                    !ReactCorrectionPatches.HasReadyResumption(current, pendingReady))
+                    return new(false, "La preuve de reprise du candidat est absente ou incohérente ; conservez les checkpoints.");
+                var retryRejectedResponse = correction is not null &&
+                    ReactCorrectionPatches.HasRetryableValidationRejection(current, correction) &&
+                    current.CorrectionAttempts < options.CorrectionLimitFor(current);
+                if (correction is { Ready: false, ReadyResumptionId: { } readyAuthorization } &&
+                    (flow.ReadyCandidateResumptions.FirstOrDefault(item => item.Id == readyAuthorization) is not { } authorized ||
+                     !ReactCorrectionPatches.HasReadyResumption(current, authorized, requireRejection: true)))
+                    return new(false, "La preuve de rejet et d'autorisation de correction est absente ou incohérente.");
+                var unreservedReadyCorrection = correction is not null &&
+                    ReactCorrectionPatches.IsUnreservedReadyCorrection(current, correction);
+                if (correction is { InFlight: true } && !unreservedReadyCorrection)
+                    return new(false, "Une correction interrompue n'a pas de preuve suffisante pour une reprise sans doublon.");
+                if (correction?.Failure is not null && !retryRejectedResponse)
+                    return new(false, "La correction enregistrée ne dispose pas d'une autorisation de nouvelle tentative valide ou sa limite est atteinte.");
+                if (unreservedReadyCorrection)
+                    flow = flow with
+                    {
+                        SoftwareCorrections = [.. flow.SoftwareCorrections.SkipLast(1),
+                            correction! with
+                            {
+                                InFlight = false, CallState = ReactSoftwareCorrectionCallState.Prepared,
+                                ActiveAttempt = null, ActiveGroupIndex = null
+                            }]
+                    };
+                if (retryRejectedResponse)
+                    flow = flow with
+                    {
+                        SoftwareCorrections =
+                        [
+                            .. flow.SoftwareCorrections.SkipLast(1),
+                            correction! with { RetryAuthorizationId = Guid.NewGuid() }
+                        ]
+                    };
+                flow = flow with
+                {
+                    PendingSoftwareAgentCall = null,
+                    PendingSoftwareCallReservationId = null,
+                    PendingSoftwareCallReservationCount = null,
+                    PendingSoftwareCallDeliveryState = SoftwareAgentCallDeliveryState.Unknown,
+                    SoftwareCheckpointVersion = flow.SoftwareCheckpointVersion + 1
+                };
             }
             if (flow.RequirePlanApproval && flow.Plan is not null && flow.PlanApproval?.Approved != true)
-                return false;
+                return new(false, "Le plan de génération n'est pas approuvé ; une décision sur le plan est nécessaire.");
             if (flow.PlannerGenerationLimit > 0 && flow.Plan is null &&
                 flow.CountPlannerAttempts() >= Math.Min(3, flow.PlannerGenerationLimit))
-                return false;
+                return new(false, "La limite de tentatives Planner est atteinte.");
+            if (current.TemplateId == MissionReactTemplate.Id && flow.AutomaticReactCorrections &&
+                flow.Revisions is not { Count: > 0 } &&
+                flow.SoftwareCorrections.LastOrDefault() is { Ready: true, Calls.Count: 0 } ready)
+            {
+                var previous = flow.ReadyCandidateResumptions.LastOrDefault(item => item.ReadyCorrectionId == ready.Id);
+                if (previous is not null && !ReactCorrectionPatches.HasReadyResumption(current, previous))
+                    return new(false, "La preuve de reprise du candidat est absente ou incohérente ; conservez les checkpoints.");
+                if (previous is null)
+                {
+                    var authorization = new ReactReadyCandidateResumption(Guid.NewGuid(), id, flow.WorkflowId,
+                        flow.Version, ready.Id, Guid.NewGuid(), PlanFingerprint(current, flow.Version),
+                        ReactCorrectionPatches.SourceHash(ready.Candidate), ReactCorrectionPatches.ReadyFingerprint(ready),
+                        ReactCorrectionPatches.ReadyWorkflowFingerprint(current), DateTimeOffset.UtcNow);
+                    var authorized = current with { Workflow = flow with
+                    {
+                        ReadyCandidateResumptions = [.. flow.ReadyCandidateResumptions, authorization]
+                    } };
+                    if (!ReactCorrectionPatches.HasReadyResumption(authorized, authorization))
+                        return new(false, "L'intégrité du candidat et de son plan ne permet pas une reprise sûre.");
+                    flow = authorized.Workflow!;
+                }
+            }
+            if (!commit)
+                return new(true, "Reprise disponible après confirmation ; les agents peuvent consommer des générations et Docker nécessite une autorisation distincte.");
+            missions[id] = current;
             cancellations.GetValueOrDefault(id)?.Dispose();
             cancellations[id] = new();
             var steps = flow.Steps;
@@ -733,8 +836,28 @@ public sealed partial class MissionStore : IMissionService, IDisposable
             });
             AddEvent(id, "Queue", StepStatus.Running, "Explicit resumption; prior authorization discarded.");
             if (!queue.Writer.TryWrite(id)) throw new InvalidOperationException("Mission queue closed.");
-            return true;
+            return new(true, "Reprise mise en file ; les anciennes autorisations d'exécution ont été abandonnées.");
         }
+    }
+
+    private static bool HasPublishedReadyCandidateForInterruptedReview(
+        MissionSnapshot mission, ReactSoftwareCorrection correction)
+    {
+        var flow = mission.Workflow!;
+        var revision = flow.Revisions?.LastOrDefault();
+        var review = flow.Steps.LastOrDefault(step => step.Kind == "Review");
+        if (mission.TemplateId != MissionReactTemplate.Id || !mission.HasWorkspace ||
+            revision?.ExecutionPlan?.ReactDescriptor is null || revision.Version >= flow.Version ||
+            correction.ActiveAttempt?.WorkflowVersion != revision.Version ||
+            review is null || !review.Id.StartsWith("resume-review-", StringComparison.Ordinal) ||
+            review.Status is not (WorkflowStatus.Failed or WorkflowStatus.Cancelled) ||
+            flow.PendingSoftwareAgentCall is { } pending && pending != review.Id ||
+            flow.Proposal is not null || flow.Draft is not { } draft ||
+            ExecutionPlanRevisionGuard.Compare(revision, revision.ExecutionPlan, mission.TemplateId, staticReview: true).Count != 0 ||
+            ReactCorrectionPatches.SourceHash(revision.Files) != ReactCorrectionPatches.SourceHash(draft))
+            return false;
+        var published = mission with { Workflow = flow with { Version = revision.Version } };
+        return ReactCorrectionPatches.HasReadyCandidate(published, correction, draft);
     }
 
     public bool PrepareRevalidation(Guid id, DateTimeOffset expectedUpdatedAt, ExecutionPlan plan)
@@ -1150,10 +1273,16 @@ public sealed partial class MissionStore : IMissionService, IDisposable
     public IDisposable EnterGenerationScope(Guid id, string role) => EnterGenerationScope(id, role, null);
 
     public IDisposable EnterGenerationScope(Guid id, string role, Guid? capacityId) =>
-        new LlmGenerationScope((request, actualRole) => ReserveGeneration(id, actualRole, request.Model.Name, capacityId), role);
+        new LlmGenerationScope(
+            (request, actualRole, reservationId) =>
+                ReserveGeneration(id, actualRole, request, capacityId, reservationId),
+            (reservationId, mayHaveBeenSent) => RecordSoftwareCallDelivery(id, reservationId, mayHaveBeenSent),
+            role);
 
-    private void ReserveGeneration(Guid id, string role, string model, Guid? capacityId)
+    private void ReserveGeneration(Guid id, string role, LlmRequest request, Guid? capacityId, Guid reservationId)
     {
+        var model = request.Model.Name;
+        var callId = request.CallId;
         lock (sync)
         {
             using var persistence = new PersistenceLock(persistenceMutexName);
@@ -1182,6 +1311,7 @@ public sealed partial class MissionStore : IMissionService, IDisposable
                 throw error;
             }
             var repair = ReadRepairCheckpoint(id);
+            ReactSoftwareCorrection? softwareCorrection = null;
             if (repair is not null)
             {
                 RequireApprovedPlan(mission);
@@ -1212,10 +1342,29 @@ public sealed partial class MissionStore : IMissionService, IDisposable
             else if (mission.Workflow is { AutomaticReactCorrections: true } software &&
                 software.SoftwareCorrections.LastOrDefault() is { Ready: false } correction)
             {
+                softwareCorrection = correction;
                 RequireApprovedPlan(mission);
+                if (correction.ReadyResumptionId is { } readyAuthorization &&
+                    (software.ReadyCandidateResumptions.FirstOrDefault(item => item.Id == readyAuthorization) is not { } authorized ||
+                     !ReactCorrectionPatches.HasReadyResumption(mission, authorized, requireRejection: true)))
+                    throw new StudioValidationException("Ready revalidation authorization is missing or changed; no model was called.");
                 var paid = reservations.Count(item => item.CapacityId == correction.Id);
                 if (mission.Status != MissionStatus.Running || role != "Developer" || capacityId != correction.Id ||
-                    !correction.InFlight || correction.Failure is not null || correction.CompletedGroups != paid ||
+                    !correction.InFlight || correction.Failure is not null ||
+                    correction.CallState != ReactSoftwareCorrectionCallState.InFlight ||
+                    correction.ActiveAttempt is not { } activeAttempt || callId is not { } activeCallId ||
+                    activeAttempt.CallId != activeCallId || activeAttempt.MissionId != mission.Id ||
+                    activeAttempt.WorkflowId != mission.Workflow!.WorkflowId ||
+                    mission.Workflow.MissionId != mission.Id ||
+                    activeAttempt.WorkflowVersion != mission.Workflow.Version ||
+                    activeAttempt.PlanFingerprint != PlanFingerprint(mission, activeAttempt.WorkflowVersion) ||
+                    activeAttempt.CorrectionId != correction.Id || activeAttempt.GroupIndex != paid ||
+                    activeAttempt.GroupPaths is null ||
+                    !activeAttempt.GroupPaths.SequenceEqual(ReactCorrectionPatches.AllowedPaths(request), StringComparer.Ordinal) ||
+                    activeAttempt.SourceFingerprint != ReactCorrectionPatches.SourceHash(correction.Candidate) ||
+                    activeAttempt.CallFingerprint != ReactCorrectionPatches.RequestFingerprint(request) ||
+                    correction.ActiveGroupIndex != paid || correction.ActiveReservationId is not null ||
+                    correction.CompletedGroups != paid ||
                     paid >= correction.Calls.Count || model != correction.Calls[paid].Model.Name ||
                     limit - reservations.Count < correction.Calls.Count - paid + correction.ReviewerCapacity)
                     throw new StudioValidationException("Automatic correction capacity is protected; no model was called.");
@@ -1230,14 +1379,99 @@ public sealed partial class MissionStore : IMissionService, IDisposable
                     throw new StudioValidationException("The software agent operation is missing or already charged; no automatic replay.");
                 if (role != "Planner") RequireApprovedPlan(mission);
             }
-            var reservation = new MissionGenerationReservation(Guid.NewGuid(), role, model, DateTimeOffset.UtcNow, capacityId);
+            var reservation = new MissionGenerationReservation(reservationId, role, model, DateTimeOffset.UtcNow,
+                capacityId, callId);
+            var workflow = mission.Workflow;
+            if (workflow is { AutomaticReactCorrections: true, PendingSoftwareAgentCall: not null })
+                workflow = workflow with
+                {
+                    PendingSoftwareCallReservationId = reservationId,
+                    PendingSoftwareCallReservationCount = reservations.Count + 1,
+                    PendingSoftwareCallDeliveryState = SoftwareAgentCallDeliveryState.Unknown,
+                    SoftwareCheckpointVersion = workflow.SoftwareCheckpointVersion + 1
+                };
+            if (softwareCorrection is not null)
+                workflow = workflow! with
+                {
+                    SoftwareCorrections =
+                    [
+                        .. workflow.SoftwareCorrections.SkipLast(1),
+                        softwareCorrection with { ActiveReservationId = reservationId }
+                    ],
+                    SoftwareCheckpointVersion = workflow.SoftwareCheckpointVersion + 1
+                };
             mission = mission with
             {
                 GenerationReservations = [.. reservations, reservation],
+                Workflow = workflow,
                 Events = [.. mission.Events, new(mission.Events.Count + 1, reservation.ReservedAt,
                     "GenerationBudget", StepStatus.Running, $"{role}: reserved generation {reservations.Count + 1}/{limit} ({model}); never automatically refunded.")]
             };
             // Budget metadata does not change the workspace's optimistic concurrency timestamp.
+            missions[id] = Save(mission);
+        }
+    }
+
+    private void RecordSoftwareCallDelivery(Guid id, Guid reservationId, bool mayHaveBeenSent)
+    {
+        lock (sync)
+        {
+            using var persistence = new PersistenceLock(persistenceMutexName);
+            var path = Path.Combine(directory, id.ToString("N") + ".json");
+            SafePaths.RejectLinks(path);
+            var mission = JsonSerializer.Deserialize<MissionSnapshot>(File.ReadAllBytes(path), JsonOptions)
+                ?? throw new InvalidDataException("Invalid persisted software-call state.");
+            if (mission.Id != id) throw new InvalidDataException("Persisted software-call identity changed.");
+            if (mission.Workflow is not { AutomaticReactCorrections: true } flow)
+                return;
+            if (flow.PendingSoftwareAgentCall is null)
+            {
+                var correction = flow.SoftwareCorrections.LastOrDefault();
+                var reservation = mission.GenerationReservations?.SingleOrDefault(item => item.Id == reservationId);
+                if (correction is not { InFlight: true, ActiveGroupIndex: not null } ||
+                    reservation is null || reservation.CapacityId != correction.Id ||
+                    reservation.CallId is null || reservation.CallId != correction.ActiveAttempt?.CallId ||
+                    correction.ActiveReservationId != reservationId ||
+                    mission.GenerationReservations![^1].Id != reservationId ||
+                    correction.CallState != ReactSoftwareCorrectionCallState.InFlight)
+                    return;
+                var deliveryState = mayHaveBeenSent
+                    ? ReactSoftwareCorrectionCallState.MayHaveBeenSent
+                    : ReactSoftwareCorrectionCallState.DefinitelyNotSent;
+                mission = mission with
+                {
+                    Workflow = flow with
+                    {
+                        SoftwareCorrections =
+                        [
+                            .. flow.SoftwareCorrections.SkipLast(1),
+                            correction with { CallState = deliveryState }
+                        ],
+                        SoftwareCheckpointVersion = flow.SoftwareCheckpointVersion + 1
+                    },
+                    Events = [.. mission.Events, new(mission.Events.Count + 1, DateTimeOffset.UtcNow,
+                        "SoftwareCorrectionCallDelivery", mayHaveBeenSent ? StepStatus.Unavailable : StepStatus.Failed,
+                        mayHaveBeenSent
+                                ? $"Correction group {correction.ActiveGroupIndex + 1}, call {reservation.CallId}, reservation {reservationId} may have been sent; its result remains ambiguous."
+                                : $"Correction group {correction.ActiveGroupIndex + 1}, call {reservation.CallId}, reservation {reservationId} was definitely not sent; its reservation remains consumed.")]
+                };
+                missions[id] = Save(mission);
+                return;
+            }
+            if (flow.PendingSoftwareCallReservationId != reservationId ||
+                flow.PendingSoftwareCallReservationCount != mission.GenerationReservations!.Count ||
+                mission.GenerationReservations[^1].Id != reservationId)
+                throw new StudioValidationException("The software-call delivery marker does not match its reserved generation.");
+            mission = mission with
+            {
+                Workflow = flow with
+                {
+                    PendingSoftwareCallDeliveryState = mayHaveBeenSent
+                        ? SoftwareAgentCallDeliveryState.MayHaveBeenSent
+                        : SoftwareAgentCallDeliveryState.DefinitelyNotSent,
+                    SoftwareCheckpointVersion = flow.SoftwareCheckpointVersion + 1
+                }
+            };
             missions[id] = Save(mission);
         }
     }

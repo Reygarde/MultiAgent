@@ -1,8 +1,9 @@
 import { render, screen, within } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import userEvent from '@testing-library/user-event'
 import { api } from './api'
 import { MissionDetails } from './MissionDetails'
+import * as transport from './desktop/transport'
 import { mission } from './test/fixtures'
 import type { ModelCompatibility } from './modelLibraryApi'
 import type { Mission } from './types'
@@ -25,6 +26,17 @@ const waitingForPlan: Mission = {
 }
 
 describe('MissionDetails', () => {
+  beforeEach(() => {
+    vi.spyOn(api, 'resumeEligibility').mockResolvedValue({ available: true, reason: 'Reprise sûre.' })
+  })
+
+  it('surfaces the API conflict detail instead of a generic 409', async () => {
+    vi.spyOn(transport, 'fetchApi').mockResolvedValue(new Response(
+      JSON.stringify({ title: 'Reprise indisponible', detail: 'Appel potentiellement envoyé : aucun rejeu.' }),
+      { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+    ))
+    await expect(api.resume(mission.id)).rejects.toThrow('Appel potentiellement envoyé : aucun rejeu.')
+  })
   it('shows frozen sizing limits separately from the generation budget', () => {
     render(<MissionDetails mission={{ ...waitingForPlan,
       sizing: { id: 'saved', name: 'Profil enregistré', maxFiles: 64, maxPlannedFiles: 32,
@@ -50,8 +62,42 @@ describe('MissionDetails', () => {
     expect(panel).toHaveTextContent('1/2 groupes Developer contrôlés')
     expect(panel).toHaveTextContent('1 appels Reviewer prévus')
     expect(panel).toHaveTextContent('approuver le plan avant Developer')
-    expect(panel).toHaveTextContent('aucune compilation ni aucun test du projet exécuté')
-    expect(panel).toHaveTextContent('Un appel ambigu ne sera pas rejoué automatiquement')
+    expect(panel).toHaveTextContent('aucune compilation ni aucun test du projet enregistré dans le workflow')
+    expect(screen.getByRole('region', { name: 'Workflow collaboratif' }))
+      .toHaveTextContent('Un appel ambigu ne sera pas rejoué automatiquement')
+  })
+
+  it('displays a successful v1 technical report separately from a cancelled v2 and ambiguous Reviewer', async () => {
+    vi.spyOn(transport, 'fetchApi').mockResolvedValue(Response.json({ reports: [{
+      runId: 'old-run', status: 'Succeeded', startedAt: '2026-01-01T12:00:00Z',
+      plan: { missionId: mission.id, revisionVersion: 1, revisionFingerprint: 'v1-hash', fileCount: 13,
+        imageReference: 'react', image: 'sha256:image', timeoutSeconds: 120, fingerprint: 'plan-hash', stages: [] },
+      results: [
+        { stage: 'TypeScript', status: 'Succeeded', exitCode: 0, log: '' },
+        { stage: 'Build', status: 'Succeeded', exitCode: 0, log: '' },
+        { stage: 'Tests', status: 'Succeeded', exitCode: 0, totalTests: 5, failedTests: 0, log: '' },
+      ],
+    }] }))
+    const interrupted: Mission = {
+      ...mission, status: 'Cancelled', templateId: 'react-typescript-vite-v2', hasWorkspace: true,
+      workflow: {
+        ...waitingForPlan.workflow!, version: 2, requirePlanApproval: false,
+        pendingSoftwareAgentCall: 'resume-review-8', pendingSoftwareCallDeliveryState: 'MayHaveBeenSent',
+        revisions: [{ version: 1, createdAt: mission.createdAt, reason: 'Publication', fingerprint: 'v1-hash', files: [] }],
+      },
+    }
+    render(<MissionDetails mission={interrupted} cancel={vi.fn()} busy={false} refresh={vi.fn()} />)
+    const workflow = screen.getByRole('region', { name: 'Workflow collaboratif' })
+    expect(workflow).toHaveTextContent('Workflow · version 2')
+    expect(workflow).toHaveTextContent('Cancelled')
+    expect(workflow).toHaveTextContent('resume-review-8 · MayHaveBeenSent')
+    const validation = screen.getByRole('region', { name: 'Validation indépendante de la révision React' })
+    expect(await within(validation).findByText(/Dernière validation technique · révision v1 · Réussi/)).toBeInTheDocument()
+    expect(validation).toHaveTextContent('TypeScript · Réussi')
+    expect(validation).toHaveTextContent('Build Vite · Réussi')
+    expect(validation).toHaveTextContent('Tests Vitest · Réussi')
+    expect(validation).toHaveTextContent('5 tests · 0 échecs')
+    expect(workflow).not.toHaveTextContent('Verified')
   })
 
   it('displays the assisted amendment, retained errors and new approval without starting work', () => {
@@ -207,6 +253,7 @@ describe('MissionDetails', () => {
       plan: { name: 'Rejected counter', files: [] }, criteria: [{ id: 'C1', requirement: 'Initial value 0' }],
       errors: [{ criterionId: 'C1', rule: 'MissingTest', field: 'criterionCoverage.paths',
         path: null, explanation: 'A business test is required.' }], rawTraceAvailable: true,
+      dependencyNormalizations: [{ field: 'files[0].dependsOn[0]', path: 'src/App.tsx', package: 'react' }],
     }])
     const raw = vi.spyOn(api, 'plannerRawResponse').mockResolvedValue({ responseBody: 'private raw response' })
     const remove = vi.spyOn(api, 'deletePlannerDiagnostics').mockResolvedValue()
@@ -219,6 +266,7 @@ describe('MissionDetails', () => {
     const summary = await screen.findByText('Planner · simulated-planner · tentative 1 · Rejected')
     await userEvent.click(summary)
     expect(screen.getByText(/C1 · MissingTest · champ criterionCoverage.paths/)).toBeInTheDocument()
+    expect(screen.getByText(/Normalisation déterministe.*package npm react retiré/)).toBeInTheDocument()
     expect(screen.getByText(/"name": "Rejected counter"/)).toBeInTheDocument()
     expect(raw).not.toHaveBeenCalled()
     await userEvent.click(screen.getByRole('button', { name: 'Consulter la réponse brute privée' }))

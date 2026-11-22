@@ -504,6 +504,7 @@ public sealed class ReactDraftRepairTests(ITestOutputHelper output)
                     Plan = new("Synthetic records", "Synthetic repair fixture", ["Preserve exports."],
                         [new("src/App.tsx", "Interface", []), new("src/App.test.tsx", "Functional tests", ["src/App.tsx"])])
                     {
+                        Dependencies = [],
                         OriginalRequest = current.Task, AcceptanceCriteria = current.Workflow.AcceptanceCriteria,
                         CriterionCoverage = current.Workflow.AcceptanceCriteria.Select(item => new PlannedCriterionCoverage(
                             item.Id, ["src/App.tsx", "src/App.test.tsx"], "Implementation and functional test.")).ToArray()

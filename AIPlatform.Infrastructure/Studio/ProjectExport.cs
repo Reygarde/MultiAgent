@@ -41,7 +41,7 @@ public sealed partial class ProjectExport(IWorkspaceStore workspaces, StudioOpti
         return buffer.ToArray();
     }
 
-    internal static bool ContainsPotentialSecret(string content) =>
+    public static bool ContainsPotentialSecret(string content) =>
         SecretAssignment().IsMatch(content) || SecretObject().IsMatch(content) || KnownCredential().IsMatch(content);
 
     [GeneratedRegex("""(?i)\b(?:[a-z0-9_]*(?:token|secret|password|api[_-]?key|connectionstring)[a-z0-9_]*)["']?\s*[:=]\s*["'][^"'\r\n]+["']""",

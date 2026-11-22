@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using AIPlatform.Core;
 using AIPlatform.Core.Studio;
@@ -9,6 +10,245 @@ namespace AIPlatform.Tests;
 
 public sealed class ReactRevisionValidationTests
 {
+    [Fact]
+    public async Task MultipleRunsKeepEverySnapshotAndExposeHistoryWithoutChangingTheMission()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishAsync();
+        fixture.Process.TypeScriptSucceeds = true;
+        var clock = new AdjustableClock();
+        var service = fixture.Service(clock: clock);
+        var missionBefore = File.ReadAllBytes(fixture.MissionPath);
+        var filesBefore = fixture.Files.Select(file => (file.Path,
+            Content: File.ReadAllBytes(SafePaths.Resolve(fixture.Workspaces.GetDirectory(fixture.Id), file.Path)))).ToArray();
+
+        var firstPlan = await service.PrepareAsync(fixture.Id, default);
+        var first = await service.AuthorizeAsync(fixture.Id, new(true, firstPlan.RequestId, firstPlan.Plan.Fingerprint), default);
+        Assert.Equal("Succeeded", first.Status);
+        Assert.Equal(ReactExecutionPlanDescriptor.Manifest(fixture.Files), first.Plan.Files);
+        var before = Directory.GetFiles(fixture.Reports).ToDictionary(path => path, File.ReadAllBytes);
+        Assert.Equal(5, before.Count);
+
+        clock.Now = clock.Now.AddMinutes(1);
+        var secondPlan = await service.PrepareAsync(fixture.Id, default);
+        var second = await service.AuthorizeAsync(fixture.Id, new(true, secondPlan.RequestId, secondPlan.Plan.Fingerprint), default);
+        Assert.NotEqual(first.RunId, second.RunId);
+        Assert.Equal(10, Directory.GetFiles(fixture.Reports).Length);
+        foreach (var (path, content) in before) Assert.Equal(content, File.ReadAllBytes(path));
+        var history = await fixture.Service().GetReportsAsync(fixture.Id, default);
+        Assert.Equal(new[] { second.RunId, first.RunId }, history.Select(report => report.RunId));
+        Assert.Equal(second.RunId, (await service.GetReportAsync(fixture.Id, default))!.RunId);
+        Assert.Equal(missionBefore, File.ReadAllBytes(fixture.MissionPath));
+        foreach (var file in filesBefore)
+            Assert.Equal(file.Content, File.ReadAllBytes(SafePaths.Resolve(fixture.Workspaces.GetDirectory(fixture.Id), file.Path)));
+        Assert.Equal(13, fixture.Store.Get(fixture.Id)!.GenerationReservations!.Count);
+    }
+
+    [Fact]
+    public async Task LegacySuccessfulReportRemainsReadableForCancelledWorkflowWithAmbiguousReviewer()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishAsync();
+        var service = fixture.Service();
+        var preparation = await service.PrepareAsync(fixture.Id, default);
+        var legacy = new ReactRevisionValidationReport(Guid.NewGuid(), preparation.Plan with { Files = null },
+            "Succeeded", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow,
+            [new("TypeScript", "Succeeded", 0, ""), new("Build", "Succeeded", 0, ""),
+             new("Tests", "Succeeded", 0, "", 5, FailedTests: 0)]);
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.LegacyReport)!);
+        var oldFormat = JsonNode.Parse(JsonSerializer.Serialize(legacy, new JsonSerializerOptions(JsonSerializerDefaults.Web)))!;
+        oldFormat["plan"]!.AsObject().Remove("files");
+        await File.WriteAllTextAsync(fixture.LegacyReport, oldFormat.ToJsonString());
+        var beforeReport = File.ReadAllBytes(fixture.LegacyReport);
+        fixture.Process.TypeScriptSucceeds = true;
+        var newer = await service.AuthorizeAsync(fixture.Id,
+            new(true, preparation.RequestId, preparation.Plan.Fingerprint), default);
+        fixture.Store.Update(fixture.Id, mission => mission with
+        {
+            Status = MissionStatus.Cancelled, Workflow = mission.Workflow! with
+            {
+                PendingSoftwareAgentCall = "resume-review-8",
+                PendingSoftwareCallDeliveryState = SoftwareAgentCallDeliveryState.MayHaveBeenSent
+            }
+        });
+        var beforeMission = File.ReadAllBytes(fixture.MissionPath);
+        var calls = fixture.Process.Calls.Count;
+        var history = await fixture.Service().GetReportsAsync(fixture.Id, default);
+        Assert.Equal(2, history.Count);
+        Assert.Contains(history, item => item.RunId == newer.RunId);
+        var actual = Assert.Single(history, item => item.RunId == legacy.RunId);
+        Assert.Equal(legacy.RunId, actual.RunId);
+        Assert.Equal("Succeeded", actual.Status);
+        Assert.Equal(1, actual.Plan.RevisionVersion);
+        Assert.Equal(5, actual.Results[2].TotalTests);
+        Assert.Null(actual.Plan.Files);
+        Assert.Equal(beforeMission, File.ReadAllBytes(fixture.MissionPath));
+        Assert.Equal(beforeReport, File.ReadAllBytes(fixture.LegacyReport));
+        Assert.Equal(calls, fixture.Process.Calls.Count);
+    }
+
+    [Fact]
+    public async Task InterruptedRunKeepsCompletedStagesAndDoesNotRetryAfterRestart()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishAsync();
+        fixture.Process.TypeScriptSucceeds = true;
+        fixture.Process.BlockBuild = true;
+        var service = fixture.Service();
+        var before = File.ReadAllBytes(fixture.MissionPath);
+        var prepared = await service.PrepareAsync(fixture.Id, default);
+        using var cancel = new CancellationTokenSource();
+        var execution = service.AuthorizeAsync(fixture.Id, new(true, prepared.RequestId, prepared.Plan.Fingerprint), cancel.Token);
+        await fixture.Process.BuildStarted.Task.WaitAsync(TimeSpan.FromSeconds(10));
+        var snapshots = Directory.GetFiles(fixture.Reports).ToDictionary(path => path, File.ReadAllBytes);
+        Assert.Equal(2, snapshots.Count);
+        var running = Assert.Single(await service.GetReportsAsync(fixture.Id, default));
+        Assert.Equal("Running", running.Status);
+        Assert.Equal("TypeScript", Assert.Single(running.Results).Stage);
+
+        var interruptedAfterRestart = Assert.Single(await fixture.Service().GetReportsAsync(fixture.Id, default));
+        Assert.Equal("Interrupted", interruptedAfterRestart.Status);
+        Assert.Equal("TypeScript", Assert.Single(interruptedAfterRestart.Results).Stage);
+        Assert.Equal(2, fixture.Process.Calls.Count(call => call[0] == "run"));
+        foreach (var (path, content) in snapshots) Assert.Equal(content, File.ReadAllBytes(path));
+        cancel.Cancel();
+        var finished = await execution;
+        Assert.Equal("Interrupted", finished.Status);
+        Assert.Equal("Interrupted", Assert.Single(await fixture.Service().GetReportsAsync(fixture.Id, default)).Status);
+        foreach (var (path, content) in snapshots) Assert.Equal(content, File.ReadAllBytes(path));
+        Assert.Equal(before, File.ReadAllBytes(fixture.MissionPath));
+        Assert.Equal(2, fixture.Process.Calls.Count(call => call[0] == "run"));
+    }
+
+    [Fact]
+    public async Task HistoricalPreparationPersistsSeparateProofWithoutGenerationAndReusesItAfterRestart()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishHistoricalAsync();
+        var before = File.ReadAllBytes(fixture.MissionPath);
+        var service = fixture.Service();
+        var prepared = await service.PrepareAsync(fixture.Id, default);
+        Assert.Equal(Fixture.Image, prepared.Plan.Image);
+        Assert.NotNull(prepared.Plan.PreparationEvidenceId);
+        Assert.Equal(prepared.RequestId, (await service.PrepareAsync(fixture.Id, default)).RequestId);
+        var restarted = await fixture.Service().PrepareAsync(fixture.Id, default);
+        Assert.Equal(prepared.Plan.PreparationEvidenceId, restarted.Plan.PreparationEvidenceId);
+        var evidencePath = Assert.Single(Directory.GetFiles(fixture.Preparations));
+        var evidence = JsonSerializer.Deserialize<ReactHistoricalExecutionPreparation>(
+            File.ReadAllText(evidencePath), new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+        Assert.Equal(prepared.Plan.PreparationEvidenceId, evidence.Id);
+        Assert.Equal(prepared.Plan.RevisionFingerprint, evidence.RevisionFingerprint);
+        Assert.Equal(Fixture.Image, evidence.PreparedExecutionPlan.ReactDescriptor!.ImageDigest);
+        Assert.All(fixture.Process.Calls, call => Assert.Contains(call[0], new[] { "info", "image" }));
+        Assert.Equal(before, File.ReadAllBytes(fixture.MissionPath));
+        Assert.Equal(6, fixture.Store.Get(fixture.Id)!.GenerationReservations!.Count);
+        Assert.Null(await service.GetReportAsync(fixture.Id, default));
+
+        var report = await service.AuthorizeAsync(fixture.Id,
+            new(true, prepared.RequestId, prepared.Plan.Fingerprint), default);
+        Assert.Equal(3, report.Results.Count);
+        Assert.Equal(before, File.ReadAllBytes(fixture.MissionPath));
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => service.AuthorizeAsync(fixture.Id,
+            new(true, prepared.RequestId, prepared.Plan.Fingerprint), default));
+        Assert.Equal(3, fixture.Process.Calls.Count(call => call[0] == "run"));
+    }
+
+    [Theory]
+    [InlineData("disabled")]
+    [InlineData("untrusted")]
+    [InlineData("offline")]
+    [InlineData("absent")]
+    [InlineData("wrong-image")]
+    [InlineData("tag")]
+    public async Task HistoricalPreparationRequiresAnAvailableTrustedImmutableImage(string defect)
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishHistoricalAsync();
+        if (defect == "untrusted") fixture.Trust.ExpectedImage = null;
+        if (defect == "offline") fixture.Process.LinuxAvailable = false;
+        if (defect == "absent") fixture.Process.ImagePresent = false;
+        if (defect == "wrong-image") fixture.Process.ImageId = "sha256:" + new string('b', 64);
+        if (defect == "tag") fixture.Process.ImageId = ReactTemplate.Image;
+        var service = fixture.Service(defect == "disabled" ? fixture.Sandbox with { Enabled = false } : null);
+        var before = File.ReadAllBytes(fixture.MissionPath);
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => service.PrepareAsync(fixture.Id, default));
+        Assert.False(Directory.Exists(fixture.Preparations));
+        Assert.DoesNotContain(fixture.Process.Calls, call => call[0] is "run" or "rm");
+        Assert.Equal(before, File.ReadAllBytes(fixture.MissionPath));
+    }
+
+    [Theory]
+    [InlineData("source")]
+    [InlineData("plan")]
+    [InlineData("revision")]
+    [InlineData("mission")]
+    [InlineData("ambiguous")]
+    [InlineData("configuration")]
+    [InlineData("image")]
+    [InlineData("evidence")]
+    [InlineData("missing-evidence")]
+    [InlineData("persisted-revision")]
+    public async Task HistoricalAuthorizationRefusesChangedBindingsWithoutExecution(string defect)
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishHistoricalAsync();
+        var service = fixture.Service();
+        var prepared = await service.PrepareAsync(fixture.Id, default);
+        if (defect == "source")
+            await File.AppendAllTextAsync(SafePaths.Resolve(fixture.Workspaces.GetDirectory(fixture.Id), "src/App.tsx"), "\nchanged");
+        if (defect is "plan" or "revision" or "mission" or "ambiguous")
+            fixture.Store.Update(fixture.Id, mission => defect switch
+            {
+                "plan" => mission with { Workflow = mission.Workflow! with { Plan = mission.Workflow.Plan! with { Name = "Changed" } } },
+                "revision" => mission with { Workflow = mission.Workflow! with {
+                    Revisions = [mission.Workflow.Revisions![0] with { Reason = "Changed publication" }] } },
+                "mission" => mission with { Status = MissionStatus.Failed },
+                _ => mission with { Workflow = mission.Workflow! with { PendingSoftwareAgentCall = "MayHaveBeenSent" } }
+            });
+        if (defect == "configuration")
+            service = fixture.Service(fixture.Sandbox with { MemoryMegabytes = 1024 });
+        if (defect == "image")
+            fixture.Trust.ExpectedImage = fixture.Process.ImageId = "sha256:" + new string('b', 64);
+        if (defect == "evidence")
+            await File.WriteAllTextAsync(Assert.Single(Directory.GetFiles(fixture.Preparations)), "{}");
+        if (defect == "missing-evidence")
+            File.Delete(Assert.Single(Directory.GetFiles(fixture.Preparations)));
+        if (defect == "persisted-revision")
+        {
+            var mission = fixture.Store.Get(fixture.Id)!;
+            var changed = mission with { Workflow = mission.Workflow! with
+            {
+                Revisions = [mission.Workflow.Revisions![0] with { Reason = "Changed on disk only" }]
+            } };
+            var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
+            json.Converters.Add(new JsonStringEnumConverter());
+            await File.WriteAllTextAsync(fixture.MissionPath, JsonSerializer.Serialize(changed, json));
+        }
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => service.AuthorizeAsync(fixture.Id,
+            new(true, prepared.RequestId, prepared.Plan.Fingerprint), default));
+        Assert.DoesNotContain(fixture.Process.Calls, call => call[0] is "run" or "rm");
+        Assert.Equal(6, fixture.Store.Get(fixture.Id)!.GenerationReservations!.Count);
+    }
+
+    [Fact]
+    public async Task HistoricalPreparationRejectsChangedSourcesConfigurationAndAmbiguousCheckpointBeforeInspection()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishHistoricalAsync();
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() =>
+            fixture.Service(fixture.Sandbox with { CpuCount = 1 }).PrepareAsync(fixture.Id, default));
+        fixture.Store.Update(fixture.Id, mission => mission with { Workflow = mission.Workflow! with
+        {
+            SoftwareCorrections = [new(Guid.NewGuid(), "generate", "interrupted", fixture.Files, fixture.Files,
+                [], 0, [], InFlight: true)]
+        } });
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => fixture.Service().PrepareAsync(fixture.Id, default));
+        fixture.Store.Update(fixture.Id, mission => mission with { Workflow = mission.Workflow! with { SoftwareCorrections = [] } });
+        await File.AppendAllTextAsync(SafePaths.Resolve(fixture.Workspaces.GetDirectory(fixture.Id), "src/App.tsx"), "\nchanged");
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => fixture.Service().PrepareAsync(fixture.Id, default));
+        Assert.Empty(fixture.Process.Calls);
+    }
+
     [Fact]
     public async Task RequiresExplicitSingleUseAuthorizationAndRunsExistingSandboxWithoutMutatingMission()
     {
@@ -98,6 +338,22 @@ public sealed class ReactRevisionValidationTests
         await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() =>
             fixture.Service(fixture.Sandbox with { Enabled = false }).PrepareAsync(fixture.Id, default));
         Assert.Empty(fixture.Process.Calls);
+    }
+
+    [Fact]
+    public async Task ExpiredValidationApprovalCannotStartAContainer()
+    {
+        using var fixture = new Fixture();
+        await fixture.PublishAsync();
+        var clock = new AdjustableClock();
+        var service = fixture.Service(clock: clock);
+        var before = File.ReadAllBytes(fixture.MissionPath);
+        var prepared = await service.PrepareAsync(fixture.Id, default);
+        clock.Now = prepared.ExpiresAt;
+        await Assert.ThrowsAsync<ReactRevisionValidationConflictException>(() => service.AuthorizeAsync(fixture.Id,
+            new(true, prepared.RequestId, prepared.Plan.Fingerprint), default));
+        Assert.Empty(fixture.Process.Calls);
+        Assert.Equal(before, File.ReadAllBytes(fixture.MissionPath));
     }
 
     [Theory]
@@ -297,6 +553,12 @@ public sealed class ReactRevisionValidationTests
         }
     }
 
+    private sealed class AdjustableClock : TimeProvider
+    {
+        public DateTimeOffset Now { get; set; } = DateTimeOffset.UtcNow;
+        public override DateTimeOffset GetUtcNow() => Now;
+    }
+
     private sealed class Fixture : IDisposable
     {
         public const string Image = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -304,17 +566,21 @@ public sealed class ReactRevisionValidationTests
         public StudioOptions Options { get; } = new() { DataDirectory = Path.Combine(Path.GetTempPath(), $"react-validation-{Guid.NewGuid():N}") };
         public SandboxOptions Sandbox { get; } = new() { Enabled = true };
         public SimulatedDocker Process { get; } = new();
+        public SimulatedTrust Trust { get; } = new();
         public WorkspaceStore BaseWorkspaces => new(Options);
         public WorkspaceStore Workspaces => new(Options, id =>
             Store?.Get(id)?.Workflow?.Revisions?.LastOrDefault(revision => revision.WorkspaceId.HasValue)?.WorkspaceId);
         public MissionStore Store { get; private set; } = null!;
         public MissionExecutionGate Gate { get; } = new();
         public string MissionPath => Path.Combine(Options.DataDirectory, "missions", $"{Id:N}.json");
+        public string Preparations => Path.Combine(Options.DataDirectory, "react-revision-validation", "preparations");
+        public string Reports => Path.Combine(Options.DataDirectory, "react-revision-validation", "reports", $"{Id:N}");
+        public string LegacyReport => Path.Combine(Options.DataDirectory, "react-revision-validation", $"{Id:N}.json");
         public GeneratedFile[] Files { get; } = [.. MissionReactTemplate.Files, new("src/App.tsx",
             "export default function App() { return <main>Project</main> }"),
             new("src/App.test.tsx", "import { test } from 'vitest'; test('test', () => {})")];
 
-        public async Task PublishAsync(bool hasRevision = true, int generationLimit = 20)
+        public async Task PublishAsync(bool hasRevision = true, int generationLimit = 20, int generationCount = 13)
         {
             Store?.Dispose();
             if (!Directory.Exists(Workspaces.GetDirectory(Id))) Workspaces.Create(Id);
@@ -334,7 +600,7 @@ public sealed class ReactRevisionValidationTests
             var mission = new MissionSnapshot(Id, "React", MissionKind.Project, null, false, MissionStatus.Failed,
                 now, now, null, null, null, false, null, "Reviewer failed", true, 0, [], [],
                 Workflow: workflow, TemplateId: MissionReactTemplate.Id, MaxTotalGenerations: generationLimit,
-                GenerationReservations: Enumerable.Range(1, 13).Select(_ => new MissionGenerationReservation(
+                GenerationReservations: Enumerable.Range(1, generationCount).Select(_ => new MissionGenerationReservation(
                     Guid.NewGuid(), "Developer", "model", now)).ToArray());
             Directory.CreateDirectory(Path.GetDirectoryName(MissionPath)!);
             var json = new JsonSerializerOptions(JsonSerializerDefaults.Web);
@@ -344,11 +610,33 @@ public sealed class ReactRevisionValidationTests
             Store = new(Options, platform, new AgentRegistry(platform), Workspaces);
         }
 
-        public ReactRevisionValidation Service(SandboxOptions? options = null)
+        public ReactRevisionValidation Service(SandboxOptions? options = null, TimeProvider? clock = null)
         {
             var current = options ?? Sandbox;
-            return new(Store, Workspaces, new(current, Workspaces, Process, Store), current, Options, Gate,
-                TimeProvider.System, NullLogger<ReactRevisionValidation>.Instance);
+            var plans = new ExecutionPlanService(Workspaces, current, Options, Store, Process, Trust);
+            return new(Store, Workspaces, new(current, Workspaces, Process, Store, imageTrust: Trust), current, Options, Gate,
+                clock ?? TimeProvider.System, NullLogger<ReactRevisionValidation>.Instance, plans, Trust);
+        }
+
+        public async Task PublishHistoricalAsync()
+        {
+            await PublishAsync(generationLimit: 12, generationCount: 6);
+            Store.Update(Id, mission => mission with
+            {
+                Status = MissionStatus.GeneratedUnverified,
+                Workflow = mission.Workflow! with
+                {
+                    Version = 1, RequirePlanApproval = true,
+                    Plan = new("Counter", "Reviewed historical project", [],
+                        Files.Select(file => new PlannedFile(file.Path, "Project file", [])).ToArray())
+                }
+            });
+            var plan = await new ExecutionPlanService(Workspaces, Sandbox, Options, Store, Process, Trust).GetStaticAsync(Id, default);
+            Store.Update(Id, mission => mission with { Workflow = mission.Workflow! with
+            {
+                PlanApproval = new(1, MissionStore.PlanFingerprint(mission, 1), true),
+                Revisions = [mission.Workflow.Revisions![0] with { Fingerprint = plan.Fingerprint, ExecutionPlan = plan }]
+            } });
         }
 
         public void Dispose()
@@ -362,23 +650,43 @@ public sealed class ReactRevisionValidationTests
     private sealed class SimulatedDocker : IContainerProcess
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
+        public bool LinuxAvailable { get; set; } = true;
+        public bool ImagePresent { get; set; } = true;
+        public string ImageId { get; set; } = Fixture.Image;
+        public bool TypeScriptSucceeds { get; set; }
+        public bool BlockBuild { get; set; }
+        public TaskCompletionSource<bool> BuildStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        public Task<ContainerProcessResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        public async Task<ContainerProcessResult> RunAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             Calls.Add(arguments);
+            if (BlockBuild && arguments[0] == "run" && arguments[^1].Contains("vite build"))
+            {
+                BuildStarted.TrySetResult(true);
+                await Task.Delay(Timeout.Infinite, cancellationToken);
+            }
             ContainerProcessResult result = arguments[0] switch
             {
-                "info" => new(0, "linux"),
-                "image" => new(0, Fixture.Image),
+                "info" => new(LinuxAvailable ? 0 : 1, LinuxAvailable ? "linux" : "Engine unavailable"),
+                "image" => new(ImagePresent ? 0 : 1, ImagePresent ? ImageId : "Image missing"),
                 "rm" => new(0, ""),
-                "run" when arguments[^1].Contains("tsc --noEmit") => new(2, "src/App.tsx(1,2): error TS2322: Type mismatch."),
+                "run" when arguments[^1].Contains("tsc --noEmit") => TypeScriptSucceeds
+                    ? new(0, "") : new(2, "src/App.tsx(1,2): error TS2322: Type mismatch."),
                 "run" when arguments[^1].Contains("vite build") => new(0, "Vite built the project."),
                 "run" when arguments[^1].Contains("vitest run") => new(0, "\nAIPLATFORM_VITEST_BEGIN\n" +
                     """{"success":true,"numTotalTests":1,"numPassedTests":1,"numFailedTests":0,"numPendingTests":0,"numFailedTestSuites":0,"testResults":[{"status":"passed","assertionResults":[{"status":"passed"}]}]}""" +
                     "\nAIPLATFORM_VITEST_END\n"),
                 _ => throw new InvalidOperationException("Unexpected simulated command.")
             };
-            return Task.FromResult(result);
+            return result;
         }
+
+    }
+
+    private sealed class SimulatedTrust : ISandboxImageTrust
+    {
+        public string? ExpectedImage { get; set; } = Fixture.Image;
+        public string? GetExpectedImageId(string imageReference) => imageReference == ReactTemplate.Image ? ExpectedImage : null;
+        public bool IsTrustedImage(string imageReference, string imageId) => GetExpectedImageId(imageReference) == imageId;
     }
 }

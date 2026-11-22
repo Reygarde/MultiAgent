@@ -6,6 +6,9 @@ namespace AIPlatform.API;
 /// <summary>Latest technical report, if a validation has been started.</summary>
 public sealed record ReactRevisionValidationReportResponse(ReactRevisionValidationReport? Report);
 
+/// <summary>Independent technical reports in reverse chronological order, including unchanged legacy reports.</summary>
+public sealed record ReactRevisionValidationReportsResponse(IReadOnlyList<ReactRevisionValidationReport> Reports);
+
 public static class ReactRevisionValidationEndpoints
 {
     public static void MapReactRevisionValidation(this WebApplication app)
@@ -17,6 +20,13 @@ public static class ReactRevisionValidationEndpoints
             try { return TypedResults.Ok(new ReactRevisionValidationReportResponse(await validations.GetReportAsync(id, token))); }
             catch (KeyNotFoundException) { return TypedResults.NotFound(); }
         }).WithName("GetReactRevisionValidationReport").WithSummary("Read the latest independent React validation report");
+
+        routes.MapGet("/reports", async Task<Results<Ok<ReactRevisionValidationReportsResponse>, NotFound>> (
+            Guid id, IReactRevisionValidation validations, CancellationToken token) =>
+        {
+            try { return TypedResults.Ok(new ReactRevisionValidationReportsResponse(await validations.GetReportsAsync(id, token))); }
+            catch (KeyNotFoundException) { return TypedResults.NotFound(); }
+        }).WithName("GetReactRevisionValidationReports").WithSummary("Read the independent React validation history");
 
         routes.MapPost("/prepare", async Task<Results<Ok<ReactRevisionValidationPreparation>, NotFound, ProblemHttpResult>> (
             Guid id, IReactRevisionValidation validations, CancellationToken token) =>

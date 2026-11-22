@@ -9,9 +9,17 @@ namespace AIPlatform.Infrastructure.Studio;
 
 public sealed class ExecutionPlanService(
     IWorkspaceStore workspaces, SandboxOptions sandbox, StudioOptions studio,
-    IMissionService? missions = null, IContainerProcess? process = null) : IExecutionPlanService
+    IMissionService? missions = null, IContainerProcess? process = null,
+    ISandboxImageTrust? imageTrust = null) : IExecutionPlanService
 {
     public async Task<ExecutionPlan> GetAsync(Guid id, CancellationToken cancellationToken, int? workflowVersion = null)
+        => await CreateAsync(id, cancellationToken, workflowVersion, inspectImage: true);
+
+    public async Task<ExecutionPlan> GetStaticAsync(Guid id, CancellationToken cancellationToken, int? workflowVersion = null)
+        => await CreateAsync(id, cancellationToken, workflowVersion, inspectImage: false);
+
+    private async Task<ExecutionPlan> CreateAsync(Guid id, CancellationToken cancellationToken,
+        int? workflowVersion, bool inspectImage)
     {
         var files = new List<WorkspaceContent>();
         foreach (var file in workspaces.List(id))
@@ -34,7 +42,7 @@ public sealed class ExecutionPlanService(
                 templateId == TwitchTemplate.Id ? TwitchTemplate.Image :
                 templateId == FullStackTemplate.Id ? FullStackTemplate.Image : DiscordTemplate.Image;
             imageReference = image;
-            if (sandbox.Enabled)
+            if (sandbox.Enabled && (inspectImage || templateId != MissionReactTemplate.Id))
             {
                 if (process is null) throw new InvalidOperationException("Docker image inspection is required for project templates.");
                 using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -45,12 +53,26 @@ public sealed class ExecutionPlanService(
                     var imageId = inspected.Output.Trim();
                     if (inspected.ExitCode == 0 && Regex.IsMatch(imageId, @"^sha256:[a-f0-9]{64}$", RegexOptions.CultureInvariant))
                     {
+                        if (imageTrust is not null && !imageTrust.IsTrustedImage(imageReference, imageId))
+                            throw new SandboxPrerequisiteException(
+                                $"Sandbox image {imageReference} is not verified against the Studio provisioning manifest.");
                         image = imageId;
                         imageDigest = imageId;
                     }
+                    else if (imageTrust is not null || templateId == MissionReactTemplate.Id)
+                        throw new SandboxPrerequisiteException($"Sandbox image {imageReference} could not be inspected.");
                 }
-                catch (Win32Exception) { }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested) { }
+                catch (Win32Exception) when (imageTrust is null && templateId != MissionReactTemplate.Id) { }
+                catch (Win32Exception)
+                {
+                    throw new SandboxPrerequisiteException($"Sandbox image {imageReference} could not be inspected.");
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested &&
+                    imageTrust is null && templateId != MissionReactTemplate.Id) { }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new SandboxPrerequisiteException($"Inspection of sandbox image {imageReference} timed out.");
+                }
             }
         }
         var operations = new List<string>

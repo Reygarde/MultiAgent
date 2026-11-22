@@ -338,9 +338,11 @@ export interface AgentConfiguration { agents: AgentSettings[]; models: Omit<Mode
 export interface Workflow {
   automaticReactCorrections?: boolean
   pendingSoftwareAgentCall?: string | null
+  pendingSoftwareCallDeliveryState?: 'Unknown' | 'DefinitelyNotSent' | 'MayHaveBeenSent'
   softwareCorrections?: {
     id: string; trigger: string; reason: string; completedGroups: number; totalGroups: number
     reviewerCapacity: number; inFlight: boolean; ready: boolean; decisions: string[]; failure?: string | null
+    callState?: string
   }[]
   workflowId: string; missionId: string; version: number
   automaticModelSelection?: boolean
@@ -521,6 +523,44 @@ export interface LocalModels {
 }
 
 export interface Sandbox { available: boolean; reason: string; engineAvailable?: boolean }
+export type EnvironmentState = 'Ready' | 'Missing' | 'Incompatible' | 'Unverified'
+export interface EnvironmentCheck {
+  id: string; name: string; status: EnvironmentState; detail: string; version: string | null
+}
+export interface StudioEnvironmentReport {
+  checkedAt: string
+  operatingSystem: string
+  architecture: string
+  system: EnvironmentCheck
+  memory: EnvironmentCheck
+  gpu: EnvironmentCheck
+  webView2: EnvironmentCheck
+  node: EnvironmentCheck
+  totalRamBytes: number | null
+  availableRamBytes: number | null
+  gpus: { name: string; totalBytes: number; availableBytes: number }[]
+  ollama: EnvironmentCheck
+  models: { name: string; status: EnvironmentState; installed: boolean | null }[]
+  dockerDesktop: EnvironmentCheck
+  dockerEngine: EnvironmentCheck
+  sandboxImages: {
+    imageReference: string; version: string; status: EnvironmentState
+    installedImageId: string | null; expectedImageId: string | null; detail: string
+  }[]
+  provisioningPackage: {
+    status: EnvironmentState; version: string | null; fingerprint: string | null
+    imageCount: number; totalBytes: number | null; detail: string
+  }
+  warnings: string[]
+}
+export interface ProvisioningPackageCheck {
+  status: EnvironmentState; version: string | null; fingerprint: string | null
+  imageCount: number; totalBytes: number | null; detail: string
+}
+export interface EnvironmentImageCheck {
+  imageReference: string; version: string; status: EnvironmentState
+  installedImageId: string | null; expectedImageId: string | null; detail: string
+}
 export interface ExecutionPlan {
   fingerprint: string
   image: string
@@ -572,6 +612,7 @@ export interface PlannerAttemptDiagnostic {
   criteria: { id: string; requirement: string }[]
   errors: { criterionId: string | null; rule: string; field: string; path: string | null; explanation: string }[]
   rawTraceAvailable: boolean
+  dependencyNormalizations?: { field: string; path: string; package: string }[] | null
 }
 export type CustomAgentProjectType = 'React' | 'DotNet'
 

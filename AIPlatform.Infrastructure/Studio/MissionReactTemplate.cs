@@ -34,26 +34,47 @@ public static class MissionReactTemplate
     private static readonly Regex ProjectIntroduction = new(
         @"^\s*(?:please\s+|veuillez\s+)?(?:create|build|develop|make|design|implement|deliver|construct|creer|cree|developper|concevoir|realiser|livrer)\b[^.!?\r\n]{0,180}\b(application|app|project|projet|site|website|tool|outil|software|logiciel|system|platform|plateforme|solution)\b",
         RegexOptions.CultureInvariant);
+    private static readonly Regex UnsupportedTestRunner = new(
+        @"(?i)(?:\bjest\b(?![-/])|@testing-library/jest-dom/extend-expect)",
+        RegexOptions.CultureInvariant);
     public const string PlanSchema = """
         {"type":"object","properties":{
         "name":{"type":"string","maxLength":80},"description":{"type":"string","maxLength":1000},
         "decisions":{"type":"array","maxItems":8,"items":{"type":"string","maxLength":500}},
+        "dependencies":{"type":"array","description":"npm package names already declared in the immutable scaffold; never file paths.","maxItems":32,"uniqueItems":true,"items":{"type":"string"}},
         "files":{"type":"array","minItems":2,"maxItems":12,"items":{"type":"object","properties":{
         "path":{"type":"string"},"purpose":{"type":"string","maxLength":500},
-        "dependsOn":{"type":"array","items":{"type":"string"}}},"required":["path","purpose","dependsOn"],"additionalProperties":false}},
+        "dependsOn":{"type":"array","description":"Exact paths of other files declared in files. No npm packages. Use [] when there are no internal file dependencies.","maxItems":12,"items":{"type":"string"}}},"required":["path","purpose","dependsOn"],"additionalProperties":false}},
         "criterionCoverage":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","properties":{
         "criterionId":{"type":"string"},"paths":{"type":"array","minItems":2,"maxItems":12,"items":{"type":"string"}},
         "explanation":{"type":"string","maxLength":500}},"required":["criterionId","paths","explanation"],"additionalProperties":false}}
-        },"required":["name","description","decisions","files","criterionCoverage"],"additionalProperties":false}
+        },"required":["name","description","decisions","dependencies","files","criterionCoverage"],"additionalProperties":false}
         """;
+
+    public static IReadOnlyList<string> AllowedDependencies { get; } = LoadAllowedDependencies();
 
     public static string PlanSchemaFor(ProjectSizingProfile? sizing)
     {
-        if (sizing is null) return PlanSchema;
         var schema = JsonNode.Parse(PlanSchema)!;
-        schema["properties"]!["files"]!["maxItems"] = sizing.MaxPlannedFiles;
-        schema["properties"]!["criterionCoverage"]!["maxItems"] = sizing.MaxCriteria;
+        var allowed = new JsonArray();
+        foreach (var dependency in AllowedDependencies) allowed.Add(dependency);
+        schema["properties"]!["dependencies"]!["items"]!["enum"] = allowed;
+        if (sizing is not null)
+        {
+            schema["properties"]!["files"]!["maxItems"] = sizing.MaxPlannedFiles;
+            schema["properties"]!["criterionCoverage"]!["maxItems"] = sizing.MaxCriteria;
+        }
         return schema.ToJsonString();
+    }
+
+    private static IReadOnlyList<string> LoadAllowedDependencies()
+    {
+        using var manifest = JsonDocument.Parse(ReactTemplate.Files.Single(file => file.Path == "package.json").Content);
+        return new[] { "dependencies", "devDependencies" }
+            .SelectMany(section => manifest.RootElement.GetProperty(section).EnumerateObject())
+            .Select(dependency => dependency.Name)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
     }
 
     public static string ReviewSchema(string original, ProjectSizingProfile? sizing = null)
@@ -278,6 +299,29 @@ public static class MissionReactTemplate
         return result.ToString().Normalize(NormalizationForm.FormC);
     }
 
+    public static ProjectPlan NormalizePlanDependencies(ProjectPlan plan,
+        out IReadOnlyList<PlannerDependencyNormalization> normalizations)
+    {
+        var changes = new List<PlannerDependencyNormalization>();
+        normalizations = changes;
+        if (plan.Files is null || plan.Files.Any(file => file is null)) return plan;
+        var paths = plan.Files.Select(file => file.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var files = plan.Files.Select((file, fileIndex) =>
+        {
+            if (file.DependsOn is null || file.DependsOn.Count > 12) return file;
+            var retained = new List<string>();
+            for (var index = 0; index < file.DependsOn.Count; index++)
+            {
+                var dependency = file.DependsOn[index];
+                if (AllowedDependencies.Contains(dependency, StringComparer.Ordinal) && !paths.Contains(dependency))
+                    changes.Add(new($"files[{fileIndex}].dependsOn[{index}]", file.Path, dependency));
+                else retained.Add(dependency);
+            }
+            return retained.Count == file.DependsOn.Count ? file : file with { DependsOn = retained };
+        }).ToArray();
+        return changes.Count == 0 ? plan : plan with { Files = files };
+    }
+
     public static ProjectPlan Prepare(ProjectPlan plan, MissionSnapshot mission)
     {
         var maximum = mission.Sizing?.MaxPlannedFiles ?? 12;
@@ -315,6 +359,21 @@ public static class MissionReactTemplate
             errors.Add(new(null, "MissingBusinessTest", "files", null, "Plan at least one editable .test.ts or .test.tsx business test."));
         if (string.IsNullOrWhiteSpace(plan.OriginalRequest) || plan.AcceptanceCriteria is not { Count: > 0 })
             errors.Add(new(null, "MissingOriginalCriteria", "acceptanceCriteria", null, "The original request and frozen criteria are required."));
+        if (plan.Dependencies is null || plan.Dependencies.Count > AllowedDependencies.Count ||
+            plan.Dependencies.Distinct(StringComparer.Ordinal).Count() != plan.Dependencies.Count)
+            errors.Add(new(null, "InvalidDependencies", "dependencies", null,
+                "Declare each scaffold dependency used by the plan once; new packages are not supported."));
+        else
+            foreach (var dependency in plan.Dependencies.Where(dependency =>
+                         !AllowedDependencies.Contains(dependency, StringComparer.Ordinal)))
+                errors.Add(new(null, "UnsupportedDependency", "dependencies", dependency,
+                    "Only dependencies already present in the immutable React scaffold are supported."));
+        var planText = string.Join("\n", new[] { plan.Name, plan.Description }
+            .Concat(plan.Decisions ?? [])
+            .Concat(plan.Files.SelectMany(file => new[] { file.Path, file.Purpose })));
+        if (UnsupportedTestRunner.IsMatch(planText))
+            errors.Add(new(null, "UnsupportedTestRunner", "decisions", null,
+                "The scaffold uses Vitest; Jest and the obsolete jest-dom/extend-expect import are unsupported."));
         var criteria = plan.AcceptanceCriteria ?? [];
         if (sizing is not null && criteria.Count > sizing.MaxCriteria)
             errors.Add(new(null, "TooManyCriteria", "acceptanceCriteria", null, "The frozen criterion limit was exceeded."));
@@ -399,7 +458,11 @@ public static class MissionReactTemplate
                     errors.Add(new(null, "InvalidDependencies", $"files[{index}].dependsOn", file.Path, "Provide at most 12 declared file dependencies."));
                 else
                     foreach (var dependency in file.DependsOn.Where(path => plan.Files.All(item => item.Path != path)))
-                        errors.Add(new(null, "UnknownDependency", $"files[{index}].dependsOn", dependency, "The dependency is absent from the planned files."));
+                        errors.Add(new(null, "UnknownDependency", $"files[{index}].dependsOn", dependency,
+                            "files[].dependsOn accepts only exact paths of other planned files, not npm packages. " +
+                            "Use [] when there are no internal file dependencies. " +
+                            "Declare npm packages only in dependencies, using exact scaffold names: " +
+                            string.Join(", ", AllowedDependencies) + ". Unknown names are not converted to other packages."));
             }
             if (errors.Count == 0)
                 try { WorkflowGraph.Validate(plan.Files.Select(file => new WorkflowStep(file.Path, "File", "Developer", file.DependsOn)).ToArray()); }

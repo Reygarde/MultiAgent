@@ -10,6 +10,12 @@
 @plannerId = 88888888-8888-8888-8888-888888888888
 @reviewerId = 99999999-9999-9999-9999-999999999999
 
+### Read-only mission resumption assessment (no generation)
+GET {{baseUrl}}/missions/{{missionId}}/resume-eligibility
+
+### Explicit resumption only after reviewing eligibility; may start agents and consume budget
+POST {{baseUrl}}/missions/{{missionId}}/resume
+
 ### Explicit specializations, including for a future installed tag; no generation
 PUT {{baseUrl}}/model-library/specializations
 Content-Type: application/json

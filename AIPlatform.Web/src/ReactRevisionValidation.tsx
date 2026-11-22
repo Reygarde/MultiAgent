@@ -11,6 +11,8 @@ interface ValidationPlan {
   image: string
   timeoutSeconds: number
   fingerprint: string
+  preparationEvidenceId?: string | null
+  files?: { path: string; sha256: string }[] | null
   stages: { name: string; arguments: string[] }[]
 }
 
@@ -35,6 +37,17 @@ const statuses: Record<string, string> = {
   Running: 'En cours', Succeeded: 'Réussi', Failed: 'Échec', Unavailable: 'Indisponible', Interrupted: 'Interrompu',
 }
 
+function ValidationResults({ results }: { results: ValidationReport['results'] }) {
+  return <>{results.map(result => <details key={result.stage} className="technical-logs">
+    <summary>{labels[result.stage] ?? result.stage} · {statuses[result.status] ?? result.status}
+      {' · '}code de sortie : {result.exitCode ?? 'indisponible'}</summary>
+    {result.totalTests != null && <p>{result.totalTests} tests · {result.failedTests ?? 0} échecs</p>}
+    {result.diagnostics?.items.map((item, index) =>
+      <p key={index}>{item.file}{item.line != null && `:${item.line}`} {item.code} : {item.message}</p>)}
+    <pre>{result.log}</pre>
+  </details>)}</>
+}
+
 interface CorrectionPlan {
   fingerprint: string
   model: string
@@ -48,30 +61,32 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
 }) {
   const path = `/missions/${encodeURIComponent(id)}/react-revision-validation`
   const [preparation, setPreparation] = useState<Preparation | null>(null)
-  const [report, setReport] = useState<ValidationReport | null>(null)
+  const [reports, setReports] = useState<ValidationReport[]>([])
+  const [historyRefresh, setHistoryRefresh] = useState(0)
   const [busy, setBusy] = useState<'prepare' | 'authorize' | 'plan' | 'correct' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [correctionText, setCorrectionText] = useState<string | null>(null)
   const [correctionPlan, setCorrectionPlan] = useState<CorrectionPlan | null>(null)
   const [publication, setPublication] = useState<{ version: number; changedPaths: string[] } | null>(null)
+  const report = reports[0]
   const running = report?.status === 'Running'
 
   useEffect(() => {
     const controller = new AbortController()
     let timer: ReturnType<typeof setTimeout>
     const load = () => {
-      void request<{ report: ValidationReport | null }>(`${path}/report`, { signal: controller.signal, cache: 'no-store' })
-        .then(({ report: latest }) => {
+      void request<{ reports: ValidationReport[] }>(`${path}/reports`, { signal: controller.signal, cache: 'no-store' })
+        .then(({ reports: history }) => {
           if (controller.signal.aborted) return
-          setReport(latest)
-          if (latest?.status === 'Running') timer = setTimeout(load, 2000)
+          setReports(history)
+          if (history[0]?.status === 'Running') timer = setTimeout(load, 2000)
         }).catch(reason => {
           if (!controller.signal.aborted) setError(errorMessage(reason))
         })
     }
     load()
     return () => { controller.abort(); clearTimeout(timer) }
-  }, [path])
+  }, [path, historyRefresh])
 
   const prepare = async () => {
     setBusy('prepare'); setError(null); setPreparation(null)
@@ -82,11 +97,12 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
   const authorize = async (value: Preparation) => {
     setBusy('authorize'); setError(null); setPreparation(null)
     try {
-      setReport(await request<ValidationReport>(`${path}/authorize`, {
+      const completed = await request<ValidationReport>(`${path}/authorize`, {
         method: 'POST', body: JSON.stringify({ approved: true, requestId: value.requestId, fingerprint: value.plan.fingerprint }),
-      }))
+      })
+      setReports(previous => [completed, ...previous.filter(item => item.runId !== completed.runId)])
     } catch (reason) { setError(errorMessage(reason)) }
-    finally { setBusy(null) }
+    finally { setBusy(null); setHistoryRefresh(value => value + 1) }
   }
   const plan = preparation?.plan
   const canCorrect = canPrepare && report?.status === 'Failed' && report.plan.revisionFingerprint === currentRevision &&
@@ -116,6 +132,8 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
   return <section aria-label="Validation indépendante de la révision React">
     <h3>Validation indépendante de la révision</h3>
     <p>Résultats techniques uniquement : ils ne valident pas les critères fonctionnels et ne changent pas le statut de la mission.</p>
+    <p>Pour une révision historique sans image figée, la préparation inspecte Docker et exige le manifeste installé vérifié.
+      Aucun agent ni conteneur ne démarre avant une autorisation distincte.</p>
     {canPrepare && !plan && <button className="button secondary" disabled={busy !== null || running} onClick={() => void prepare()}>
       Valider cette révision
     </button>}
@@ -125,6 +143,7 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
       <p>Mission <code>{plan.missionId}</code> · révision v{plan.revisionVersion} · {plan.fileCount} fichiers</p>
       <p>Empreinte de la révision : <code>{plan.revisionFingerprint}</code></p>
       <p>Empreinte d’exécution : <code>{plan.fingerprint}</code></p>
+      {plan.preparationEvidenceId && <p>Preuve de préparation distincte : <code>{plan.preparationEvidenceId}</code></p>}
       <p>Image locale {plan.imageReference} : <code>{plan.image}</code></p>
       <p>Réseau et téléchargement désactivés ; racine et copie source en lecture seule ; utilisateur non privilégié,
         capacités supprimées, aucun port ni socket Docker. Répertoires temporaires bornés et délai de {plan.timeoutSeconds} s par étape.</p>
@@ -141,7 +160,7 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
     {error && <p role="alert" className="notice danger">{error}</p>}
     {publication && <p role="status">Révision v{publication.version} publiée sans compilation. Fichiers modifiés : {publication.changedPaths.join(', ')}.</p>}
     {report && <div>
-      <p>Dernier rapport · révision v{report.plan.revisionVersion} · {statuses[report.status] ?? report.status}
+      <p>Dernière validation technique · révision v{report.plan.revisionVersion} · {statuses[report.status] ?? report.status}
         {' · '}{new Date(report.startedAt).toLocaleString('fr-FR')}</p>
       <p><code>{report.plan.revisionFingerprint}</code></p>
       {report.error && <p role="status">{report.error}</p>}
@@ -163,14 +182,25 @@ export function ReactRevisionValidation({ id, canPrepare, currentRevision, onPub
         <button className="button primary" disabled={busy !== null}
           onClick={() => void correct()}>{correctionPlan ? 'Lancer la correction Developer' : 'Préparer le plan de correction'}</button>
       </div>}
-      {report.results.map(result => <details key={result.stage} className="technical-logs">
-        <summary>{labels[result.stage] ?? result.stage} · {statuses[result.status] ?? result.status}
-          {' · '}code de sortie : {result.exitCode ?? 'indisponible'}</summary>
-        {result.totalTests != null && <p>{result.totalTests} tests · {result.failedTests ?? 0} échecs</p>}
-        {result.diagnostics?.items.map((item, index) =>
-          <p key={index}>{item.file}{item.line != null && `:${item.line}`} {item.code} : {item.message}</p>)}
-        <pre>{result.log}</pre>
-      </details>)}
+      <ValidationResults results={report.results} />
     </div>}
+    {reports.length > 0 && <details>
+      <summary>Historique des validations ({reports.length})</summary>
+      {reports.map(item => <article key={item.runId}>
+        <p>Révision v{item.plan.revisionVersion} · {statuses[item.status] ?? item.status}
+          {' · '}{new Date(item.startedAt).toLocaleString('fr-FR')} · <code>{item.runId}</code></p>
+        <p>{item.results.map(result => `${labels[result.stage] ?? result.stage} : ${statuses[result.status] ?? result.status}`).join(' · ')}</p>
+        {item.error && <p>{item.error}</p>}
+        <ValidationResults results={item.results} />
+        <details><summary>Identités et empreintes</summary>
+          <p>Révision : <code>{item.plan.revisionFingerprint}</code></p>
+          <p>Plan : <code>{item.plan.fingerprint}</code></p>
+          <p>Image : <code>{item.plan.image}</code></p>
+          {item.plan.files?.length ? <ul>{item.plan.files.map(file =>
+            <li key={file.path}>{file.path} · <code>{file.sha256}</code></li>)}</ul>
+            : <p>Rapport historique : empreintes individuelles liées à la révision et au plan de préparation.</p>}
+        </details>
+      </article>)}
+    </details>}
   </section>
 }

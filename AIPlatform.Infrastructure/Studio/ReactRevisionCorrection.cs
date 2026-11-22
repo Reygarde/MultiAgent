@@ -286,10 +286,12 @@ public sealed class ReactRevisionCorrection(MissionStore missions, IWorkspaceSto
     }
 
     internal static LlmRequest BuildGroupCall(MissionSnapshot mission, AgentDefinition developer, ModelDefinition model,
-        ReactCorrectionGroup group, IReadOnlyDictionary<string, GeneratedFile> sources, IEnumerable<object> diagnostics, int remaining)
+        ReactCorrectionGroup group, IReadOnlyDictionary<string, GeneratedFile> sources, IEnumerable<object> diagnostics,
+        int remaining, bool compactPatchContext = false)
     {
         var flow = mission.Workflow!;
         var paths = group.Paths.ToHashSet(StringComparer.Ordinal);
+        var useCompactPatchContext = compactPatchContext && group.PatchTargets is not null;
         var allPaths = sources.Keys.ToHashSet(StringComparer.Ordinal);
         var dependencies = new HashSet<string>(StringComparer.Ordinal);
         void Include(string path)
@@ -299,18 +301,31 @@ public sealed class ReactRevisionCorrection(MissionStore missions, IWorkspaceSto
                 .Concat((flow.Plan?.Files ?? []).Where(file => file.Path == path).SelectMany(file => file.DependsOn)))
                 Include(dependency);
         }
-        foreach (var path in paths) Include(path);
-        dependencies.ExceptWith(paths);
+        GeneratedFile[] targetFiles;
+        GeneratedFile[] dependencyFiles;
+        if (useCompactPatchContext)
+        {
+            targetFiles = [];
+            dependencyFiles = [];
+        }
+        else
+        {
+            foreach (var path in paths) Include(path);
+            dependencies.ExceptWith(paths);
+            targetFiles = group.Paths.Select(path => sources[path]).ToArray();
+            dependencyFiles = dependencies.Order(StringComparer.Ordinal).Select(path => sources[path]).ToArray();
+        }
         var ids = (flow.Plan?.CriterionCoverage ?? []).Where(item => item.Paths.Any(paths.Contains))
             .Select(item => item.CriterionId).ToHashSet(StringComparer.Ordinal);
         var input = JsonSerializer.SerializeToNode(new
         {
             group.Instructions, AllowedPaths = group.Paths,
             Criteria = flow.AcceptanceCriteria.Where(criterion => ids.Contains(criterion.Id)),
-            Targets = group.Paths.Select(path => sources[path]),
-            Dependencies = dependencies.Order(StringComparer.Ordinal).Select(path => sources[path]),
+            Targets = targetFiles,
+            Dependencies = dependencyFiles,
             Diagnostics = diagnostics, RemainingGenerations = remaining
         }, Json)!.AsObject();
+        if (useCompactPatchContext) input.Remove("targets");
         if (group.PatchTargets is { } targets)
         {
             ReactCorrectionPatches.ValidateTargets(targets, group.Paths, sources);

@@ -177,6 +177,58 @@ aux sources et a leur empreinte. Toute correction de sources invalide l'accord
 precedent et impose une nouvelle autorisation avant de poursuivre Docker.
 Un constat Reviewer `Unverified` ne devient pas une preuve fonctionnelle.
 
+Pour React v2, generation, reparations AST et revue statique ne sondent pas
+Docker. La revision conserve son descripteur statique sans digest invente.
+Apres la revue, les prerequis Docker sont controles ; leur absence donne
+`GeneratedUnverified` avec une raison explicite, sans executer de code.
+Le plan d'execution verifie est conserve separement dans
+`ProjectRevision.PreparedExecutionPlan`, sans reecrire l'empreinte statique.
+L'approbation a usage unique exige cette revision et l'identite immuable
+actuellement verifiee de l'image.
+
+Le bouton **Valider cette revision** peut aussi preparer une revision React v2
+historique `GeneratedUnverified` dont le descripteur statique ne contient pas
+encore de digest. Il verifie le plan approuve, les checkpoints, les sources,
+la configuration actuelle et l'image locale contre le manifeste de confiance
+verifie dans la session. Seules des inspections Docker sont effectuees.
+La liaison immuable est conservee dans une preuve distincte sous
+`react-revision-validation/preparations`, avec un `PreparedExecutionPlan` :
+la mission, sa revision et ses budgets ne sont pas reecrits. Une preparation
+identique reutilise sa preuve ; une nouvelle approbation explicite, a usage
+unique, reste obligatoire. Sources, mission, configuration, preuve et image
+sont recontroles avant execution ; aucun agent ni reservation LLM ne sont
+necessaires. Le rapport independant reste technique et ne change pas le statut
+de la mission.
+
+Chaque validation independante conserve des snapshots immuables par execution
+sous `react-revision-validation/reports` : demarrage, etapes terminees et
+resultat final. Ils lient mission, revision, manifeste SHA-256 des fichiers,
+image et plan d'execution. Un arret avant le resultat final est presente comme
+interrompu apres redemarrage, sans relance automatique. Le fichier historique
+de rapport unique reste lisible et n'est ni migre ni ecrase. L'interface montre
+l'historique technique separement du statut du workflow et des appels ambigus.
+Un rapport technique reussi ne valide ni le workflow ni ses criteres fonctionnels.
+Les revisions historiques bloquees par un appel ambigu ne deviennent pas
+executables par cette conservation ; les autorisations Docker restent distinctes.
+
+Un candidat AST `Ready` ne peut etre reutilise que si son manifeste, les
+preuves de checkpoint et son empreinte correspondent au draft courant.
+Il est revalide avec les controles actuels, sans reappliquer l'AST ni reserver
+une generation. Pour une generation initiale interrompue sans revision publiee,
+une reprise explicite peut autoriser la revalidation d'un ancien candidat AST
+devenu invalide. Le checkpoint original reste intact ; une trace distincte lie
+mission, plan, configuration, sources et rejet statique reel, sans recu LLM
+fabrique. Les diagnostics sont conserves avant preparation d'une nouvelle
+correction Developer avec les limites normales. Cette preparation ne reserve
+aucune generation et ne reapplique pas l'AST.
+Apres interruption, la meme preparation est reutilisee. Une intention d'appel
+sans aucune reservation correspondante peut reprendre explicitement ; un appel
+reserve mais non valide reste bloque, sans rejeu ni remboursement.
+`src/App.tsx` ne contient ni runtime de tests ni tests embarques ;
+`src/App.test.tsx` importe et teste le vrai `App` depuis `./App`.
+Les copies locales et contenus application/tests identiques sont des
+diagnostics Developer, jamais des corrections AST silencieuses.
+
 Validation de cette integration : modeles, controles et Docker simules seulement,
 dans des repertoires temporaires. Une validation reelle doit etre autorisee
 separement, disposer des modeles locaux et du helper TypeScript, puis obtenir
@@ -691,8 +743,22 @@ une generation initiale et au plus deux corrections. Apres un rejet du validateu
 le prochain appel recoit la demande originale, les criteres figes, le plan rejete
 disponible et les diagnostics exacts depuis le magasin prive existant. Les memes
 regles de fichiers/couverture et le meme schema de reponse restent obligatoires.
-Seul le modele peut proposer une correction : le moteur ne fabrique aucune
-couverture et ne supprime aucun critere pour faire accepter le resultat.
+Pour React v2, `dependencies` declare uniquement les packages npm du scaffold ;
+`files[].dependsOn` declare les chemins exacts d'autres fichiers planifies, ou
+`[]` sans dependance interne. Avant validation, le moteur retire de `dependsOn`
+uniquement les noms exacts de packages du scaffold qui ne correspondent a aucun
+chemin planifie (comparaison des chemins sans distinction de casse). Les retraits
+sont conserves dans les diagnostics prives et affiches dans Studio, y compris si
+le plan reste rejete. Aucun package n'est ajoute. References inconnues, ambigues,
+doublons de chemins et cycles restent soumis aux validateurs existants. Les listes
+de dependances depassant leur plafond ne sont pas normalisees.
+Si toutes les validations passent, aucune correction LLM ni reservation
+supplementaire n'est necessaire. Sinon, seul le modele peut proposer une
+correction : le moteur ne fabrique aucune couverture et ne supprime aucun critere.
+Le prompt et le schema enumerent les noms exacts des packages autorises. Un
+diagnostic `UnknownDependency` rappelle que `dependsOn` attend des chemins de
+fichiers et indique ces noms, sans convertir un alias tel que
+`react-testing-library` en `@testing-library/react`.
 
 Les tentatives restent dans l'historique et les diagnostics prives (memes limites,
 retention et consentement separe pour les traces brutes). Le routage et l'escalade
@@ -1673,6 +1739,20 @@ l'ancien accord et reprend la correction interrompue ou revalide les sources
 existantes, puis impose une nouvelle revue/autorisation. Les missions verifiees, supprimees ou anciennes sans
 workflow ne peuvent pas etre reprises ; une nouvelle mission reste possible.
 
+Avant une reprise, Studio consulte `GET /api/missions/{id}/resume-eligibility` sans
+reserver de generation. Une confirmation distincte indique que les agents peuvent
+etre relances ; Docker exige toujours sa propre approbation. Le POST recontrole
+les memes gardes et renvoie un motif exploitable en cas de 409. Un appel Ollama
+potentiellement envoye, ou sans preuve suffisante de non-envoi, bloque la reprise :
+conserver les reservations et checkpoints et examiner les preuves avant toute
+recuperation manuelle ; aucun rejeu ni remboursement automatique n'est effectue.
+Si le resultat de l'appel reste inconnu, il n'existe pas de reprise automatique
+de cette mission : ses sources peuvent etre exportees depuis Projets pour examen,
+sans execution ni modification de l'historique.
+Pour une revue interrompue apres publication, un candidat de correction anterieur
+reste verifiable avec sa version d'origine seulement si sa revision, son draft,
+son plan et ses recus concordent ; les preuves et reservations restent intactes.
+
 Chaque modification collaborative invalide l'accord precedent. L'empreinte est
 recontrolee avant build ET tests. L'option historique `approveSandboxExecution`
 ne court-circuite pas l'accord post-generation d'un nouveau workflow. Les trois
@@ -1892,10 +1972,100 @@ de `StudioData` du depot vers le stockage Desktop vide. Ne pas fusionner des
 identifiants existants sans revue ; les workspaces et leurs metadonnees doivent
 etre copies ensemble. Une reinstallation conserve les donnees AppData.
 
+### Sauvegarde et restauration Studio (Desktop)
+
+Dans **Missions**, Desktop propose **Sauvegarder Studio** et **Restaurer Studio**.
+L'archive ZIP versionnee contient un manifeste, un inventaire et une empreinte
+SHA-256 par fichier. La capture bloque les ecritures API, attend les traitements
+Studio, puis compare les empreintes avant et apres la copie. Il faut arreter les
+missions, collaborations, bots Twitch et applications locales en cours.
+
+La restauration commence par une verification et un apercu : elle remplace toutes
+les donnees internes, sans fusion, affiche les missions dont l'identifiant existe
+deja et controle l'espace disque. Une confirmation distincte est requise pour le
+remplacement et pour les conflits d'identifiants. Le remplacement est prepare a
+part, avec retour a l'etat precedent en cas d'echec. Apres validation, le backend
+reste bloque jusqu'a son redemarrage par le lanceur Desktop. Les approbations
+Docker/locales et les autorisations externes persistees sont revoquees ; les
+missions qui etaient en attente ou en cours sont arretees.
+
+Les limites actuelles sont de 512 Mio pour l'archive, 2 Gio de contenu decompresse,
+256 Mio par fichier et 100 000 fichiers. Les valeurs de parametres dont le nom
+indique un secret sont omises ; une archive contenant une valeur detectee comme
+identifiant ou jeton est refusee. L'archive n'est pas chiffree : la conserver dans
+un emplacement protege.
+
+Ne sont pas exportes : poids/cache Ollama, images Docker, identifiants du
+Gestionnaire d'informations d'identification Windows, jeton Desktop, binaires,
+outils installes, projets choisis dans des dossiers externes et sauvegardes de
+workspaces externes. Les chemins externes peuvent necessiter une nouvelle
+selection. Installer ou verifier separement Ollama et ses modeles, Docker et ses
+images sandbox, Node.js et le helper React/TypeScript, ainsi que le SDK .NET et
+les workloads necessaires. Aucune dependance n'est installee automatiquement et
+aucune donnee n'est envoyee dans le cloud.
+
+### Diagnostic et preparation d'un nouveau PC
+
+L'ecran **Environnement** effectue une verification a la demande. Il distingue
+la detection d'un composant de son fonctionnement valide : Windows x64, RAM,
+GPU/VRAM, presence du runtime WebView2, version Node.js, reponse de l'API
+Ollama, modeles configures (y compris les modeles des agents personnalises),
+presence de Docker Desktop, moteur Linux et identifiants des images sandbox.
+L'inspection ne lance aucun conteneur. Le diagnostic Node execute uniquement
+`node.exe --version` depuis `%ProgramFiles%\nodejs`; les sondes Docker sont
+`docker info` et `docker image inspect`.
+
+Les templates utilisent ces images versionnees :
+
+| Image locale | Version recette | Utilisee par | Dependances principales |
+| --- | --- | --- | --- |
+| `aiplatform-sandbox:net10` | `net10-v1` | .NET et Twitch | SDK .NET 10 epingle par digest, xUnit 2.9.3 et Microsoft.NET.Test.Sdk 17.14.1 |
+| `aiplatform-sandbox:discord-net10` | `discord-net10-v1` | Discord | image .NET de base, Discord.Net 3.20.2 et cache NuGet |
+| `aiplatform-react-sandbox:1.0.0` | `react-v1` | React | Node.js 22 epingle par digest, dependances du package-lock React |
+| `aiplatform-fullstack-sandbox:1.0.0` | `fullstack-v2` | FullStack | images .NET/React, lockfile NuGet et feed local SQLite/xUnit |
+
+Avant le packaging d'une version Desktop, le poste de livraison doit construire
+les quatre images et produire le paquet embarque :
+
+```powershell
+.\tools\Build-SandboxProvisioning.ps1 -ConfirmDockerBuild
+Set-Location .\AIPlatform.Web
+npm run desktop:build
+```
+
+Le script exige une confirmation explicite, un moteur Docker Linux et les
+recettes du depot. Il exporte un tar unique, un manifeste versionne avec les
+identifiants Docker, les empreintes des recettes et le SHA-256 de l'archive.
+Tauri embarque ce repertoire comme ressource ; le nouveau PC ne depend pas du
+depot Git. L'ecran verifie le manifeste et l'archive, puis exige une confirmation
+distincte avant `docker load`. Il ne lance ni `docker pull`, ni build, ni
+conteneur. Les images deja presentes ne sont marquees **Pretes** que si leur
+identifiant correspond au manifeste verifie ; l'approbation explicite par
+mission reste requise. Toute modification d'une source sandbox exige de
+regenerer et versionner le paquet.
+
+Sur le nouveau PC, installer manuellement l'installateur Studio, Node.js x64
+20.14 ou ulterieur dans `%ProgramFiles%\nodejs`, WebView2 Evergreen si requis,
+Ollama avec les modeles necessaires, puis Docker Desktop avec le moteur Linux.
+Ouvrir **Environnement**, lancer le diagnostic, verifier le paquet, et seulement
+ensuite confirmer son import. Apres restauration Studio, cette page signale les
+modeles et images absents ; les chemins de projets externes doivent etre
+reselectionnes et toute autorisation d'execution doit etre redonnee. Aucune
+ancienne autorisation n'est restauree.
+
+Le SHA-256 detecte les archives corrompues par rapport au manifeste embarque,
+mais ne constitue pas a lui seul une signature editeur. L'installateur Windows
+actuel etant non signe, l'authenticite de l'editeur n'est pas certifiee. Les
+versions Discord.Net sont epinglees directement dans le projet de cache, mais
+les dependances NuGet transitives de cette recette n'ont pas de lockfile
+commis ; le manifeste fige et identifie l'image livree, pas une reconstruction
+bit-a-bit garantie.
+
 ### Construire l'application Windows
 
 Prerequis developpeur : .NET SDK 10, Node/npm, Rust MSVC indique par
-`rust-toolchain.toml`, Visual Studio 2022 avec outils C++ et Windows SDK, WebView2.
+`rust-toolchain.toml`, Visual Studio 2022 ou 2026, ou Build Tools correspondants
+avec MSVC x64/x86 et Windows SDK, ainsi que WebView2.
 Le CLI Tauri telecharge ses outils NSIS lors du premier packaging ; un acces
 reseau aux registres npm/crates et outils officiels est necessaire.
 
@@ -1945,6 +2115,24 @@ mise a jour Windows, ni le lancement du frontend natif apres installation.
 La verification du script NSIS montre que le mode `/UPDATE` n'efface pas
 les donnees applicatives ; ne jamais cocher une suppression des donnees lors
 d'une desinstallation. Conserver une sauvegarde avant toute mise a jour.
+
+#### Livraison corrective Windows 0.6.8
+
+La version 0.6.8 corrige la detection de WebView2, renforce la verification du
+manifeste et des ressources sandbox, et limite le contrat du Planner React v2
+aux dependances du scaffold et a Vitest. Les corrections TS1002 ne sont
+appliquees que lorsque leurs ancres sont exactes et uniques ; le preflight et sa
+marge de securite restent inchanges et les diagnostics indiquent les estimations,
+le contrat choisi et le motif d'un refus, sans enregistrer prompts ni reponses.
+Une reprise apres echec avant envoi exige une preuve persistante de non-envoi ;
+les appels ambigus restent refuses et les reservations de generations sont
+conservees.
+
+Validation de la livraison : 116 tests backend cibles et 114 tests frontend
+reussis ; le build `desktop:build` a produit l'installateur NSIS x64. Le build
+frontend signale toujours un chunk JavaScript superieur a 500 kB, sans faire
+echouer la compilation. Le paquet sandbox existant a ete reutilise, sans
+reconstruction d'image Docker.
 
 ## 1. Prerequis et demarrage
 
